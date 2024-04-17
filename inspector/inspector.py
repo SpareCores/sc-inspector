@@ -1,4 +1,8 @@
 import git
+import logging
+import sys
+
+logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
 
 REPO_PATH = "/repo/sc-inspector-data"
 repo = git.Repo(REPO_PATH)
