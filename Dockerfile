@@ -4,6 +4,10 @@ ENV REPO_PATH="/repo/sc-inspector-data"
 ENV VIRTUAL_ENV="/venv/inspector"
 ENV PATH=${VIRTUAL_ENV}/bin:${PATH}
 VOLUME ${REPO_PATH}
+RUN \
+    git config --global --add safe.directory /repo/sc-inspector-data && \
+    git config --global user.email "inspector@sparecores.com" && \
+    git config --global user.name "Spare Cores"
 
 FROM base as build
 RUN \
