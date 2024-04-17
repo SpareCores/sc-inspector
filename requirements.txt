@@ -1,0 +1,4 @@
+GitPython
+sparecores-data
+sqlmodel
+sparecores-crawler
