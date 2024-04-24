@@ -27,3 +27,11 @@ def push_path(path: str | os.PathLike, msg: str):
     origin = repo.remote(name="origin")
     origin.pull()
     origin.push()
+
+
+def gha_url():
+    """Return GHA run URL."""
+    url = os.environ.get("GITHUB_SERVER_URL")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    run_id = os.environ.get("GITHUB_RUN_ID")
+    return f"{url}/{repo}/actions/runs/{run_id}"
