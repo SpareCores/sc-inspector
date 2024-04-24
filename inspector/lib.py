@@ -11,6 +11,7 @@ import inspect
 import json
 import math
 import os
+import repo
 import subprocess
 import threading
 import time
@@ -192,9 +193,12 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike) -> tup
 
 
 def write_meta(meta: Meta, file: str | os.PathLike) -> None:
+    task_dir = os.path.dirname(file)
+    os.makedirs(task_dir, exist_ok=True)
     with open(file, "w") as f:
         f.write(meta.model_dump_json())
-    # XXX: git commit/push
+    if os.environ.get("GITHUB_TOKEN"):
+        repo.push_path(task_dir, f"Starting server from {repo.gha_url()}")
 
 
 def run_task(q: Queue, data_dir: str | os.PathLike) -> None:

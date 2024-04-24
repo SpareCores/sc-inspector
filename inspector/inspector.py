@@ -1,5 +1,6 @@
 from sc_crawler.tables import Server
 from sqlmodel import create_engine, Session, select
+from datetime import datetime
 import click
 import lib
 import logging
@@ -46,6 +47,9 @@ def start(ctx, exclude, start_only):
         if not tasks:
             continue
         print("start", vendor, server)
+        for task in tasks:
+            meta = lib.Meta(start=datetime.now(), task_hash=lib.task_hash(task))
+            lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
         # start instance
         # make meta modifications commit/push it to the repo
 
