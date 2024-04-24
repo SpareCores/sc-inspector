@@ -1,4 +1,5 @@
 GitPython
 sparecores-data
 sqlmodel
+docker
 sparecores-crawler
