@@ -3,7 +3,7 @@ ENV REPO_URL="https://github.com/SpareCores/sc-inspector-data"
 ENV REPO_PATH="/repo/sc-inspector-data"
 ENV VIRTUAL_ENV="/venv/inspector"
 ENV PATH=${VIRTUAL_ENV}/bin:${PATH}
-VOLUME ${REPO_PATH}
+RUN mkdir /repo
 RUN \
     git config --global --add safe.directory /repo/sc-inspector-data && \
     git config --global user.email "inspector@sparecores.com" && \
