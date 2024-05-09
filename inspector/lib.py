@@ -198,7 +198,7 @@ def write_meta(meta: Meta, file: str | os.PathLike) -> None:
     with open(file, "w") as f:
         f.write(meta.model_dump_json())
     if os.environ.get("GITHUB_TOKEN"):
-        repo.push_path(task_dir, f"Starting server from {repo.gha_url()}")
+        repo.push_path(task_dir, f"Inspecting server from {repo.gha_url()}")
 
 
 def run_task(q: Queue, data_dir: str | os.PathLike) -> None:
@@ -208,16 +208,27 @@ def run_task(q: Queue, data_dir: str | os.PathLike) -> None:
             break
         print("running", threading.current_thread(), task)
         meta = Meta(start=datetime.now(), task_hash=task_hash(task))
-        if isinstance(task, DockerTask):
-            stdout, stderr = run_docker(meta, task, os.path.join(data_dir, task.name))
-        else:
-            stdout, stderr = run_native(meta, task, os.path.join(data_dir, task.name))
+        failed = False
+        try:
+            if isinstance(task, DockerTask):
+                stdout, stderr = run_docker(meta, task, os.path.join(data_dir, task.name))
+            else:
+                stdout, stderr = run_native(meta, task, os.path.join(data_dir, task.name))
+        except Exception as e:
+            failed = True
+            meta.exit_code = -1
+            meta.error_msg = str(e)
         task_dir = os.path.join(data_dir, task.name)
         os.makedirs(task_dir, exist_ok=True)
-        for t in task.transform_output:
-            meta.outputs.extend(t(meta, task, task_dir, stdout, stderr))
-        write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
-        q.task_done()
+        if not failed:
+            for t in task.transform_output:
+                meta.outputs.extend(t(meta, task, task_dir, stdout, stderr))
+        try:
+            write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
+        except Exception:
+            raise
+        finally:
+            q.task_done()
 
 
 def run_tasks(vendor, data_dir: str | os.PathLike, nthreads: int = 8):
