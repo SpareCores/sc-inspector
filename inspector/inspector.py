@@ -1,10 +1,11 @@
+from datetime import datetime
 from sc_crawler.tables import Server
 from sqlmodel import create_engine, Session, select
-from datetime import datetime
 import click
 import lib
 import logging
 import os
+import repo
 import sc_data
 import sys
 
@@ -66,6 +67,9 @@ def cleanup():
 @click.option("--threads", default=8, show_default=True, help="Parallelism in a given task group")
 def inspect(ctx, vendor, instance, threads):
     """Run inspection on this machine."""
+    if os.environ.get("GITHUB_TOKEN"):
+        # we must clone the repo before writing anything to it
+        repo.get_repo()
     data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, instance)
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
