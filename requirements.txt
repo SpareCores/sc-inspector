@@ -3,3 +3,4 @@ sparecores-data
 sqlmodel
 docker
 sparecores-crawler
+wrapt
