@@ -1,12 +1,16 @@
 from datetime import datetime
 from sc_crawler.tables import Server
+from sc_runner import runner
 from sqlmodel import create_engine, Session, select
+from sc_runner.resources import defaults
+import base64
 import click
 import lib
 import logging
 import os
 import repo
 import sc_data
+import sc_runner.resources
 import sys
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
@@ -15,6 +19,37 @@ logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 EXCLUDE_INSTANCES: list[list[str]] = [
     # ["aws", "m5.xlarge"]
 ]
+RESOURCE_OPTS = {
+    "aws": dict(
+        region="us-east-1",
+        #public_key="spare-cores",
+    )
+}
+USER_DATA = """
+#!/bin/sh
+
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y ca-certificates curl
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
+
+# Add the repository to Apt sources:
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  tee /etc/apt/sources.list.d/docker.list > /dev/null
+apt-get update -y
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+    -e GITHUB_TOKEN={GITHUB_TOKEN} \
+    -e GITHUB_SERVER_URL={GITHUB_SERVER_URL} \
+    -e GITHUB_REPOSITORY={GITHUB_REPOSITORY} \
+    -e GITHUB_RUN_ID={GITHUB_RUN_ID} \
+    ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} >> /tmp/out 2>&1
+poweroff
+"""
 
 
 def servers():
@@ -52,12 +87,31 @@ def start(ctx, exclude, start_only):
             meta = lib.Meta(start=datetime.now(), task_hash=lib.task_hash(task))
             lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
         # start instance
-        # make meta modifications commit/push it to the repo
+        b64_user_data = base64.b64encode(
+            USER_DATA.format(
+                GITHUB_TOKEN=os.environ.get("GITHUB_TOKEN"),
+                GITHUB_SERVER_URL=os.environ.get("GITHUB_SERVER_URL"),
+                GITHUB_REPOSITORY=os.environ.get("GITHUB_REPOSITORY"),
+                GITHUB_RUN_ID=os.environ.get("GITHUB_RUN_ID"),
+                VENDOR=vendor,
+                INSTANCE=server,
+            ).encode("utf-8")
+        ).decode("ascii")
+        # get default instance opts for the vendor and add ours
+        instance_opts = defaults(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts")
+        instance_opts |= dict(user_data_base64=b64_user_data)
+        runner.create(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server, instance_opts=instance_opts))
 
 
 @cli.command()
 def cleanup():
     click.echo("cleanup")
+
+
+@cli.command()
+def check():
+    # this will check all meta files and fail if any of them show something wrong
+    click.echo("check")
 
 
 @cli.command()
