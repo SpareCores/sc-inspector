@@ -12,7 +12,7 @@ import repo
 import sc_data
 import sc_runner.resources
 import sys
-print("XXX")
+
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
 
