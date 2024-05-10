@@ -1,3 +1,6 @@
+print("XXX")
+import sys
+sys.exit(0)
 from datetime import datetime
 from sc_crawler.tables import Server
 from sc_runner import runner
