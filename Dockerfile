@@ -1,4 +1,4 @@
-FROM python:3.12 as base
+FROM ghcr.io/sparecores/sc-runner:main as base
 ENV REPO_URL="https://github.com/SpareCores/sc-inspector-data"
 ENV REPO_PATH="/repo/sc-inspector-data"
 ENV VIRTUAL_ENV="/venv/inspector"
