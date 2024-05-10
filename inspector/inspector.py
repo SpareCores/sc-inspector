@@ -2,7 +2,7 @@ from datetime import datetime
 from sc_crawler.tables import Server
 from sc_runner import runner
 from sqlmodel import create_engine, Session, select
-from sc_runner.resources import defaults
+from sc_runner.resources import default
 import base64
 import click
 import lib
@@ -98,7 +98,7 @@ def start(ctx, exclude, start_only):
             ).encode("utf-8")
         ).decode("ascii")
         # get default instance opts for the vendor and add ours
-        instance_opts = defaults(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts")
+        instance_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts")
         instance_opts |= dict(user_data_base64=b64_user_data)
         runner.create(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server, instance_opts=instance_opts))
 
