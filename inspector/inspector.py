@@ -103,9 +103,21 @@ def start(ctx, exclude, start_only):
 
 
 @cli.command()
-def cleanup():
-    click.echo("cleanup")
-
+@click.pass_context
+def cleanup(ctx):
+    for vendor, server in servers():
+        data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
+        tasks = list(lib.get_tasks(vendor))
+        if not tasks:
+            continue
+        for task in tasks:
+            meta = lib.load_task_meta(task, data_dir=data_dir)
+            if not meta.start:
+                continue
+            # give a little time and then destroy everything in the Pulumi stack for that server
+            if datetime.now() - lib.WAIT_BETWEEN_TASKS * 1.25 >= meta.start:
+                print(f"Destroying {vendor}/{server}")
+                runner.destroy(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server))
 
 @cli.command()
 def check():
