@@ -25,8 +25,7 @@ RESOURCE_OPTS = {
         #public_key="spare-cores",
     )
 }
-USER_DATA = """
-#!/bin/sh
+USER_DATA = """#!/bin/sh
 
 cat << EOF > /tmp/userdata.sh
 #!/bin/sh
