@@ -27,9 +27,6 @@ RESOURCE_OPTS = {
 }
 USER_DATA = """#!/bin/sh
 
-cat << EOF > /tmp/userdata.sh
-#!/bin/sh
-
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y ca-certificates curl
@@ -49,12 +46,8 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
     -e GITHUB_SERVER_URL={GITHUB_SERVER_URL} \
     -e GITHUB_REPOSITORY={GITHUB_REPOSITORY} \
     -e GITHUB_RUN_ID={GITHUB_RUN_ID} \
-    ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE}
+    ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} >> /tmp/output 2>&1
 poweroff
-EOF
-
-chmod +x /tmp/userdata.sh
-screen -LS -dm userdata /tmp/userdata.sh
 """
 
 
