@@ -7,9 +7,7 @@ RUN mkdir /repo
 RUN \
     git config --global --add safe.directory /repo/sc-inspector-data && \
     git config --global user.email "inspector@sparecores.com" && \
-    git config --global user.name "Spare Cores" && \
-    git config --global pull.rebase false
-
+    git config --global user.name "Spare Cores"
 FROM base as build
 RUN \
     python -m venv --without-pip ${VIRTUAL_ENV} && \
