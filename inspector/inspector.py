@@ -54,7 +54,7 @@ poweroff
 EOF
 
 chmod +x /tmp/userdata.sh
-screen -LS userdata /tmp/userdata.sh
+screen -LS -dm userdata /tmp/userdata.sh
 """
 
 
