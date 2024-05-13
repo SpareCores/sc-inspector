@@ -99,7 +99,7 @@ def start(ctx, exclude, start_only):
         ).decode("ascii")
         # get default instance opts for the vendor and add ours
         instance_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts")
-        instance_opts |= dict(user_data_base64=b64_user_data)
+        instance_opts |= dict(user_data_base64=b64_user_data, key_name="spare-cores")
         runner.create(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server, instance_opts=instance_opts))
 
 
