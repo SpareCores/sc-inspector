@@ -119,6 +119,7 @@ def cleanup(ctx):
                 print(f"Destroying {vendor}/{server}")
                 runner.destroy(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server))
 
+
 @cli.command()
 def check():
     # this will check all meta files and fail if any of them show something wrong
