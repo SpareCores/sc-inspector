@@ -7,7 +7,8 @@ RUN mkdir /repo
 RUN \
     git config --global --add safe.directory /repo/sc-inspector-data && \
     git config --global user.email "inspector@sparecores.com" && \
-    git config --global user.name "Spare Cores"
+    git config --global user.name "Spare Cores" && \
+    git config --global pull.rebase false
 
 FROM base as build
 RUN \
