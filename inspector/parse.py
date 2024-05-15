@@ -67,7 +67,7 @@ def get_multipliers(binary=False):
     res = {}
     for unit in UNITS:
         si_prefix = si_prefixes()
-        if unit == "B" and not binary:
+        if unit == "B" and binary:
             # use binary multipliers for bytes if asked to (so kB == kiB)
             si_prefix = si_prefixes(binary)
         for prefix, multiplier in si_prefix.items():
