@@ -120,5 +120,5 @@ def dmidecode(meta, task, task_dir) -> None:
     parsed_output = []
     for d in dmi:
         parsed_output.append(dmi_propvals(d))
-    with open(os.path.join(task_dir, "parsed_output.json"), "w") as f:
+    with open(os.path.join(task_dir, "parsed.json"), "w") as f:
         json.dump(parsed_output, f)
