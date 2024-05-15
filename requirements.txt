@@ -1,5 +1,8 @@
 GitPython
+dateparser
+dmiparser
 docker
+fastnumbers
 sparecores-crawler
 sparecores-data
 sparecores-runner

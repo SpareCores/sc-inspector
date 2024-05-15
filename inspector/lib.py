@@ -46,7 +46,8 @@ class Task(BaseModel):
     parallel: bool = False  # should we run this task concurrently with other tasks in the same priority group?
     priority: int | float = math.inf  # lower priority runs earlier, missing means last
     command: str | list  # command to run
-    transform_output: list[Callable] = [transform.raw]  # functions to transform the output, write as raw if missing
+    transform_output: list[Callable] = [transform.raw]  # functions to transform the output on the inspected node, write as raw if missing
+    parse_output: list[Callable] = []  # functions to parse the already collected outputs from the repo
     rerun: timedelta | None = None  # re-run the task after a delay on successful execution, None means no re-evaluation
     timeout: timedelta = timedelta(minutes=30)  # timeout for the task
     name: str  # name of the task
@@ -72,6 +73,9 @@ def task_hash(task: Task) -> str:
     task_vars = sorted(set(task.model_fields.keys()).difference(HASH_EXCLUDE))
     h = hashlib.sha1()
     for var in task_vars:
+        if var in ["parse_output"]:
+            # leave these out from the hash, so a change in them won't trigger a re-run
+            continue
         h.update(var.encode("ascii"))
         value = getattr(task, var)
         if var == "transform_output":
@@ -206,7 +210,6 @@ def run_task(q: Queue, data_dir: str | os.PathLike) -> None:
         task = q.get()
         if not task:
             break
-        print("running", threading.current_thread(), task)
         meta = Meta(start=datetime.now(), task_hash=task_hash(task))
         failed = False
         try:

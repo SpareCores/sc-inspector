@@ -121,9 +121,25 @@ def cleanup(ctx):
 
 
 @cli.command()
-def check():
-    # this will check all meta files and fail if any of them show something wrong
-    click.echo("check")
+@click.pass_context
+def parse(ctx):
+    """Parse already written outputs from the repo and write them back."""
+    if os.environ.get("GITHUB_TOKEN"):
+        # we must clone the repo before writing anything to it
+        repo.get_repo()
+    for vendor, server in servers():
+        data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
+        tasks = list(lib.get_tasks(vendor))
+        if not tasks:
+            continue
+        for task in tasks:
+            meta = lib.load_task_meta(task, data_dir=data_dir)
+            if not meta.outputs:
+                continue
+            for parse_func in task.parse_output:
+                parse_func(meta, task, os.path.join(data_dir, task.name))
+        if os.path.exists(data_dir) and os.environ.get("GITHUB_TOKEN"):
+            repo.push_path(data_dir, f"Parsed outputs in {repo.gha_url()}")
 
 
 @cli.command()
