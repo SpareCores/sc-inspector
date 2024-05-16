@@ -100,7 +100,6 @@ def computer_readable(input_str: str, binary: bool = False):
     return fastnumbers.fast_real(numeric_value), unit
 
 
-# don't try to convert these fields to numbers/dates
 DMIDECODE_NO_PARSE = {
     "ID",
 }
@@ -110,9 +109,15 @@ DMIDECODE_NO_PARSE = {
 def dmi_propvals(data):
     data_copy = copy.deepcopy(data)
     for k, v in data["props"].items():
-        if len(v["values"]) == 1 and k not in DMIDECODE_NO_PARSE:
-            # dmidecode uses SI prefixes for binary values (kB == kiB), so we treat them as the same
-            data_copy["props"][k], unit = computer_readable(v["values"][0], binary=True)
+        if len(v["values"]) == 1:
+            if k in DMIDECODE_NO_PARSE:
+                # don't try to convert these fields to numbers/dates, they are either useless, or parsed
+                # incorrectly as dates
+                data_copy["props"][k] = v["values"][0]
+                unit = None
+            else:
+                # dmidecode uses SI prefixes for binary values (kB == kiB), so we treat them as the same
+                data_copy["props"][k], unit = computer_readable(v["values"][0], binary=True)
             if unit is not None:
                 data_copy["props"][f"{k}:unit"] = unit
         else:
