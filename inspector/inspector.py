@@ -46,7 +46,7 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
     -e GITHUB_REPOSITORY={GITHUB_REPOSITORY} \
     -e GITHUB_RUN_ID={GITHUB_RUN_ID} \
     ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} >> /tmp/output 2>&1
-poweroff
+# poweroff
 """
 
 
