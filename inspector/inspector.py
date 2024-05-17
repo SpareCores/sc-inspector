@@ -39,7 +39,9 @@ echo \
   $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
   tee /etc/apt/sources.list.d/docker.list > /dev/null
 apt-get update -y
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+# https://ubuntu.com/server/docs/nvidia-drivers-installation
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin ubuntu-drivers-common
+ubuntu-drivers install
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
     -e GITHUB_TOKEN={GITHUB_TOKEN} \
     -e GITHUB_SERVER_URL={GITHUB_SERVER_URL} \
