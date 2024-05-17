@@ -108,7 +108,9 @@ def start(ctx, exclude, start_only):
 @cli.command()
 @click.pass_context
 def cleanup(ctx):
-    for vendor, server in servers():
+    for srv in servers():
+        vendor = srv.vendor_id
+        server = srv.api_reference
         data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
         tasks = list(lib.get_tasks(vendor))
         if not tasks:
@@ -130,7 +132,9 @@ def parse(ctx):
     if os.environ.get("GITHUB_TOKEN"):
         # we must clone the repo before writing anything to it
         repo.get_repo()
-    for vendor, server in servers():
+    for srv in servers():
+        vendor = srv.vendor_id
+        server = srv.api_reference
         data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
         tasks = list(lib.get_tasks(vendor))
         if not tasks:
