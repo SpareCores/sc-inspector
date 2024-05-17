@@ -28,6 +28,7 @@ FAIL_ON_ERROR = timedelta(days=2)
 # wait this much to start a task again if a server has already been started with the task, but not yet produced output
 WAIT_BETWEEN_TASKS = timedelta(hours=1)
 DOCKER_OPTS = dict(detach=True, privileged=True)
+DOCKER_OPTS_GPU = dict(device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])
 
 
 class Meta(BaseModel):
@@ -168,9 +169,12 @@ def container_remove(c):
 
 def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike) -> tuple[bytes, bytes]:
     stdout = stderr = b""
+    docker_opts = task.docker_opts
+    if task.gpu:
+        docker_opts |= DOCKER_OPTS_GPU
     try:
         d = docker.from_env()
-        c = d.containers.run(task.image, task.command, **task.docker_opts)
+        c = d.containers.run(task.image, task.command, **docker_opts)
     except Exception as e:
         meta.error_msg = str(e)
         return b"", b""
