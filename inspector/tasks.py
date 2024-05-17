@@ -18,6 +18,14 @@ class Lshw(lib.DockerTask):
     command: str = "lshw -json"
 
 
+class Lscpu(lib.DockerTask):
+    parallel: bool = True
+    priority: int = 0
+    image: str = "ghcr.io/sparecores/hwinfo:main"
+    # pretty print JSON output
+    command: str = "bash -c 'lscpu -JB | jq'"
+
+
 class Nvidia_Smi(lib.DockerTask):
     parallel: bool = True
     priority: int = 0
