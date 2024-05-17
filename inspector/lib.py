@@ -28,7 +28,7 @@ FAIL_ON_ERROR = timedelta(days=2)
 # wait this much to start a task again if a server has already been started with the task, but not yet produced output
 WAIT_BETWEEN_TASKS = timedelta(hours=1)
 DOCKER_OPTS = dict(detach=True, privileged=True)
-DOCKER_OPTS_GPU = dict(device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])
+DOCKER_OPTS_GPU = dict(device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])])
 
 
 class Meta(BaseModel):
