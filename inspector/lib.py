@@ -94,7 +94,7 @@ def get_taskgroups(vendor: str) -> dict[tuple[float, bool], list[Task]]:
         if inspect.isclass(model) and issubclass(model, Task) and model not in (Task, DockerTask):
             # I couldn't find a better way to have the model's class name inside the instance other than to
             # explicitly pass it as an argument
-            obj = model(name=model.__name__)
+            obj = model(name=model.__name__.lower())
             # only add the task if vendor is listed in vendors_only or if it's empty
             if vendor in obj.vendors_only or not obj.vendors_only:
                 # execute parallel tasks first by negating the parallel option, so it gets forward during sorting
