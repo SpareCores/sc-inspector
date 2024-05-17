@@ -51,6 +51,7 @@ class Task(BaseModel):
     rerun: timedelta | None = None  # re-run the task after a delay on successful execution, None means no re-evaluation
     timeout: timedelta = timedelta(minutes=30)  # timeout for the task
     name: str  # name of the task
+    gpu: bool = False  # requires a machine with GPU(s)
 
 
 class DockerTask(Task):
@@ -108,10 +109,13 @@ def get_tasks(vendor: str) -> list[Task]:
     return list(chain(*taskgroups.values()))
 
 
-def should_start(task: Task, data_dir: str | os.PathLike) -> bool:
+def should_start(task: Task, data_dir: str | os.PathLike, gpu_count: int) -> bool:
     """Return True if we should start a server for this task."""
     meta = load_task_meta(task, data_dir)
     thash = task_hash(task)
+    if task.gpu and not gpu_count:
+        # skip tasks which require GPUs on a server which doesn't have one
+        return False
     if meta.start:
         if (datetime.now() - meta.start) >= FAIL_IF_NO_OUTPUT and (meta.end is None or meta.exit_code is None):
             raise RuntimeError(f"{task.name} was started at {meta.start}, but didn't produce output!")
@@ -127,10 +131,13 @@ def should_start(task: Task, data_dir: str | os.PathLike) -> bool:
     return False
 
 
-def should_run(task: Task, data_dir: str | os.PathLike) -> bool:
+def should_run(task: Task, data_dir: str | os.PathLike, gpu_count: int) -> bool:
     """Return True if we should run a task."""
     meta = load_task_meta(task, data_dir)
     thash = task_hash(task)
+    if task.gpu and not gpu_count:
+        # skip tasks which require GPUs on a server which doesn't have one
+        return False
     if meta.end and task.rerun and (datetime.now() - meta.end) >= task.rerun and meta.exit_code == 0:
         return True
     if meta.exit_code != 0 or meta.task_hash != thash:
@@ -234,7 +241,7 @@ def run_task(q: Queue, data_dir: str | os.PathLike) -> None:
             q.task_done()
 
 
-def run_tasks(vendor, data_dir: str | os.PathLike, nthreads: int = 8):
+def run_tasks(vendor, data_dir: str | os.PathLike, gpu_count: int = 0, nthreads: int = 8):
     taskgroups = get_taskgroups(vendor)
 
     # initialize thread pool
@@ -248,7 +255,7 @@ def run_tasks(vendor, data_dir: str | os.PathLike, nthreads: int = 8):
     # non-parallel ones)
     for taskgroup in sorted(taskgroups.keys()):
         for task in taskgroups[taskgroup]:
-            if not should_run(task, data_dir):
+            if not should_run(task, data_dir, gpu_count):
                 continue
             q.put(task)
             if not task.parallel:
