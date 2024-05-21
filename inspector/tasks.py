@@ -1,6 +1,5 @@
 import lib
 import parse
-import docker
 
 
 class DmiDecode(lib.DockerTask):
