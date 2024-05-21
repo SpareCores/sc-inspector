@@ -7,6 +7,7 @@ class DmiDecode(lib.DockerTask):
     priority: int = 0
     image: str = "ghcr.io/sparecores/dmidecode:main"
     parse_output: list = [parse.dmidecode]
+    version_command: str = "dmidecode --version"
     command: str = "dmidecode"
 
 
@@ -14,6 +15,7 @@ class Lshw(lib.DockerTask):
     parallel: bool = True
     priority: int = 0
     image: str = "ghcr.io/sparecores/hwinfo:main"
+    version_command: str = "lshw -version"
     command: str = "lshw -json"
 
 
@@ -21,6 +23,7 @@ class Lscpu(lib.DockerTask):
     parallel: bool = True
     priority: int = 0
     image: str = "ghcr.io/sparecores/hwinfo:main"
+    version_command: str = "bash -c \"lscpu --version | awk '{print $4}'\""
     # pretty print JSON output
     command: str = "bash -c 'lscpu -JB | jq'"
 
