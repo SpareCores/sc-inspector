@@ -81,9 +81,9 @@ def computer_readable(input_str: str, binary: bool = False):
         return input_num, None
 
     # Regular expression to match the numeric value and the unit
-    match = re.match(r"([0-9.]+)\s*([a-zA-Z/]+)$", input_str)
+    match = re.match(r"([0-9.]+)\s+([a-zA-Z/]+)$", input_str)
     if not match:
-        dt = dateparser.parse(input_str, settings={'STRICT_PARSING': True})
+        dt = dateparser.parse(input_str, settings={"STRICT_PARSING": True})
         if dt:
             return dt.isoformat(), None
         return input_str, None
