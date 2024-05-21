@@ -37,6 +37,7 @@ class Meta(BaseModel):
     exit_code: int | None = None
     error_msg: str | None = None
     task_hash: str | None = None
+    version: str | None = None
     stdout_bytes: int | None = None
     stderr_bytes: int | None = None
     outputs: list[str] = []
@@ -46,6 +47,7 @@ class Task(BaseModel):
     vendors_only: set = set()  # run for these vendors only, empty means all
     parallel: bool = False  # should we run this task concurrently with other tasks in the same priority group?
     priority: int | float = math.inf  # lower priority runs earlier, missing means last
+    version_command: str | list  # command to run to get the version
     command: str | list  # command to run
     transform_output: list[Callable] = [transform.raw]  # functions to transform the output on the inspected node, write as raw if missing
     parse_output: list[Callable] = []  # functions to parse the already collected outputs from the repo
@@ -146,17 +148,25 @@ def should_run(task: Task, data_dir: str | os.PathLike, gpu_count: int) -> bool:
     return False
 
 
-def run_native(meta: Meta, task: Task, data_dir: str | os.PathLike) -> tuple[bytes, bytes]:
+def run_native(meta: Meta, task: Task, data_dir: str | os.PathLike) -> tuple[str | None, bytes, bytes]:
+    ver = None
+    try:
+        if task.version_command:
+            res = subprocess.run(task.version_command, capture_output=True, timeout=task.timeout.total_seconds())
+            ver = res.stdout.strip().decode("utf-8")
+    except Exception as e:
+        meta.error_msg = str(e)
+        return ver, b"", b""
     try:
         res = subprocess.run(task.command, capture_output=True, timeout=task.timeout.total_seconds())
         meta.end = datetime.now()
         meta.stdout_bytes = len(res.stdout)
         meta.stderr_bytes = len(res.stderr)
         meta.exit_code = res.returncode
-        return res.stdout, res.stderr
+        return ver, res.stdout, res.stderr
     except Exception as e:
         meta.error_msg = str(e)
-        return b"", b""
+        return ver, b"", b""
 
 
 def container_remove(c):
@@ -167,17 +177,20 @@ def container_remove(c):
         pass
 
 
-def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike) -> tuple[bytes, bytes]:
+def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike) -> tuple[str | None, bytes, bytes]:
+    ver = None
     stdout = stderr = b""
     docker_opts = task.docker_opts
     if task.gpu:
         docker_opts |= DOCKER_OPTS_GPU
     try:
         d = docker.from_env()
+        if task.version_command:
+            ver = d.containers.run(task.image, task.version_command).strip().decode("utf-8")
         c = d.containers.run(task.image, task.command, **docker_opts)
     except Exception as e:
         meta.error_msg = str(e)
-        return b"", b""
+        return ver, b"", b""
 
     ts = time.time() + task.timeout.total_seconds()
     while time.time() < ts:
@@ -189,14 +202,14 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike) -> tup
         # timed out, kill container, return with error
         container_remove(c)
         meta.error_msg = f"Execution timed out after {task.timeout.total_seconds()}s"
-        return b"", b""
+        return ver, b"", b""
     meta.end = datetime.now()
     try:
         # wait for container exit/get output with 60s of docker timeout
         res = c.wait(timeout=60)
     except Exception as e:
         meta.error_msg = str(e)
-        return b"", b""
+        return ver, b"", b""
 
     meta.exit_code = res["StatusCode"]
     stdout = c.logs(stdout=True, stderr=False)
@@ -204,7 +217,7 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike) -> tup
     meta.stdout_bytes = len(stdout)
     meta.stderr_bytes = len(stderr)
     container_remove(c)
-    return stdout, stderr
+    return ver, stdout, stderr
 
 
 def write_meta(meta: Meta, file: str | os.PathLike) -> None:
@@ -225,9 +238,10 @@ def run_task(q: Queue, data_dir: str | os.PathLike) -> None:
         failed = False
         try:
             if isinstance(task, DockerTask):
-                stdout, stderr = run_docker(meta, task, os.path.join(data_dir, task.name))
+                ver, stdout, stderr = run_docker(meta, task, os.path.join(data_dir, task.name))
             else:
-                stdout, stderr = run_native(meta, task, os.path.join(data_dir, task.name))
+                ver, stdout, stderr = run_native(meta, task, os.path.join(data_dir, task.name))
+            meta.version = ver
         except Exception as e:
             failed = True
             meta.exit_code = -1
