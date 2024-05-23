@@ -41,3 +41,11 @@ class Compression_Text(lib.DockerTask):
     priority: int = 1
     image: str = "ghcr.io/sparecores/benchmark:main"
     command: str = "bash -c 'cd /usr/local/turbobench; ./turbobench -v0 -eALL dickens | ansi2txt'"
+
+
+class Openssl(lib.DockerTask):
+    parallel: bool = False
+    priority: int = 2
+    image: str = "ghcr.io/sparecores/benchmark:main"
+    version_command: str = "bash -c \"openssl version | awk '{print $2}'\""
+    command: str = "openssl.sh"
