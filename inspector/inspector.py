@@ -21,7 +21,7 @@ EXCLUDE_INSTANCES: list[list[str]] = [
 ]
 RESOURCE_OPTS = {
     "aws": dict(
-        region="us-east-1",
+        region="us-west-2",
     )
 }
 USER_DATA = """#!/bin/sh
