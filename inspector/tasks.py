@@ -40,7 +40,7 @@ class Compression_Text(lib.DockerTask):
     parallel: bool = False
     priority: int = 1
     image: str = "ghcr.io/sparecores/benchmark:main"
-    command: str = "bash -c 'cd /usr/local/turbobench; ./turbobench -v0 -eALL dickens | ansi2txt'"
+    command: str = "bash -c 'cd /usr/local/turbobench; ./turbobench -S0 -v0 -eALL dickens | ansi2txt'"
 
 
 class Openssl(lib.DockerTask):
