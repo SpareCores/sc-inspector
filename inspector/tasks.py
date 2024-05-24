@@ -49,3 +49,10 @@ class Openssl(lib.DockerTask):
     image: str = "ghcr.io/sparecores/benchmark:main"
     version_command: str = "bash -c \"openssl version | awk '{print $2}'\""
     command: str = "openssl.sh"
+
+
+class Bw_mem(lib.DockerTask):
+    parallel: bool = False
+    priority: int = 3
+    image: str = "ghcr.io/sparecores/benchmark:main"
+    command: str = "bw_mem.sh"
