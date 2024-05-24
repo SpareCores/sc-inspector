@@ -47,7 +47,7 @@ class Task(BaseModel):
     vendors_only: set = set()  # run for these vendors only, empty means all
     parallel: bool = False  # should we run this task concurrently with other tasks in the same priority group?
     priority: int | float = math.inf  # lower priority runs earlier, missing means last
-    version_command: str | list  # command to run to get the version
+    version_command: str | list | None  # command to run to get the version
     command: str | list  # command to run
     transform_output: list[Callable] = [transform.raw]  # functions to transform the output on the inspected node, write as raw if missing
     parse_output: list[Callable] = []  # functions to parse the already collected outputs from the repo
