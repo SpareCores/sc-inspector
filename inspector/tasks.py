@@ -56,3 +56,11 @@ class Bw_mem(lib.DockerTask):
     priority: int = 3
     image: str = "ghcr.io/sparecores/benchmark:main"
     command: str = "bw_mem.sh"
+
+
+class Geekbench(lib.DockerTask):
+    parallel: bool = False
+    priority: int = 4
+    image: str = "ghcr.io/sparecores/benchmark:main"
+    version_command: str = "bash -c \"geekbench6 --version | awk '{print $2}'\""
+    command: str = "geekbench.sh"
