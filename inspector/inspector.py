@@ -47,6 +47,7 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
     -e GITHUB_SERVER_URL={GITHUB_SERVER_URL} \
     -e GITHUB_REPOSITORY={GITHUB_REPOSITORY} \
     -e GITHUB_RUN_ID={GITHUB_RUN_ID} \
+    -e BENCHMARK_SECRETS_PASSPHRASE={BENCHMARK_SECRETS_PASSPHRASE} \
     ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT} >> /tmp/output 2>&1
 poweroff
 """
@@ -94,6 +95,7 @@ def start(ctx, exclude, start_only):
                 GITHUB_SERVER_URL=os.environ.get("GITHUB_SERVER_URL"),
                 GITHUB_REPOSITORY=os.environ.get("GITHUB_REPOSITORY"),
                 GITHUB_RUN_ID=os.environ.get("GITHUB_RUN_ID"),
+                BENCHMARK_SECRETS_PASSPHRASE=os.environ.get("BENCHMARK_SECRETS_PASSPHRASE"),
                 VENDOR=vendor,
                 INSTANCE=server,
                 GPU_COUNT=gpu_count,
