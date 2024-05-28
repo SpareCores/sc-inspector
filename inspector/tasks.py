@@ -1,6 +1,6 @@
 import lib
+import os
 import parse
-
 
 class DmiDecode(lib.DockerTask):
     parallel: bool = True
@@ -63,4 +63,5 @@ class Geekbench(lib.DockerTask):
     priority: int = 4
     image: str = "ghcr.io/sparecores/benchmark:main"
     version_command: str = "bash -c \"geekbench6 --version | awk '{print $2}'\""
+    docker_opts: dict = dict(environment={"BENCHMARK_SECRETS_PASSPHRASE": os.environ.get("BENCHMARK_SECRETS_PASSPHRASE")})
     command: str = "geekbench.sh"
