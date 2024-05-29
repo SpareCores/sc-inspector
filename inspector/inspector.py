@@ -1,16 +1,13 @@
-from datetime import datetime
-from sc_crawler.tables import Server
-from sc_runner import runner
-from sqlmodel import create_engine, Session, select
-from sc_runner.resources import default
-import base64
+"""
+Import only the necessary modules here, because the `inspect` will run on small memory machines, so we want to
+preserve memory for running the benchmarks.
+All other modules should be imported lazily, where needed.
+"""
 import click
 import lib
 import logging
 import os
 import repo
-import sc_data
-import sc_runner.resources
 import sys
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
@@ -57,6 +54,10 @@ poweroff
 
 
 def servers():
+    from sc_crawler.tables import Server
+    from sqlmodel import create_engine, Session, select
+    import sc_data
+
     path = sc_data.db.path
     engine = create_engine(f"sqlite:///{path}")
 
@@ -75,6 +76,12 @@ def cli(repo_path):
 @click.option("--exclude", type=(str, str), default=EXCLUDE_INSTANCES, multiple=True, help="Exclude $vendor $instance")
 @click.option("--start-only", type=(str, str), multiple=True, help="Start only $vendor $instance")
 def start(ctx, exclude, start_only):
+    from datetime import datetime
+    from sc_runner import runner
+    from sc_runner.resources import default
+    import base64
+    import sc_runner.resources
+
     for srv in servers():
         vendor = srv.vendor_id
         server = srv.api_reference
@@ -113,6 +120,9 @@ def start(ctx, exclude, start_only):
 @cli.command()
 @click.pass_context
 def cleanup(ctx):
+    from datetime import datetime
+    from sc_runner import runner
+
     for srv in servers():
         vendor = srv.vendor_id
         server = srv.api_reference
