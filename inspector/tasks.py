@@ -65,7 +65,7 @@ class Geekbench(lib.DockerTask):
     parallel: bool = False
     priority: int = 4
     image: str = "ghcr.io/sparecores/benchmark:main"
-    version_command: str = "bash -c \"geekbench6 --version | awk '{print $2}'\""
+    version_command: str = "bash -c \"/usr/local/geekbench-$(uname -m)/geekbench6 --version | awk '{print $2}'\""
     docker_opts: dict = lib.DOCKER_OPTS | dict(environment={"BENCHMARK_SECRETS_PASSPHRASE": os.environ.get("BENCHMARK_SECRETS_PASSPHRASE")})
     transform_output: list[Callable] = [transform.raw, transform.fetch_geekbench_results]
     command: str = "geekbench.sh"
