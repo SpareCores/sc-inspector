@@ -42,6 +42,9 @@ apt-get update -y
 # https://ubuntu.com/server/docs/nvidia-drivers-installation
 apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin ubuntu-drivers-common
 ubuntu-drivers install
+# stop some services to preserve memory
+snap stop amazon-ssm-agent
+systemctl stop chrony acpid cron multipathd snapd systemd-timedated
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
     -e GITHUB_TOKEN={GITHUB_TOKEN} \
     -e GITHUB_SERVER_URL={GITHUB_SERVER_URL} \
