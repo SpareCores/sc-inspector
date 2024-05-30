@@ -133,3 +133,40 @@ def dmidecode(meta, task, task_dir) -> None:
         parsed_output.append(dmi_propvals(d))
     with open(os.path.join(task_dir, "parsed.json"), "w") as f:
         json.dump(parsed_output, f, indent=2)
+
+
+def openssl(meta, task, task_dir) -> None:
+    """
+    Parses openssl speed -mr output from multiple, separate (one algo per run) runs, with a separator of
+    `ALGO: (optional -evp option) algo_name ----`
+    """
+    data = open(os.path.join(task_dir, "stdout"), "r").read()
+    lines = data.splitlines()
+    parsed_output = []
+
+    for line in lines:
+        if m := re.search(r"^ALGO:( -[^\s]+ | )([^\s]+) --------------", line):
+            # algo start
+            # ALGO: -evp blake2b512 ----
+            # ALGO: X448 ----
+            algo = m.group(2)
+            # new test, (re)set reused variables
+            blocksizes = []
+
+        if m := re.search(r"^\+DT:[^\s:]+:[0-9]+:[0-9]+", line):
+            algo = m.group(0).split(":")[1]
+        if m := re.search(r"\+H(:[0-9]+)+", line):
+            # tells us the block sizes used for this test
+            # Single core example (no -multi):
+            #   +H:16:64:256:1024
+            # Multi core example (-multi, even with -multi 1)
+            #   Got: +H:16:64:256:1024:8192:16384 from 15
+            blocksizes = list(map(int, m.group(0).split(":")[1:]))
+        if m := re.search(r"^\+F:[0-9]+:" + algo + "(:[0-9.]+)+$", line):
+            res = m.group(0).split(":")
+            algo = res[2]
+            speed = res[3:]
+            for i in range(len(blocksizes)):
+                parsed_output.append(dict(algo=algo, block_size=blocksizes[i], speed=float(speed[i]), speed_unit="bytes/sec"))
+    with open(os.path.join(task_dir, "parsed.json"), "w") as f:
+        json.dump(parsed_output, f, indent=2)

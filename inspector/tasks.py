@@ -50,6 +50,7 @@ class Openssl(lib.DockerTask):
     parallel: bool = False
     priority: int = 2
     image: str = "ghcr.io/sparecores/benchmark:main"
+    parse_output: list = [parse.openssl]
     version_command: str = "bash -c \"openssl version | awk '{print $2}'\""
     command: str = "openssl.sh"
 
