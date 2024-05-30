@@ -70,3 +70,13 @@ class Geekbench(lib.DockerTask):
     docker_opts: dict = lib.DOCKER_OPTS | dict(environment={"BENCHMARK_SECRETS_PASSPHRASE": os.environ.get("BENCHMARK_SECRETS_PASSPHRASE")})
     transform_output: list[Callable] = [transform.raw, transform.fetch_geekbench_results]
     command: str = "geekbench.sh"
+
+
+class StressNg(lib.DockerTask):
+    parallel: bool = False
+    priority: int = 5
+    image: str = "ghcr.io/colinianking/stress-ng:b7c7a5877501679a3b0a67d877e6274a801d1e4e"  # V0.17.08
+    docker_opts: dict = lib.DOCKER_OPTS | dict(entrypoint="sh")
+    version_docker_opts: dict = dict(entrypoint="sh")
+    version_command: str = "-c \"stress-ng version | awk '{print $3}'\""
+    command: str = "-c \"stress-ng --metrics --cpu $(nproc) --cpu-method crc16 -t 10 -Y /dev/stderr\""
