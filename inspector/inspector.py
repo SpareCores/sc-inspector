@@ -86,6 +86,7 @@ def start(ctx, exclude, start_only):
         vendor = srv.vendor_id
         server = srv.api_reference
         gpu_count = srv.gpu_count
+        logging.info(f"Evaluating {vendor}/{server} with {gpu_count} GPUs")
         if (vendor, server) in exclude:
             logging.info(f"Excluding {vendor}/{server}")
             continue
@@ -137,9 +138,9 @@ def cleanup(ctx):
             meta = lib.load_task_meta(task, data_dir=data_dir)
             if not meta.start:
                 continue
-            # give a little time and then destroy everything in the Pulumi stack for that server
-            if datetime.now() - lib.WAIT_BETWEEN_TASKS * 1.25 >= meta.start:
-                print(f"Destroying {vendor}/{server}")
+            # destroy the stack after a given amount of time
+            if datetime.now() - lib.DESTROY_AFTER >= meta.start:
+                logging.info(f"Destroying {vendor}/{server}")
                 runner.destroy(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server))
 
 

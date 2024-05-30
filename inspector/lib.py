@@ -26,8 +26,8 @@ HASH_EXCLUDE = {"vendors_only", "parallel", "priority"}
 # fail if a job has already started, but didn't produce output for 2 days
 FAIL_IF_NO_OUTPUT = timedelta(days=2)
 FAIL_ON_ERROR = timedelta(days=2)
-# wait this much to start a task again if a server has already been started with the task, but not yet produced output
-WAIT_BETWEEN_TASKS = timedelta(hours=1)
+# destroy the instance one hour after it has been started
+DESTROY_AFTER = timedelta(hours=1)
 DOCKER_OPTS = dict(detach=True, privileged=True)
 DOCKER_OPTS_GPU = dict(device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])])
 
@@ -126,17 +126,19 @@ def should_start(task: Task, data_dir: str | os.PathLike, gpu_count: int) -> boo
             raise RuntimeError(f"{task.name} was started at {meta.start}, but didn't produce output!")
         if (datetime.now() - meta.start) >= FAIL_ON_ERROR and meta.exit_code != 0:
             raise RuntimeError(f"{task.name} was last started at {meta.start} and failed!")
-        if (datetime.now() - meta.start) < WAIT_BETWEEN_TASKS:
-            logging.info(f"Skipping task {task.name}: {WAIT_BETWEEN_TASKS} has not yet passed since last run")
-            return False
     if meta.end and task.rerun and (datetime.now() - meta.end) >= task.rerun and meta.exit_code == 0:
         # if rerun is set and there's a successful run, run the task again if rerun time interval has passed
         logging.info(f"Task {task.name} should be started: {task.rerun} has passed since last run")
         return True
     if meta.task_hash != thash:
+        # This will be triggered when a task is first created or if it has been changed.
         logging.info(f"Task {task.name} should run as its task hash has changed: {meta.task_hash} -> {thash}")
         return True
-    logging.info(f"Skipping task {task.name}")
+    # Skip the task. If it was started, but hasn't yet produced output, we won't start a new run, as it would
+    # ruin the above checks for failing outputs, and we don't want to constantly and silently restart the tasks.
+    if meta.exit_code != 0:
+        # don't report succeeded tasks
+        logging.info(f"Skipping task {task.name}, meta: {meta}")
     return False
 
 
