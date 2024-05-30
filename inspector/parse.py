@@ -167,6 +167,6 @@ def openssl(meta, task, task_dir) -> None:
             algo = res[2]
             speed = res[3:]
             for i in range(len(blocksizes)):
-                parsed_output.append(dict(algo=algo, block_size=blocksizes[i], speed=float(speed[i]), speed_unit="bytes/sec"))
+                parsed_output.append(dict(algo=algo, block_size=blocksizes[i], speed=float(speed[i])))
     with open(os.path.join(task_dir, "parsed.json"), "w") as f:
         json.dump(parsed_output, f, indent=2)
