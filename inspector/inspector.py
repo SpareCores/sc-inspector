@@ -118,7 +118,7 @@ def start(ctx, exclude, start_only):
         # get default instance opts for the vendor and add ours
         instance_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts")
         instance_opts |= dict(user_data_base64=b64_user_data, key_name="spare-cores")
-        runner.create(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server, instance_opts=instance_opts))
+        # runner.create(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server, instance_opts=instance_opts))
 
 
 @cli.command()
@@ -134,13 +134,18 @@ def cleanup(ctx):
         tasks = list(lib.get_tasks(vendor))
         if not tasks:
             continue
+        start_times = []
+        # get the newest start time
         for task in tasks:
             meta = lib.load_task_meta(task, data_dir=data_dir)
             if not meta.start:
                 continue
+            start_times.append(meta.start)
+        if start_times:
+            last_start = max(start_times)
             # destroy the stack after a given amount of time
-            if datetime.now() - lib.DESTROY_AFTER >= meta.start:
-                logging.info(f"Destroying {vendor}/{server}")
+            if datetime.now() - lib.DESTROY_AFTER >= last_start:
+                logging.info(f"Destroying {vendor}/{server}, last task start date: {last_start}")
                 runner.destroy(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server))
 
 
