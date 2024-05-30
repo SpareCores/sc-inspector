@@ -9,6 +9,7 @@ import docker
 import hashlib
 import inspect
 import json
+import logging
 import math
 import os
 import repo
@@ -118,6 +119,7 @@ def should_start(task: Task, data_dir: str | os.PathLike, gpu_count: int) -> boo
     thash = task_hash(task)
     if task.gpu and not gpu_count:
         # skip tasks which require GPUs on a server which doesn't have one
+        logging.info(f"Skipping task {task.name} because it requires GPU, but gpu_count is {gpu_count}")
         return False
     if meta.start:
         if (datetime.now() - meta.start) >= FAIL_IF_NO_OUTPUT and (meta.end is None or meta.exit_code is None):
@@ -125,12 +127,16 @@ def should_start(task: Task, data_dir: str | os.PathLike, gpu_count: int) -> boo
         if (datetime.now() - meta.start) >= FAIL_ON_ERROR and meta.exit_code != 0:
             raise RuntimeError(f"{task.name} was last started at {meta.start} and failed!")
         if (datetime.now() - meta.start) < WAIT_BETWEEN_TASKS:
+            logging.info(f"Skipping task {task.name}: {WAIT_BETWEEN_TASKS} has not yet passed since last run")
             return False
     if meta.end and task.rerun and (datetime.now() - meta.end) >= task.rerun and meta.exit_code == 0:
         # if rerun is set and there's a successful run, run the task again if rerun time interval has passed
+        logging.info(f"Task {task.name} should be started: {task.rerun} has passed since last run")
         return True
     if meta.task_hash != thash:
+        logging.info(f"Task {task.name} should run as its task hash has changed: {meta.task_hash} -> {thash}")
         return True
+    logging.info(f"Skipping task {task.name}")
     return False
 
 
@@ -139,12 +145,18 @@ def should_run(task: Task, data_dir: str | os.PathLike, gpu_count: int) -> bool:
     meta = load_task_meta(task, data_dir)
     thash = task_hash(task)
     if task.gpu and not gpu_count:
+        logging.info(f"Skipping task {task.name} because it requires GPU, but gpu_count is {gpu_count}")
         # skip tasks which require GPUs on a server which doesn't have one
         return False
     if meta.end and task.rerun and (datetime.now() - meta.end) >= task.rerun and meta.exit_code == 0:
         return True
     if meta.exit_code != 0 or meta.task_hash != thash:
+        if meta.exit_code != 0:
+            logging.info(f"Task {task.name} should run as last run has exit code: {meta.exit_code}")
+        if meta.task_hash != thash:
+            logging.info(f"Task {task.name} should run as its task hash has changed: {meta.task_hash} -> {thash}")
         return True
+    logging.info(f"Skipping task {task.name}, {meta.end}, {meta.exit_code}")
     return False
 
 
@@ -275,6 +287,7 @@ def run_tasks(vendor, data_dir: str | os.PathLike, gpu_count: int = 0, nthreads:
         for task in taskgroups[taskgroup]:
             if not should_run(task, data_dir, gpu_count):
                 continue
+            logging.info(f"Starting {task.name}")
             q.put(task)
             if not task.parallel:
                 q.join()

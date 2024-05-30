@@ -87,14 +87,17 @@ def start(ctx, exclude, start_only):
         server = srv.api_reference
         gpu_count = srv.gpu_count
         if (vendor, server) in exclude:
+            logging.info(f"Excluding {vendor}/{server}")
             continue
         if start_only and (vendor, server) not in start_only:
+            logging.info(f"Excluding {vendor}/{server} as --start-only {start_only} is given")
             continue
         data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
         tasks = list(filter(lambda task: lib.should_start(task, data_dir, gpu_count), lib.get_tasks(vendor)))
         if not tasks:
+            logging.info(f"No tasks for {vendor}/{server}")
             continue
-        print("start", vendor, server)
+        logging.info(f"Starting {vendor}/{server}")
         for task in tasks:
             meta = lib.Meta(start=datetime.now(), task_hash=lib.task_hash(task))
             lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
@@ -173,6 +176,7 @@ def parse(ctx):
 def inspect(ctx, vendor, instance, gpu_count, threads):
     """Run inspection on this machine."""
     if os.environ.get("GITHUB_TOKEN"):
+        logging.info("Updating the git repo")
         # we must clone the repo before writing anything to it
         repo.get_repo()
     data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, instance)
