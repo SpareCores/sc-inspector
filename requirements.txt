@@ -6,6 +6,6 @@ fastnumbers
 requests
 sparecores-crawler
 sparecores-data
-sparecores-runner==0.0.4
+sparecores-runner==0.0.5
 sqlmodel
 wrapt
