@@ -1,5 +1,5 @@
 # Makefile for local testing
-IMAGE_NAME ?= sc-inspector
+IMAGE_NAME ?= ghcr.io/sparecores/sc-inspector:main
 SC_INSPECTOR_DATA_PATH ?= $$(realpath ../sc-inspector-data)
 COMMON_OPTS = -w /app --privileged \
 	-v /var/run/docker.sock:/var/run/docker.sock \
