@@ -88,4 +88,4 @@ class StressNg(lib.DockerTask):
     docker_opts: dict = lib.DOCKER_OPTS | dict(entrypoint="sh")
     version_docker_opts: dict = dict(entrypoint="sh")
     version_command: str = "-c \"stress-ng version | awk '{print $3}'\""
-    command: str = "-c \"stress-ng --metrics --cpu $(nproc) --cpu-method crc16 -t 10 -Y /dev/stderr\""
+    command: str = "-c \"stress-ng --metrics --cpu $(nproc) --cpu-method all -t 10 -Y /dev/stderr\""
