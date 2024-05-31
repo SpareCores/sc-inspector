@@ -36,7 +36,7 @@ def geekbench_html_to_json(html_content: str) -> dict:
     for tstring in GEEKBENCH_TABLES:
         results[tstring] = {}
         table = _geekbench_table(doc, tstring)
-        results[tstring]["Score"] = _geekbench_th_score(table)
+        results[tstring]["Score"] = {"score": _geekbench_th_score(table)}
         for bstring in GEEKBENCH_BENCHMARKS:
             results[tstring][bstring] = _geekbench_td_scores(table, bstring)
     return results
