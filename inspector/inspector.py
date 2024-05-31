@@ -46,7 +46,7 @@ ubuntu-drivers install
 snap stop amazon-ssm-agent
 systemctl stop chrony acpid cron multipathd snapd systemd-timedated
 # we don't want to submit crash dumps anywhere
-apt autoremove -y apport
+apt-get autoremove -y apport >> /tmp/output 2>&1
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
     -e GITHUB_TOKEN={GITHUB_TOKEN} \
     -e GITHUB_SERVER_URL={GITHUB_SERVER_URL} \
