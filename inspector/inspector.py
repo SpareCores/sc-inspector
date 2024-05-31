@@ -23,6 +23,9 @@ RESOURCE_OPTS = {
 }
 USER_DATA = """#!/bin/sh
 
+# just to be sure, schedule a shutdown in 60 minutes
+shutdown --no-wall +60
+
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
 apt-get install -y ca-certificates curl
