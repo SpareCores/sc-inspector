@@ -38,13 +38,13 @@ echo \
   "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
   $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
   tee /etc/apt/sources.list.d/docker.list > /dev/null
-apt-get update -y
+apt-get update -y >> /tmp/output 2>&1
 # https://ubuntu.com/server/docs/nvidia-drivers-installation
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin ubuntu-drivers-common
-ubuntu-drivers install
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin ubuntu-drivers-common >> /tmp/output 2>&1
+ubuntu-drivers install >> /tmp/output 2>&1
 # stop some services to preserve memory
-snap stop amazon-ssm-agent
-systemctl stop chrony acpid cron multipathd snapd systemd-timedated
+snap stop amazon-ssm-agent >> /tmp/output 2>&1
+systemctl stop chrony acpid cron multipathd snapd systemd-timedated >> /tmp/output 2>&1
 # we don't want to submit crash dumps anywhere
 apt-get autoremove -y apport >> /tmp/output 2>&1
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
