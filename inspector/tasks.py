@@ -4,6 +4,7 @@ import os
 import parse
 import transform
 
+STRESSNG_HASH = "b7c7a5877501679a3b0a67d877e6274a801d1e4e"  # V0.17.08
 
 mem_bytes = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
 
@@ -84,8 +85,18 @@ class Geekbench(lib.DockerTask):
 class StressNg(lib.DockerTask):
     parallel: bool = False
     priority: int = 5
-    image: str = "ghcr.io/colinianking/stress-ng:b7c7a5877501679a3b0a67d877e6274a801d1e4e"  # V0.17.08
+    image: str = f"ghcr.io/colinianking/stress-ng:{STRESSNG_HASH}"
     docker_opts: dict = lib.DOCKER_OPTS | dict(entrypoint="sh")
     version_docker_opts: dict = dict(entrypoint="sh")
     version_command: str = "-c \"stress-ng version | awk '{print $3}'\""
     command: str = "-c \"stress-ng --metrics --cpu $(nproc) --cpu-method all -t 10 -Y /dev/stderr\""
+
+
+class StressNgSingleCore(lib.DockerTask):
+    parallel: bool = False
+    priority: int = 6
+    image: str = f"ghcr.io/colinianking/stress-ng:{STRESSNG_HASH}"
+    docker_opts: dict = lib.DOCKER_OPTS | dict(entrypoint="sh")
+    version_docker_opts: dict = dict(entrypoint="sh")
+    version_command: str = "-c \"stress-ng version | awk '{print $3}'\""
+    command: str = "-c \"stress-ng --metrics --cpu 1 --cpu-method all -t 10 -Y /dev/stderr\""
