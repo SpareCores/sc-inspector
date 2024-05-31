@@ -3,8 +3,6 @@ import os
 import re
 import requests
 
-from geekbench import geekbench_html_to_json
-
 
 def raw(meta, task, task_dir, stdout, stderr) -> list[str]:
     outputs: list[str] = []
@@ -18,6 +16,8 @@ def raw(meta, task, task_dir, stdout, stderr) -> list[str]:
 
 
 def fetch_geekbench_results(meta, task, task_dir, stdout, stderr) -> list[str]:
+    from geekbench import geekbench_html_to_json
+
     outputs: list[str] = []
     urls = re.findall(
         re.compile(r'https://[^\s"]*/v6/cpu[^\s"]*'), stdout.decode("utf-8")
