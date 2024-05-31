@@ -3,7 +3,7 @@ import os
 import re
 import requests
 
-from .geekbench import geekbench_html_to_json
+from geekbench import geekbench_html_to_json
 
 
 def raw(meta, task, task_dir, stdout, stderr) -> list[str]:
