@@ -3,6 +3,7 @@ dateparser
 dmiparser
 docker
 fastnumbers
+lxml
 requests
 sparecores-crawler
 sparecores-data
