@@ -47,7 +47,7 @@ class Compression_Text(lib.DockerTask):
     priority: int = 1
     image: str = "ghcr.io/sparecores/benchmark:main"
     # try to protect the inspector from OOM situations
-    docker_opts: dict = lib.DOCKER_OPTS | dict(mem_limit=mem_bytes * 0.85)
+    docker_opts: dict = lib.DOCKER_OPTS | dict(mem_limit=int(mem_bytes * 0.85))
     command: str = "python /usr/local/bin/compress.py"
 
 
@@ -74,7 +74,7 @@ class Geekbench(lib.DockerTask):
     version_command: str = "bash -c \"/usr/local/geekbench-$(uname -m)/geekbench6 --version | awk '{print $2}'\""
     docker_opts: dict = lib.DOCKER_OPTS | dict(
         environment={"BENCHMARK_SECRETS_PASSPHRASE": os.environ.get("BENCHMARK_SECRETS_PASSPHRASE")},
-        mem_limit=mem_bytes * 0.85,
+        mem_limit=int(mem_bytes * 0.85),
     )
     transform_output: list[Callable] = [transform.raw, transform.fetch_geekbench_results]
     command: str = "geekbench.sh"
