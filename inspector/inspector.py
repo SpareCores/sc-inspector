@@ -96,7 +96,7 @@ def start(ctx, exclude, start_only):
             logging.info(f"Excluding {vendor}/{server} as --start-only {start_only} is given")
             continue
         data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
-        tasks = list(filter(lambda task: lib.should_start(task, data_dir, gpu_count), lib.get_tasks(vendor)))
+        tasks = list(filter(lambda task: lib.should_start(task, data_dir, srv), lib.get_tasks(vendor)))
         if not tasks:
             logging.info(f"No tasks for {vendor}/{server}")
             continue

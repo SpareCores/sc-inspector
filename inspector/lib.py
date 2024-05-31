@@ -32,6 +32,9 @@ DOCKER_OPTS = dict(detach=True, privileged=True)
 DOCKER_OPTS_GPU = dict(device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])])
 
 
+mem_bytes = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+
+
 class Meta(BaseModel):
     start: datetime | None = None
     end: datetime | None = None
@@ -56,6 +59,7 @@ class Task(BaseModel):
     timeout: timedelta = timedelta(minutes=30)  # timeout for the task
     name: str  # name of the task
     gpu: bool = False  # requires a machine with GPU(s)
+    minimum_memory: float = 0  # minimum memory in GiBs for this test
 
 
 class DockerTask(Task):
@@ -114,14 +118,20 @@ def get_tasks(vendor: str) -> list[Task]:
     return list(chain(*taskgroups.values()))
 
 
-def should_start(task: Task, data_dir: str | os.PathLike, gpu_count: int) -> bool:
+def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
     """Return True if we should start a server for this task."""
     meta = load_task_meta(task, data_dir)
     thash = task_hash(task)
-    if task.gpu and not gpu_count:
+    if task.gpu and not srv.gpu_count:
         # skip tasks which require GPUs on a server which doesn't have one
-        logging.info(f"Skipping task {task.name} because it requires GPU, but gpu_count is {gpu_count}")
+        logging.info(f"Skipping task {task.name} because it requires GPU, but gpu_count is {srv.gpu_count}")
         return False
+    # srv.memory is MiB, minimum_memory is GiB
+    if srv.memory < task.minimum_memory * 1024:
+        mem_gib = srv.memory / 1024
+        logging.info(f"Skipping task {task.name} because it requires {task.minimum_memory} GiB RAM, but this machine has only {mem_gib:.03}")
+        return False
+
     if meta.start:
         if (datetime.now() - meta.start) >= FAIL_IF_NO_OUTPUT and (meta.end is None or meta.exit_code is None):
             raise RuntimeError(f"{task.name} was started at {meta.start}, but didn't produce output!")
@@ -147,6 +157,11 @@ def should_run(task: Task, data_dir: str | os.PathLike, gpu_count: int) -> bool:
     """Return True if we should run a task."""
     meta = load_task_meta(task, data_dir)
     thash = task_hash(task)
+    # minimum_memory is GiB
+    if mem_bytes < task.minimum_memory * 1024 ** 2:
+        mem_gib = mem_bytes / 1024 ** 2
+        logging.info(f"Skipping task {task.name} because it requires {task.minimum_memory} GiB RAM, but this machine has only {mem_gib:.03}")
+        return False
     if task.gpu and not gpu_count:
         logging.info(f"Skipping task {task.name} because it requires GPU, but gpu_count is {gpu_count}")
         # skip tasks which require GPUs on a server which doesn't have one

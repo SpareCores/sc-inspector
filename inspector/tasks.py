@@ -76,6 +76,7 @@ class Geekbench(lib.DockerTask):
         environment={"BENCHMARK_SECRETS_PASSPHRASE": os.environ.get("BENCHMARK_SECRETS_PASSPHRASE")},
         mem_limit=int(mem_bytes * 0.85),
     )
+    minimum_memory: float = 1.3
     transform_output: list[Callable] = [transform.raw, transform.fetch_geekbench_results]
     command: str = "geekbench.sh"
 
