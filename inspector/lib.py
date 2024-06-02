@@ -260,33 +260,34 @@ def write_meta(meta: Meta, file: str | os.PathLike) -> None:
 
 
 def run_task(q: Queue, data_dir: str | os.PathLike) -> None:
-    while True:
-        task = q.get()
-        if not task:
-            break
-        meta = Meta(start=datetime.now(), task_hash=task_hash(task))
-        failed = False
-        try:
-            if isinstance(task, DockerTask):
-                ver, stdout, stderr = run_docker(meta, task, os.path.join(data_dir, task.name))
-            else:
-                ver, stdout, stderr = run_native(meta, task, os.path.join(data_dir, task.name))
-            meta.version = ver
-        except Exception as e:
-            failed = True
-            meta.exit_code = -1
-            meta.error_msg = str(e)
-        task_dir = os.path.join(data_dir, task.name)
-        os.makedirs(task_dir, exist_ok=True)
-        if not failed:
-            for t in task.transform_output:
-                meta.outputs.extend(t(meta, task, task_dir, stdout, stderr))
-        try:
+    try:
+        while True:
+            task = q.get()
+            if not task:
+                break
+            meta = Meta(start=datetime.now(), task_hash=task_hash(task))
+            failed = False
+            try:
+                if isinstance(task, DockerTask):
+                    ver, stdout, stderr = run_docker(meta, task, os.path.join(data_dir, task.name))
+                else:
+                    ver, stdout, stderr = run_native(meta, task, os.path.join(data_dir, task.name))
+                meta.version = ver
+            except Exception as e:
+                failed = True
+                meta.exit_code = -1
+                meta.error_msg = str(e)
+            task_dir = os.path.join(data_dir, task.name)
+            os.makedirs(task_dir, exist_ok=True)
+            if not failed:
+                for t in task.transform_output:
+                    meta.outputs.extend(t(meta, task, task_dir, stdout, stderr))
             write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
-        except Exception:
-            raise
-        finally:
-            q.task_done()
+    except Exception:
+        raise
+    finally:
+        # ack the task, so run_tasks won't wait forever
+        q.task_done()
 
 
 def run_tasks(vendor, data_dir: str | os.PathLike, gpu_count: int = 0, nthreads: int = 8):
