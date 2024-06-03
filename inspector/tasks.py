@@ -40,6 +40,7 @@ class Nvidia_Smi(lib.DockerTask):
     priority: int = 0
     image: str = "nvidia/cuda:12.4.1-base-ubuntu22.04"
     gpu: bool = True
+    version_command: str = "bash -c \"nvidia-smi -h | head -1 | egrep -o 'v[0-9.]+'\""
     command: str = "nvidia-smi -q -x"
 
 
