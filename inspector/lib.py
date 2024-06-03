@@ -126,9 +126,9 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
         # skip tasks which require GPUs on a server which doesn't have one
         logging.info(f"Skipping task {task.name} because it requires GPU, but gpu_count is {srv.gpu_count}")
         return False
-    # srv.memory is MiB, minimum_memory is GiB
-    if srv.memory < task.minimum_memory * 1024:
-        mem_gib = srv.memory / 1024
+    # srv.memory_amount is MiB, minimum_memory is GiB
+    if srv.memory_amount < task.minimum_memory * 1024:
+        mem_gib = srv.memory_amount / 1024
         logging.info(f"Skipping task {task.name} because it requires {task.minimum_memory} GiB RAM, but this machine has only {mem_gib:.03}")
         return False
 
