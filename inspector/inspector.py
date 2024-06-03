@@ -68,7 +68,11 @@ def servers():
     engine = create_engine(f"sqlite:///{path}")
 
     session = Session(engine)
-    return session.exec(select(Server)).all()
+    return session.exec(select(
+        Server.vendor_id,
+        Server.api_reference,
+        Server.gpu_count
+    )).all()
 
 
 @click.group()
