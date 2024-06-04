@@ -23,6 +23,8 @@ META_NAME = "meta.json"
 # exclude these task options from the task hash, whose function is to signal any
 # changes in the tasks' runtime parameters, which might alter the output
 HASH_EXCLUDE = {"vendors_only", "parallel", "priority"}
+# don't start task if it has already been started less than 2 hours ago
+WAIT_SINCE_LAST_START = timedelta(hours=2)
 # fail if a job has already started, but didn't produce output for 2 days
 FAIL_IF_NO_OUTPUT = timedelta(days=2)
 FAIL_ON_ERROR = timedelta(days=2)
@@ -121,6 +123,9 @@ def get_tasks(vendor: str) -> list[Task]:
 def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
     """Return True if we should start a server for this task."""
     meta = load_task_meta(task, data_dir)
+    if (datetime.now() - meta.start) <= WAIT_SINCE_LAST_START:
+        logging.info(f"Skipping task {task.name}, last start: {meta.start}")
+        return False
     thash = task_hash(task)
     if task.gpu and not srv.gpu_count:
         # skip tasks which require GPUs on a server which doesn't have one
