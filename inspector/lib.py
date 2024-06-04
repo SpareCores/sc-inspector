@@ -83,7 +83,7 @@ def load_task_meta(task: Task, data_dir: str | os.PathLike, **kwargs) -> Meta:
 
 def task_hash(task: Task) -> str:
     h = hashlib.sha1()
-    for var in TASK_HASH_KEYS:
+    for var in sorted(TASK_HASH_KEYS):
         h.update(var.encode("ascii"))
         value = getattr(task, var)
         if var == "transform_output":
