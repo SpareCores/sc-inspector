@@ -50,7 +50,7 @@ class Compression_Text(lib.DockerTask):
     image: str = "ghcr.io/sparecores/benchmark:main"
     # try to protect the inspector from OOM situations
     docker_opts: dict = lib.DOCKER_OPTS | dict(mem_limit=int(mem_bytes * 0.85))
-    command: str = "python /usr/local/bin/compress.py"
+    command: str = "nice -n -20 python /usr/local/bin/compress.py"
 
 
 class Openssl(lib.DockerTask):
@@ -90,7 +90,7 @@ class StressNg(lib.DockerTask):
     docker_opts: dict = lib.DOCKER_OPTS | dict(entrypoint="sh")
     version_docker_opts: dict = dict(entrypoint="sh")
     version_command: str = "-c \"stress-ng --version | awk '{print $3}'\""
-    command: str = "-c \"stress-ng --metrics --cpu $(nproc) --cpu-method all -t 10 -Y /dev/stderr\""
+    command: str = "-c \"nice -n -20 stress-ng --metrics --cpu $(nproc) --cpu-method all -t 10 -Y /dev/stderr\""
 
 
 class StressNgSingleCore(lib.DockerTask):
@@ -100,4 +100,4 @@ class StressNgSingleCore(lib.DockerTask):
     docker_opts: dict = lib.DOCKER_OPTS | dict(entrypoint="sh")
     version_docker_opts: dict = dict(entrypoint="sh")
     version_command: str = "-c \"stress-ng --version | awk '{print $3}'\""
-    command: str = "-c \"stress-ng --metrics --cpu 1 --cpu-method all -t 10 -Y /dev/stderr\""
+    command: str = "nice -n -20 stress-ng --metrics --cpu 1 --cpu-method all -t 10 -Y /dev/stderr"
