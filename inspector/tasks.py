@@ -80,7 +80,7 @@ class Geekbench(lib.DockerTask):
     )
     minimum_memory: float = 1.3
     transform_output: list[Callable] = [transform.raw, transform.fetch_geekbench_results]
-    command: str = "nice -n 20 geekbench.sh"
+    command: str = "nice -n -20 geekbench.sh"
 
 
 class StressNg(lib.DockerTask):
