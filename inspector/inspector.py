@@ -111,6 +111,8 @@ def start(ctx, exclude, start_only):
         for task in tasks:
             meta = lib.Meta(start=datetime.now(), task_hash=lib.task_hash(task))
             lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
+        if os.environ.get("GITHUB_TOKEN"):
+            repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
         # start instance
         b64_user_data = base64.b64encode(
             USER_DATA.format(
@@ -130,7 +132,7 @@ def start(ctx, exclude, start_only):
         # before starting, destroy everything to make sure the user-data will run (this is the first boot)
         runner.destroy(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server))
         runner.create(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server, instance_opts=instance_opts))
-        # temporary
+        # XXX temporary
         break
 
 
