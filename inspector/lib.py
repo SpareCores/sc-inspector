@@ -256,8 +256,6 @@ def write_meta(meta: Meta, file: str | os.PathLike) -> None:
     os.makedirs(task_dir, exist_ok=True)
     with open(file, "w") as f:
         f.write(meta.model_dump_json())
-    if os.environ.get("GITHUB_TOKEN"):
-        repo.push_path(task_dir, f"Inspecting server from {repo.gha_url()}")
 
 
 def run_task(q: Queue, data_dir: str | os.PathLike) -> None:
@@ -313,4 +311,7 @@ def run_tasks(vendor, data_dir: str | os.PathLike, gpu_count: int = 0, nthreads:
                 q.join()
         # wait at the end of the taskgroup
         q.join()
+        # do a push at the end of each round
+        if os.environ.get("GITHUB_TOKEN"):
+            repo.push_path(data_dir, f"Inspecting server from {repo.gha_url()}")
     q.join()
