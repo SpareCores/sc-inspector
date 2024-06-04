@@ -4,7 +4,7 @@ import os
 import parse
 import transform
 
-STRESSNG_HASH = "b7c7a5877501679a3b0a67d877e6274a801d1e4e"  # V0.17.08
+STRESSNG_TAG = "b7c7a5877501679a3b0a67d877e6274a801d1e4e"  # V0.17.08
 
 mem_bytes = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
 
@@ -44,29 +44,33 @@ class Nvidia_Smi(lib.DockerTask):
     command: str = "nvidia-smi -q -x"
 
 
-class Compression_Text(lib.DockerTask):
+class StressNg(lib.DockerTask):
     parallel: bool = False
     priority: int = 1
-    image: str = "ghcr.io/sparecores/benchmark:main"
-    # try to protect the inspector from OOM situations
-    docker_opts: dict = lib.DOCKER_OPTS | dict(mem_limit=int(mem_bytes * 0.85))
-    command: str = "nice -n -20 python /usr/local/bin/compress.py"
+    image: str = f"ghcr.io/colinianking/stress-ng:{STRESSNG_TAG}"
+    docker_opts: dict = lib.DOCKER_OPTS | dict(entrypoint="sh")
+    version_docker_opts: dict = dict(entrypoint="sh")
+    version_command: str = "-c \"stress-ng --version | awk '{print $3}'\""
+    command: str = "-c \"nice -n -20 stress-ng --metrics --cpu $(nproc) --cpu-method all -t 10 -Y /dev/stderr\""
+
+
+class StressNgSingleCore(lib.DockerTask):
+    parallel: bool = False
+    priority: int = 2
+    image: str = f"ghcr.io/colinianking/stress-ng:{STRESSNG_TAG}"
+    docker_opts: dict = lib.DOCKER_OPTS | dict(entrypoint="sh")
+    version_docker_opts: dict = dict(entrypoint="sh")
+    version_command: str = "-c \"stress-ng --version | awk '{print $3}'\""
+    command: str = "-c \"nice -n -20 stress-ng --metrics --cpu 1 --cpu-method all -t 10 -Y /dev/stderr\""
 
 
 class Openssl(lib.DockerTask):
     parallel: bool = False
-    priority: int = 2
+    priority: int = 3
     image: str = "ghcr.io/sparecores/benchmark:main"
     parse_output: list = [parse.openssl]
     version_command: str = "bash -c \"openssl version | awk '{print $2}'\""
     command: str = "openssl.sh"
-
-
-class Bw_mem(lib.DockerTask):
-    parallel: bool = False
-    priority: int = 3
-    image: str = "ghcr.io/sparecores/benchmark:main"
-    command: str = "bw_mem.sh"
 
 
 class Geekbench(lib.DockerTask):
@@ -83,21 +87,17 @@ class Geekbench(lib.DockerTask):
     command: str = "nice -n -20 geekbench.sh"
 
 
-class StressNg(lib.DockerTask):
+class Compression_Text(lib.DockerTask):
     parallel: bool = False
     priority: int = 5
-    image: str = f"ghcr.io/colinianking/stress-ng:{STRESSNG_HASH}"
-    docker_opts: dict = lib.DOCKER_OPTS | dict(entrypoint="sh")
-    version_docker_opts: dict = dict(entrypoint="sh")
-    version_command: str = "-c \"stress-ng --version | awk '{print $3}'\""
-    command: str = "-c \"nice -n -20 stress-ng --metrics --cpu $(nproc) --cpu-method all -t 10 -Y /dev/stderr\""
+    image: str = "ghcr.io/sparecores/benchmark:main"
+    # try to protect the inspector from OOM situations
+    docker_opts: dict = lib.DOCKER_OPTS | dict(mem_limit=int(mem_bytes * 0.85))
+    command: str = "nice -n -20 python /usr/local/bin/compress.py"
 
 
-class StressNgSingleCore(lib.DockerTask):
+class Bw_mem(lib.DockerTask):
     parallel: bool = False
     priority: int = 6
-    image: str = f"ghcr.io/colinianking/stress-ng:{STRESSNG_HASH}"
-    docker_opts: dict = lib.DOCKER_OPTS | dict(entrypoint="sh")
-    version_docker_opts: dict = dict(entrypoint="sh")
-    version_command: str = "-c \"stress-ng --version | awk '{print $3}'\""
-    command: str = "-c \"nice -n -20 stress-ng --metrics --cpu 1 --cpu-method all -t 10 -Y /dev/stderr\""
+    image: str = "ghcr.io/sparecores/benchmark:main"
+    command: str = "bw_mem.sh"
