@@ -260,7 +260,7 @@ def write_meta(meta: Meta, file: str | os.PathLike) -> None:
         repo.push_path(task_dir, f"Inspecting server from {repo.gha_url()}")
 
 
-def run_task(q: Queue, data_dir: str | os.PathLike) -> None:
+def run_task(q: Queue, data_dir: str | os.PathLike, lock: threading.Lock) -> None:
     while True:
         try:
             task = q.get()
@@ -283,7 +283,8 @@ def run_task(q: Queue, data_dir: str | os.PathLike) -> None:
             if not failed:
                 for t in task.transform_output:
                     meta.outputs.extend(t(meta, task, task_dir, stdout, stderr))
-            write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
+            with lock:
+                write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
         except Exception:
             raise
         finally:
@@ -294,11 +295,12 @@ def run_task(q: Queue, data_dir: str | os.PathLike) -> None:
 def run_tasks(vendor, data_dir: str | os.PathLike, gpu_count: int = 0, nthreads: int = 8):
     taskgroups = get_taskgroups(vendor)
 
+    lock = threading.Lock()
     # initialize thread pool
     q: Queue = Queue(maxsize=nthreads)
     threads = []
     for _ in range(nthreads):
-        threads.append(threading.Thread(target=run_task, args=(q, data_dir), daemon=True))
+        threads.append(threading.Thread(target=run_task, args=(q, data_dir, lock), daemon=True))
         threads[-1].start()
 
     # iterate over tasks, sorted by task key (running parallel tasks in a group first, then
