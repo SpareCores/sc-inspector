@@ -260,8 +260,8 @@ def write_meta(meta: Meta, file: str | os.PathLike) -> None:
 
 
 def run_task(q: Queue, data_dir: str | os.PathLike) -> None:
-    try:
-        while True:
+    while True:
+        try:
             task = q.get()
             if not task:
                 break
@@ -283,11 +283,11 @@ def run_task(q: Queue, data_dir: str | os.PathLike) -> None:
                 for t in task.transform_output:
                     meta.outputs.extend(t(meta, task, task_dir, stdout, stderr))
             write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
-    except Exception:
-        raise
-    finally:
-        # ack the task, so run_tasks won't wait forever
-        q.task_done()
+        except Exception:
+            raise
+        finally:
+            # ack the task, so run_tasks won't wait forever
+            q.task_done()
 
 
 def run_tasks(vendor, data_dir: str | os.PathLike, gpu_count: int = 0, nthreads: int = 8):
