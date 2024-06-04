@@ -5,8 +5,8 @@ docker
 fastnumbers
 lxml
 requests
-sparecores-crawler>=0.1.4
+sparecores-crawler
 sparecores-data
-sparecores-runner==0.0.6
+sparecores-runner==0.0.7
 sqlmodel
 wrapt
