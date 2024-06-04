@@ -127,6 +127,8 @@ def start(ctx, exclude, start_only):
         # get default instance opts for the vendor and add ours
         instance_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts")
         instance_opts |= dict(user_data_base64=b64_user_data, key_name="spare-cores")
+        # before starting, destroy everything to make sure the user-data will run (this is the first boot)
+        runner.destroy(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server))
         runner.create(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server, instance_opts=instance_opts))
         # temporary
         break
