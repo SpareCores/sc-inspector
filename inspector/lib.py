@@ -20,9 +20,9 @@ import transform
 
 
 META_NAME = "meta.json"
-# exclude these task options from the task hash, whose function is to signal any
+# add options to the task hash, whose function is to signal any
 # changes in the tasks' runtime parameters, which might alter the output
-HASH_EXCLUDE = {"vendors_only", "parallel", "priority"}
+TASK_HASH_KEYS = {"command", "transform_output", "image"}
 # don't start task if it has already been started less than 2 hours ago
 WAIT_SINCE_LAST_START = timedelta(hours=2)
 # fail if a job has already started, but didn't produce output for 2 days
@@ -82,12 +82,8 @@ def load_task_meta(task: Task, data_dir: str | os.PathLike, **kwargs) -> Meta:
 
 
 def task_hash(task: Task) -> str:
-    task_vars = sorted(set(task.model_fields.keys()).difference(HASH_EXCLUDE))
     h = hashlib.sha1()
-    for var in task_vars:
-        if var in ["parse_output"]:
-            # leave these out from the hash, so a change in them won't trigger a re-run
-            continue
+    for var in TASK_HASH_KEYS:
         h.update(var.encode("ascii"))
         value = getattr(task, var)
         if var == "transform_output":
