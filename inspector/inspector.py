@@ -84,12 +84,15 @@ def cli(repo_path):
 def start(ctx, exclude, start_only):
     from datetime import datetime
     from sc_runner import runner
-    from sc_runner.resources import default
+    from sc_runner.resources import default, supported_vendors
     import base64
     import sc_runner.resources
 
     for srv in servers():
         vendor = srv.vendor_id
+        if vendor not in supported_vendors:
+            # sc-runner can't yet handle this vendor
+            continue
         server = srv.api_reference
         gpu_count = srv.gpu_count
         logging.info(f"Evaluating {vendor}/{server} with {gpu_count} GPUs")
