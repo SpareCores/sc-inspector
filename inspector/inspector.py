@@ -190,9 +190,13 @@ def cleanup_task(vendor, server, data_dir):
               help="Number of threads to run Pulumi concurrently. Each thread consumes around 60 MiB of RAM.")
 def cleanup(ctx, threads):
     from sc_runner import runner
+    from sc_runner.resources import supported_vendors
     with ThreadPoolExecutor(max_workers=threads) as executor:
         for srv in servers():
             vendor = srv.vendor_id
+            if vendor not in supported_vendors:
+                # sc-runner can't yet handle this vendor
+                continue
             server = srv.api_reference
             data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
             # process this in a thread as getting Pulumi state is very slow
