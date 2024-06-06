@@ -88,6 +88,7 @@ def start(ctx, exclude, start_only):
     import base64
     import sc_runner.resources
 
+    count = 0
     for srv in servers():
         vendor = srv.vendor_id
         if vendor not in supported_vendors:
@@ -133,7 +134,10 @@ def start(ctx, exclude, start_only):
         runner.destroy(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server))
         runner.create(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server, instance_opts=instance_opts))
         # XXX temporary
-        break
+        count += 1
+        if count == 3:
+            # start three per round
+            break
 
 
 def cleanup_task(vendor, server, data_dir):
