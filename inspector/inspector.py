@@ -132,7 +132,12 @@ def start(ctx, exclude, start_only):
         instance_opts |= dict(user_data_base64=b64_user_data, key_name="spare-cores")
         # before starting, destroy everything to make sure the user-data will run (this is the first boot)
         runner.destroy(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server))
-        runner.create(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server, instance_opts=instance_opts))
+        try:
+            runner.create(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server, instance_opts=instance_opts))
+        except Exception:
+            # on failure, try the next one
+            logging.exception("Couldn't start instance")
+            continue
         # XXX temporary
         count += 1
         if count == 3:
