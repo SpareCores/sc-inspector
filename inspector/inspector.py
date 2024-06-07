@@ -5,6 +5,7 @@ All other modules should be imported lazily, where needed.
 """
 from concurrent.futures import ThreadPoolExecutor
 import click
+import copy
 import lib
 import logging
 import os
@@ -71,6 +72,28 @@ def servers():
     return session.exec(select(Server)).all()
 
 
+def available_servers(vendor: str | None = None, region: str | None = None):
+    """Return servers with the regions in which they are available."""
+    from sc_crawler.tables import ServerPrice, Server, Region
+    from sqlmodel import create_engine, Session, select
+    import sc_data
+    path = sc_data.db.path
+    engine = create_engine(f"sqlite:///{path}")
+    session = Session(engine)
+    stmt = select(ServerPrice.vendor_id, Region.api_reference, Server).join(Region).join(Server)
+    if vendor:
+        stmt = stmt.where(ServerPrice.vendor_id == vendor)
+    if region:
+        stmt = stmt.where(ServerPrice.region_id == region)
+    servers = {}
+    for vendor, region, server in session.exec(stmt.distinct()).all():
+        if (vendor, server.api_reference) in servers:
+            servers[(vendor, server.api_reference)][1].add(region)
+        else:
+            servers[(vendor, server.api_reference)] = [server, {region}]
+    return servers
+
+
 @click.group()
 @click.option("--repo-path", default=os.environ.get("REPO_PATH", os.getcwd()), help="Directory which contains the repository")
 def cli(repo_path):
@@ -89,12 +112,16 @@ def start(ctx, exclude, start_only):
     import sc_runner.resources
 
     count = 0
-    for srv in servers():
-        vendor = srv.vendor_id
+    for (vendor, server), (srv, regions) in available_servers().items():
         if vendor not in supported_vendors:
             # sc-runner can't yet handle this vendor
             continue
-        server = srv.api_reference
+        resource_opts = RESOURCE_OPTS.get(vendor)
+        if RESOURCE_OPTS.get(vendor, {}).get("region") not in regions:
+            # if this server is unavailable in the default region, use a different one
+            resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor))
+            resource_opts["region"] = regions.pop()
+
         gpu_count = srv.gpu_count
         logging.info(f"Evaluating {vendor}/{server} with {gpu_count} GPUs")
         if (vendor, server) in exclude:
@@ -131,9 +158,9 @@ def start(ctx, exclude, start_only):
         instance_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts")
         instance_opts |= dict(user_data_base64=b64_user_data, key_name="spare-cores")
         # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-        runner.destroy(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server))
+        runner.destroy(vendor, {}, resource_opts | dict(instance=server))
         try:
-            runner.create(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server, instance_opts=instance_opts))
+            runner.create(vendor, {}, resource_opts | dict(instance=server, instance_opts=instance_opts))
         except Exception:
             # on failure, try the next one
             logging.exception("Couldn't start instance")
@@ -145,7 +172,7 @@ def start(ctx, exclude, start_only):
             break
 
 
-def cleanup_task(vendor, server, data_dir):
+def cleanup_task(vendor, server, data_dir, regions):
     from datetime import datetime
     from sc_runner import runner
 
@@ -180,21 +207,24 @@ def cleanup_task(vendor, server, data_dir):
             destroy = f"Destroying {vendor}/{server}, last task start date: {last_start}"
 
     if destroy:
-        # In order not to cause unnecessary locks in Pulumi, we first get the stack's resources to see if
-        # it's already empty, and in that case, we don't destroy it.
-        try:
-            stack = runner.get_stack(vendor, {}, RESOURCE_OPTS.get(vendor, {}) | dict(instance=server))
-        except AttributeError:
-            # this vendor is not yet supported
-            return
-        resources = stack.export_stack().deployment.get("resources", [])
-        if len(resources) <= 1:
-            # a non-existent stack will have zero, a clean (already destroyed) stack should have exactly one
-            # resource (the Pulumi Stack itself). If we can see either of these, we have nothing to clean up.
-            logging.debug(f"Pulumi stack for {vendor}/{server} has {len(resources)} resources, no cleanup needed")
-            return
-        logging.info(destroy)
-        runner.destroy(vendor, {}, RESOURCE_OPTS.get(vendor) | dict(instance=server))
+        resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor))
+        for region in regions:
+            resource_opts["region"] = region
+            # In order not to cause unnecessary locks in Pulumi, we first get the stack's resources to see if
+            # it's already empty, and in that case, we don't destroy it.
+            try:
+                stack = runner.get_stack(vendor, {}, resource_opts | dict(instance=server))
+            except AttributeError:
+                # this vendor is not yet supported
+                return
+            resources = stack.export_stack().deployment.get("resources", [])
+            if len(resources) <= 1:
+                # a non-existent stack will have zero, a clean (already destroyed) stack should have exactly one
+                # resource (the Pulumi Stack itself). If we can see either of these, we have nothing to clean up.
+                logging.debug(f"Pulumi stack for {vendor}/{server} has {len(resources)} resources, no cleanup needed")
+                return
+            logging.info(destroy)
+            runner.destroy(vendor, {}, resource_opts | dict(instance=server))
 
 
 @cli.command()
@@ -205,15 +235,13 @@ def cleanup(ctx, threads):
     from sc_runner import runner
     from sc_runner.resources import supported_vendors
     with ThreadPoolExecutor(max_workers=threads) as executor:
-        for srv in servers():
-            vendor = srv.vendor_id
+        for (vendor, server), (_, regions) in available_servers().items():
             if vendor not in supported_vendors:
                 # sc-runner can't yet handle this vendor
                 continue
-            server = srv.api_reference
             data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
             # process this in a thread as getting Pulumi state is very slow
-            executor.submit(cleanup_task, vendor, server, data_dir)
+            executor.submit(cleanup_task, vendor, server, data_dir, regions)
 
 
 @cli.command()
