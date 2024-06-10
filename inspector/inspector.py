@@ -156,7 +156,11 @@ def start(ctx, exclude, start_only):
         ).decode("ascii")
         # get default instance opts for the vendor and add ours
         instance_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts")
-        instance_opts |= dict(user_data_base64=b64_user_data, key_name="spare-cores")
+        instance_opts |= dict(
+            user_data_base64=b64_user_data,
+            key_name="spare-cores",
+            instance_initiated_shutdown_behavior="terminate"
+        )
         # before starting, destroy everything to make sure the user-data will run (this is the first boot)
         runner.destroy(vendor, {}, resource_opts | dict(instance=server))
         try:
