@@ -169,11 +169,13 @@ def start(ctx, exclude, start_only):
             # on failure, try the next one
             logging.exception("Couldn't start instance")
             continue
+
         # XXX temporary
-        count += 1
-        if count == 3:
-            # start three per round
-            break
+        break
+        # count += 1
+        # if count == 3:
+        #     # start three per round
+        #     break
 
 
 def cleanup_task(vendor, server, data_dir, regions):
