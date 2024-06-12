@@ -171,11 +171,11 @@ def start(ctx, exclude, start_only):
             continue
 
         # XXX temporary
-        break
-        # count += 1
-        # if count == 3:
-        #     # start three per round
-        #     break
+        # break
+        count += 1
+        if count == 3:
+            # start three per round
+            break
 
 
 def cleanup_task(vendor, server, data_dir, regions):
