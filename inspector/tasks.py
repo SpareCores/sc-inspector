@@ -45,6 +45,16 @@ class Nvidia_Smi(lib.DockerTask):
 
 
 class StressNg(lib.DockerTask):
+    """
+    We use this benchmark to determine the "SCore" of a given instance. This should represent the relative
+    performance of it, which can be used to compare the "speed" of measured machines.
+    After running all stress-ng `--cpu-method`s on a few selected instances (x86_64 and ARM, with and without
+    HyperThreading), the `div16` method seemed to be best in terms of scalability.
+    Other methods showed either lower or higher scalability than expected. For example on a 2 vCPU machine with
+    HyperThreading `div16` showed approx. 1x performance when running with `--cpu 2`, other methods showed up to 1.8x.
+    Also, when running on HT machines with many cores, other methods gave either very low (like ~50x single core performance
+    on a 64 core machine) or very high (like ~130x on a 64/128 core/thread machine) scalability.
+    """
     parallel: bool = False
     priority: int = 1
     image: str = f"ghcr.io/colinianking/stress-ng:{STRESSNG_TAG}"
