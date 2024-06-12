@@ -51,7 +51,7 @@ class StressNg(lib.DockerTask):
     docker_opts: dict = lib.DOCKER_OPTS | dict(entrypoint="sh")
     version_docker_opts: dict = dict(entrypoint="sh")
     version_command: str = "-c \"stress-ng --version | awk '{print $3}'\""
-    command: str = "-c \"nice -n -20 stress-ng --metrics --cpu $(nproc) --cpu-method all -t 10 -Y /dev/stderr\""
+    command: str = "-c \"nice -n -20 stress-ng --metrics --cpu $(nproc) --cpu-method jmp -t 10 -Y /dev/stderr\""
 
 
 class StressNgSingleCore(lib.DockerTask):
@@ -61,7 +61,7 @@ class StressNgSingleCore(lib.DockerTask):
     docker_opts: dict = lib.DOCKER_OPTS | dict(entrypoint="sh")
     version_docker_opts: dict = dict(entrypoint="sh")
     version_command: str = "-c \"stress-ng --version | awk '{print $3}'\""
-    command: str = "-c \"nice -n -20 stress-ng --metrics --cpu 1 --cpu-method all -t 10 -Y /dev/stderr\""
+    command: str = "-c \"nice -n -20 stress-ng --metrics --cpu 1 --cpu-method jmp -t 10 -Y /dev/stderr\""
 
 
 class Openssl(lib.DockerTask):
