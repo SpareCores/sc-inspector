@@ -5,6 +5,7 @@ from itertools import chain
 from pydantic import BaseModel
 from queue import Queue
 from typing import Callable
+import copy
 import docker
 import hashlib
 import inspect
@@ -211,13 +212,15 @@ def container_remove(c):
 def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike) -> tuple[str | None, bytes, bytes]:
     ver = None
     stdout = stderr = b""
-    docker_opts = task.docker_opts
+    docker_opts = copy.deepcopy(task.docker_opts)
+    version_docker_opts = copy.deepcopy(task.version_docker_opts)
     if task.gpu:
         docker_opts |= DOCKER_OPTS_GPU
+        version_docker_opts |= DOCKER_OPTS_GPU
     try:
         d = docker.from_env()
         if task.version_command:
-            ver = d.containers.run(task.image, task.version_command, **task.version_docker_opts).strip().decode("utf-8")
+            ver = d.containers.run(task.image, task.version_command, **version_docker_opts).strip().decode("utf-8")
         c = d.containers.run(task.image, task.command, **docker_opts)
     except Exception as e:
         meta.error_msg = str(e)
