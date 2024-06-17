@@ -9,6 +9,7 @@ import copy
 import lib
 import logging
 import os
+import pulumi_aws as aws
 import repo
 import sys
 
@@ -159,7 +160,9 @@ def start(ctx, exclude, start_only):
         instance_opts |= dict(
             user_data_base64=b64_user_data,
             key_name="spare-cores",
-            instance_initiated_shutdown_behavior="terminate"
+            instance_initiated_shutdown_behavior="terminate",
+            # increase root volume size
+            root_block_device=aws.ec2.InstanceRootBlockDeviceArgs(volume_size=16),
         )
         # before starting, destroy everything to make sure the user-data will run (this is the first boot)
         runner.destroy(vendor, {}, resource_opts | dict(instance=server))
