@@ -7,6 +7,6 @@ lxml
 requests
 sparecores-crawler
 sparecores-data
-sparecores-runner>=0.0.11
+sparecores-runner>=0.0.12
 sqlmodel
 wrapt
