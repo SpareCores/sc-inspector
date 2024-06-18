@@ -167,7 +167,8 @@ EXCLUDE_INSTANCES: list[tuple[str, str]] = [
 RESOURCE_OPTS = {
     "aws": dict(
         region="us-west-2",
-    )
+    ),
+    "gcp": dict(zone="us-central1-a"),
 }
 USER_DATA = """#!/bin/sh
 
@@ -285,6 +286,10 @@ def start(ctx, exclude, start_only):
             # if this server is unavailable in the default region, use a different one
             resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor))
             resource_opts["region"] = regions.pop()
+        if resource_opts and RESOURCE_OPTS.get(vendor, {}).get("zone") not in zones:
+            # if this server is unavailable in the default region, use a different one
+            resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor))
+            resource_opts["zone"] = zones.pop()
 
         gpu_count = srv.gpu_count
         logging.info(f"Evaluating {vendor}/{server} with {gpu_count} GPUs")
@@ -334,7 +339,7 @@ def start(ctx, exclude, start_only):
                 bootdisk_init_opts |= dict(image="ubuntu-2404-lts-arm64", size=16)
             else:
                 bootdisk_init_opts |= dict(image="ubuntu-2404-lts-amd64", size=16)
-            resource_opts |= dict(zone=zones.pop(), bootdisk_init_opts=bootdisk_init_opts)
+            resource_opts |= dict(bootdisk_init_opts=bootdisk_init_opts)
             instance_opts |= dict(metadata_startup_script=user_data)
         # before starting, destroy everything to make sure the user-data will run (this is the first boot)
         runner.destroy(vendor, {}, resource_opts | dict(instance=server))
