@@ -6,6 +6,7 @@ All other modules should be imported lazily, where needed.
 from concurrent.futures import ThreadPoolExecutor
 import click
 import copy
+import itertools
 import lib
 import logging
 import os
@@ -226,23 +227,32 @@ def servers():
 
 def available_servers(vendor: str | None = None, region: str | None = None):
     """Return servers with the regions in which they are available."""
-    from sc_crawler.tables import ServerPrice, Server, Region
+    from sc_crawler.tables import ServerPrice, Server, Region, Zone
     from sqlmodel import create_engine, Session, select
     import sc_data
     path = sc_data.db.path
     engine = create_engine(f"sqlite:///{path}")
     session = Session(engine)
-    stmt = select(ServerPrice.vendor_id, Region.api_reference, Server).join(Region).join(Server)
+    stmt = (select(
+        ServerPrice.vendor_id,
+        Region.api_reference,
+        Zone.api_reference,
+        Server)
+            .join(Region, Region.region_id == ServerPrice.region_id)
+            .join(Zone, Zone.zone_id == ServerPrice.zone_id)
+            .join(Server)
+    )
     if vendor:
         stmt = stmt.where(ServerPrice.vendor_id == vendor)
     if region:
         stmt = stmt.where(ServerPrice.region_id == region)
     servers = {}
-    for vendor, region, server in session.exec(stmt.distinct()).all():
+    for vendor, region, zone, server in session.exec(stmt.distinct()).all():
         if (vendor, server.api_reference) in servers:
             servers[(vendor, server.api_reference)][1].add(region)
+            servers[(vendor, server.api_reference)][2].add(zone)
         else:
-            servers[(vendor, server.api_reference)] = [server, {region}]
+            servers[(vendor, server.api_reference)] = [server, {region}, {zone}]
     return servers
 
 
@@ -264,12 +274,12 @@ def start(ctx, exclude, start_only):
     import sc_runner.resources
 
     count = 0
-    for (vendor, server), (srv, regions) in available_servers().items():
+    for (vendor, server), (srv, regions, zones) in available_servers().items():
         if vendor not in supported_vendors:
             # sc-runner can't yet handle this vendor
             continue
-        resource_opts = RESOURCE_OPTS.get(vendor)
-        if RESOURCE_OPTS.get(vendor, {}).get("region") not in regions:
+        resource_opts = RESOURCE_OPTS.get(vendor, {})
+        if resource_opts and RESOURCE_OPTS.get(vendor, {}).get("region") not in regions:
             # if this server is unavailable in the default region, use a different one
             resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor))
             resource_opts["region"] = regions.pop()
@@ -294,27 +304,36 @@ def start(ctx, exclude, start_only):
         if os.environ.get("GITHUB_TOKEN"):
             repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
         # start instance
-        b64_user_data = base64.b64encode(
-            USER_DATA.format(
-                GITHUB_TOKEN=os.environ.get("GITHUB_TOKEN"),
-                GITHUB_SERVER_URL=os.environ.get("GITHUB_SERVER_URL"),
-                GITHUB_REPOSITORY=os.environ.get("GITHUB_REPOSITORY"),
-                GITHUB_RUN_ID=os.environ.get("GITHUB_RUN_ID"),
-                BENCHMARK_SECRETS_PASSPHRASE=os.environ.get("BENCHMARK_SECRETS_PASSPHRASE"),
-                VENDOR=vendor,
-                INSTANCE=server,
-                GPU_COUNT=gpu_count,
-            ).encode("utf-8")
-        ).decode("ascii")
+        user_data = USER_DATA.format(
+            GITHUB_TOKEN=os.environ.get("GITHUB_TOKEN"),
+            GITHUB_SERVER_URL=os.environ.get("GITHUB_SERVER_URL"),
+            GITHUB_REPOSITORY=os.environ.get("GITHUB_REPOSITORY"),
+            GITHUB_RUN_ID=os.environ.get("GITHUB_RUN_ID"),
+            BENCHMARK_SECRETS_PASSPHRASE=os.environ.get("BENCHMARK_SECRETS_PASSPHRASE"),
+            VENDOR=vendor,
+            INSTANCE=server,
+            GPU_COUNT=gpu_count,
+        )
+        b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
         # get default instance opts for the vendor and add ours
         instance_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts")
-        instance_opts |= dict(
-            user_data_base64=b64_user_data,
-            key_name="spare-cores",
-            instance_initiated_shutdown_behavior="terminate",
-            # increase root volume size
-            root_block_device=aws.ec2.InstanceRootBlockDeviceArgs(volume_size=16),
-        )
+        if vendor == "aws":
+            instance_opts |= dict(
+                user_data_base64=b64_user_data,
+                key_name="spare-cores",
+                instance_initiated_shutdown_behavior="terminate",
+                # increase root volume size
+                root_block_device=aws.ec2.InstanceRootBlockDeviceArgs(volume_size=16),
+            )
+        if vendor == "gcp":
+            # select the first zone from the list
+            bootdisk_init_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "bootdisk_init_opts")
+            if "arm" in srv.cpu_architecture:
+                bootdisk_init_opts |= dict(image="ubuntu-2404-lts-arm64", size=16)
+            else:
+                bootdisk_init_opts |= dict(image="ubuntu-2404-lts-amd64", size=16)
+            resource_opts |= dict(zone=zones.pop(), bootdisk_init_opts=bootdisk_init_opts)
+            instance_opts |= dict(metadata_startup_script=user_data)
         # before starting, destroy everything to make sure the user-data will run (this is the first boot)
         runner.destroy(vendor, {}, resource_opts | dict(instance=server))
         try:
@@ -322,17 +341,22 @@ def start(ctx, exclude, start_only):
         except Exception:
             # on failure, try the next one
             logging.exception("Couldn't start instance")
+            break
             continue
 
         # XXX temporary
-        # break
+        break
         count += 1
         if count == 3:
             # start three per round
             break
 
 
-def cleanup_task(vendor, server, data_dir, regions):
+def cleanup_task(vendor, server, data_dir, regions=[], zones=[]):
+    """
+    Some vendors support creating resources in regions, without explicitly specifying the zone, some don't,
+    so we support both of them. We'll go through all regions or zones whatever is specified.
+    """
     from datetime import datetime
     from sc_runner import runner
 
@@ -367,9 +391,10 @@ def cleanup_task(vendor, server, data_dir, regions):
             destroy = f"Destroying {vendor}/{server}, last task start date: {last_start}"
 
     if destroy:
-        resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor))
-        for region in regions:
-            resource_opts["region"] = region
+        resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor), {})
+        # use either regions or zones for cleaning up the stacks
+        for opt_name, value in itertools.chain(zip(["region"] * len(regions), regions), zip(["zone"] * len(zones), zones)):
+            resource_opts[opt_name] = value
             # In order not to cause unnecessary locks in Pulumi, we first get the stack's resources to see if
             # it's already empty, and in that case, we don't destroy it.
             try:
@@ -395,13 +420,18 @@ def cleanup(ctx, threads):
     from sc_runner import runner
     from sc_runner.resources import supported_vendors
     with ThreadPoolExecutor(max_workers=threads) as executor:
-        for (vendor, server), (_, regions) in available_servers().items():
+        for (vendor, server), (_, regions, zones) in available_servers().items():
             if vendor not in supported_vendors:
                 # sc-runner can't yet handle this vendor
                 continue
             data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
-            # process this in a thread as getting Pulumi state is very slow
-            executor.submit(cleanup_task, vendor, server, data_dir, regions)
+            # process the cleanup in a thread as getting Pulumi state is very slow
+            if vendor in {"aws"}:
+                # with these vendors we use region to create resources, so clean those up
+                executor.submit(cleanup_task, vendor, server, data_dir, regions=regions)
+            else:
+                # the others use zones
+                executor.submit(cleanup_task, vendor, server, data_dir, zones=zones)
 
 
 @cli.command()
