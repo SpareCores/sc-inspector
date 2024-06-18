@@ -234,10 +234,12 @@ def available_servers(vendor: str | None = None, region: str | None = None):
     engine = create_engine(f"sqlite:///{path}")
     session = Session(engine)
     stmt = (select(
-        ServerPrice.vendor_id,
-        Region.api_reference,
-        Zone.api_reference,
-        Server)
+                   ServerPrice.vendor_id,
+                   Region.api_reference,
+                   Zone.api_reference,
+                   Server
+            )
+            .where(ServerPrice.status == "ACTIVE")
             .join(Region, Region.region_id == ServerPrice.region_id)
             .join(Zone, Zone.zone_id == ServerPrice.zone_id)
             .join(Server)
