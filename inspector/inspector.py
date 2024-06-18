@@ -165,9 +165,7 @@ EXCLUDE_INSTANCES: list[tuple[str, str]] = [
 ]
 
 RESOURCE_OPTS = {
-    "aws": dict(
-        region="us-west-2",
-    ),
+    "aws": dict(region="us-west-2"),
     "gcp": dict(zone="us-central1-a"),
 }
 USER_DATA = """#!/bin/sh
@@ -282,11 +280,11 @@ def start(ctx, exclude, start_only):
             # sc-runner can't yet handle this vendor
             continue
         resource_opts = RESOURCE_OPTS.get(vendor, {})
-        if resource_opts and RESOURCE_OPTS.get(vendor, {}).get("region") not in regions:
+        if resource_opts and RESOURCE_OPTS.get(vendor, {}).get("region") and RESOURCE_OPTS.get(vendor, {}).get("region") not in regions:
             # if this server is unavailable in the default region, use a different one
             resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor))
             resource_opts["region"] = regions.pop()
-        if resource_opts and RESOURCE_OPTS.get(vendor, {}).get("zone") not in zones:
+        if resource_opts and RESOURCE_OPTS.get(vendor, {}).get("zone") and RESOURCE_OPTS.get(vendor, {}).get("zone") not in zones:
             # if this server is unavailable in the default region, use a different one
             resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor))
             resource_opts["zone"] = zones.pop()
