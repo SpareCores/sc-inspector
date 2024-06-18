@@ -330,6 +330,14 @@ def start(ctx, exclude, start_only):
                 # increase root volume size
                 root_block_device=aws.ec2.InstanceRootBlockDeviceArgs(volume_size=16),
             )
+            # before starting, destroy everything to make sure the user-data will run (this is the first boot)
+            runner.destroy(vendor, {}, resource_opts | dict(instance=server))
+            try:
+                runner.create(vendor, {}, resource_opts | dict(instance=server, instance_opts=instance_opts))
+            except Exception:
+                # on failure, try the next one
+                logging.exception("Couldn't start instance")
+                continue
         if vendor == "gcp":
             # select the first zone from the list
             bootdisk_init_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "bootdisk_init_opts")
@@ -339,15 +347,18 @@ def start(ctx, exclude, start_only):
                 bootdisk_init_opts |= dict(image="ubuntu-2404-lts-amd64", size=16)
             resource_opts |= dict(bootdisk_init_opts=bootdisk_init_opts)
             instance_opts |= dict(metadata_startup_script=user_data)
-        # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-        runner.destroy(vendor, {}, resource_opts | dict(instance=server))
-        try:
-            runner.create(vendor, {}, resource_opts | dict(instance=server, instance_opts=instance_opts))
-        except Exception:
-            # on failure, try the next one
-            logging.exception("Couldn't start instance")
-            break
-            continue
+
+            for zone in zones:
+                resource_opts["zone"] = zone
+                # before starting, destroy everything to make sure the user-data will run (this is the first boot)
+                runner.destroy(vendor, {}, resource_opts | dict(instance=server))
+                try:
+                    runner.create(vendor, {}, resource_opts | dict(instance=server, instance_opts=instance_opts))
+                    break
+                except Exception:
+                    # on failure, try the next one
+                    logging.exception("Couldn't start instance")
+                    continue
 
         # XXX temporary
         break
