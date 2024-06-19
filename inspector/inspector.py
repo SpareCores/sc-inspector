@@ -361,7 +361,7 @@ def start(ctx, exclude, start_only):
                     continue
 
         # XXX temporary
-        break
+        # break
         count += 1
         if count == 3:
             # start three per round
