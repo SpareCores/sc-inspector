@@ -239,9 +239,10 @@ def available_servers(vendor: str | None = None, region: str | None = None):
                    Server
             )
             .where(ServerPrice.status == "ACTIVE")
+            .where(ServerPrice.allocation == "ONDEMAND")
             .join(Region, Region.region_id == ServerPrice.region_id)
             .join(Zone, Zone.zone_id == ServerPrice.zone_id)
-            .join(Server)
+            .join(Server).order_by(ServerPrice.price)
     )
     if vendor:
         stmt = stmt.where(ServerPrice.vendor_id == vendor)
@@ -250,10 +251,12 @@ def available_servers(vendor: str | None = None, region: str | None = None):
     servers = {}
     for vendor, region, zone, server in session.exec(stmt.distinct()).all():
         if (vendor, server.api_reference) in servers:
-            servers[(vendor, server.api_reference)][1].add(region)
-            servers[(vendor, server.api_reference)][2].add(zone)
+            if region not in servers[(vendor, server.api_reference)][1]:
+                servers[(vendor, server.api_reference)][1].append(region)
+            if zone not in servers[(vendor, server.api_reference)][2]:
+                servers[(vendor, server.api_reference)][2].append(zone)
         else:
-            servers[(vendor, server.api_reference)] = [server, {region}, {zone}]
+            servers[(vendor, server.api_reference)] = [server, [region], [zone]]
     return servers
 
 
@@ -283,11 +286,11 @@ def start(ctx, exclude, start_only):
         if resource_opts and RESOURCE_OPTS.get(vendor, {}).get("region") and RESOURCE_OPTS.get(vendor, {}).get("region") not in regions:
             # if this server is unavailable in the default region, use a different one
             resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor))
-            resource_opts["region"] = regions.pop()
+            resource_opts["region"] = regions.pop(0)
         if resource_opts and RESOURCE_OPTS.get(vendor, {}).get("zone") and RESOURCE_OPTS.get(vendor, {}).get("zone") not in zones:
             # if this server is unavailable in the default region, use a different one
             resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor))
-            resource_opts["zone"] = zones.pop()
+            resource_opts["zone"] = zones.pop(0)
 
         gpu_count = srv.gpu_count
         logging.info(f"Evaluating {vendor}/{server} with {gpu_count} GPUs")
