@@ -349,12 +349,13 @@ def start(ctx, exclude, start_only):
             else:
                 bootdisk_init_opts |= dict(image="ubuntu-2404-lts-amd64", size=16)
             resource_opts |= dict(bootdisk_init_opts=bootdisk_init_opts,
-                                  scheduling_opts=dict(
-                                      automatic_restart=False,
-                                      instance_termination_action="DELETE",
-                                      on_host_maintenance="TERMINATE",
-                                      preemptible=True,
-                                  ))
+                                  # scheduling_opts=dict(
+                                  #     automatic_restart=False,
+                                  #     instance_termination_action="DELETE",
+                                  #     on_host_maintenance="TERMINATE",
+                                  #     preemptible=True,
+                                  # )
+                                  )
             instance_opts |= dict(metadata_startup_script=user_data)
 
             for zone in zones:
