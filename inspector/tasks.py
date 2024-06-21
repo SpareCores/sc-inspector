@@ -84,7 +84,7 @@ class StressNgLongRun(lib.DockerTask):
     to 55 seconds per minute (from the 11th hour) linearly.
     """
 
-    servers_only: list[tuple] = {
+    servers_only: set[tuple] = {
         ("aws", "t4g.large"),
         ("aws", "m7g.large"),
         ("hcloud", "cx21"),
