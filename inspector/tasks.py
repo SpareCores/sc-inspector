@@ -82,7 +82,14 @@ class StressNgLongRun(lib.DockerTask):
     This task is limited to a few instance types.
     """
 
-    servers_only = [("aws", "t4g.large"), ("aws", "m7g.large")]
+    servers_only = [
+        ("aws", "t4g.large"),
+        ("aws", "m7g.large"),
+        ("hcloud", "cx21"),
+        ("hcloud", "cx22"),
+        ("hcloud", "cax11"),
+        ("hcloud", "ccx13"),
+    ]
     parallel: bool = False
     image: str = f"ghcr.io/colinianking/stress-ng:{STRESSNG_TAG}"
     docker_opts: dict = lib.DOCKER_OPTS | dict(entrypoint="sh")
