@@ -135,6 +135,7 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
         logging.info(f"Skipping task {task.name} because it requires {task.minimum_memory} GiB RAM, but this machine has only {mem_gib:.03}")
         return False
     if task.servers_only and (srv.vendor_id, srv.api_reference) not in task.servers_only:
+        logging.info(f"Skipping task {task.name} because it is not enabled for {srv.vendor_id}/{srv.api_reference}")
         return False
 
     if meta.start:
@@ -172,6 +173,7 @@ def should_run(task: Task, data_dir: str | os.PathLike, vendor: str, instance: s
         # skip tasks which require GPUs on a server which doesn't have one
         return False
     if task.servers_only and (vendor, instance) not in task.servers_only:
+        logging.info(f"Skipping task {task.name} because it is not enabled for {vendor}/{instance}")
         return False
     if meta.end and task.rerun and (datetime.now() - meta.end) >= task.rerun and meta.exit_code == 0:
         return True
