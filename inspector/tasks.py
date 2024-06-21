@@ -97,7 +97,7 @@ class StressNgLongRun(lib.DockerTask):
     docker_opts: dict = lib.DOCKER_OPTS | dict(entrypoint="sh")
     version_docker_opts: dict = dict(entrypoint="sh")
     version_command: str = "-c \"stress-ng --version | awk '{print $3}'\""
-    command: str = '-c "nice -n -20 sh -c \'for i in \\$(seq 1 5); do SPM=\\$((\\$((\\$i / 60 + 1)) * 5)); SPM=\\$(( \\$SPM > 55 ? 55 : \\$SPM )); stress-ng --metrics --cpu $(nproc) --cpu-method div16 -t \\$SPM -Y /dev/stderr; sleep \\$((60 - \\$(date +%-S) )); done\'"'
+    command: str = '-c "nice -n -20 sh -c \'for i in $(seq 1 5); do SPM=$(($(($i / 60 + 1)) * 5)); SPM=$(( $SPM > 55 ? 55 : $SPM )); stress-ng --metrics --cpu $(nproc) --cpu-method div16 -t $SPM -Y /dev/stderr; sleep $((60 - $(date +%-S) )); done\'"'
 
 
 class Openssl(lib.DockerTask):
