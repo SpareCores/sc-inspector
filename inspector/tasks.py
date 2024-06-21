@@ -75,6 +75,14 @@ class StressNgSingleCore(lib.DockerTask):
 
 
 class StressNgLongRun(lib.DockerTask):
+    """
+    Runs the StressNg task for an extended time by running
+    stress-ng for 55 seconds in every minute, then sleeping until the
+    start of the next minute, repeated 1440 times.
+    This task is limited to a few instance types.
+    """
+
+    servers_only = [("aws", "t4g.large"), ("aws", "m7g.large")]
     parallel: bool = False
     image: str = f"ghcr.io/colinianking/stress-ng:{STRESSNG_TAG}"
     docker_opts: dict = lib.DOCKER_OPTS | dict(entrypoint="sh")

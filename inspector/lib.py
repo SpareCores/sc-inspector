@@ -52,6 +52,7 @@ class Meta(BaseModel):
 
 class Task(BaseModel):
     vendors_only: set = set()  # run for these vendors only, empty means all
+    servers_only: list[set] = []  # run for these vendor/server pairs only, empty means all
     parallel: bool = False  # should we run this task concurrently with other tasks in the same priority group?
     priority: int | float = math.inf  # lower priority runs earlier, missing means last
     version_command: str | list | None = None  # command to run to get the version
@@ -133,6 +134,9 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
         mem_gib = srv.memory_amount / 1024
         logging.info(f"Skipping task {task.name} because it requires {task.minimum_memory} GiB RAM, but this machine has only {mem_gib:.03}")
         return False
+    if task.servers_only:
+        if not any((srv.vendor_id, srv.api_reference) == so for so in task.servers_only):
+            return False
 
     if meta.start:
         if (datetime.now() - meta.start) >= FAIL_IF_NO_OUTPUT and (meta.end is None or meta.exit_code is None):
