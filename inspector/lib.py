@@ -297,7 +297,7 @@ def run_task(q: Queue, data_dir: str | os.PathLike) -> None:
             q.task_done()
 
 
-def run_tasks(vendor, data_dir: str | os.PathLike, vendor: str, instance: str, gpu_count: int = 0, nthreads: int = 8):
+def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: int = 0, nthreads: int = 8):
     taskgroups = get_taskgroups(vendor)
 
     # initialize thread pool

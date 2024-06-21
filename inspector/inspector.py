@@ -502,7 +502,6 @@ def inspect(ctx, vendor, instance, gpu_count, threads):
     lib.run_tasks(
         vendor,
         data_dir,
-        vendor=vendor,
         instance=instance,
         gpu_count=gpu_count,
         nthreads=threads,
