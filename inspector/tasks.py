@@ -76,7 +76,7 @@ class StressNgSingleCore(lib.DockerTask):
 
 class StressNgLongRun(lib.DockerTask):
     """
-    Runs the StressNg task for an extended time by running
+    An extended version of the multicore StressNg task: running
     stress-ng for an increasing number of seconds per minute, then
     sleeping until the start of the next minute, repeated 1440 times,
     so running for a full day.
@@ -97,7 +97,7 @@ class StressNgLongRun(lib.DockerTask):
     docker_opts: dict = lib.DOCKER_OPTS | dict(entrypoint="sh")
     version_docker_opts: dict = dict(entrypoint="sh")
     version_command: str = "-c \"stress-ng --version | awk '{print $3}'\""
-    command: str = '-c "nice -n -20 sh -c \'for i in $(seq 1 5); do SPM=$(($(($i / 60 + 1)) * 5)); SPM=$(( $SPM > 55 ? 55 : $SPM )); stress-ng --metrics --cpu $(nproc) --cpu-method div16 -t $SPM -Y /dev/stderr; sleep $((60 - $(date +%-S) )); done\'"'
+    command: str = '-c "nice -n -20 sh -c \'for i in $(seq 1 1440); do SPM=$(($(($i / 60 + 1)) * 5)); SPM=$(( $SPM > 55 ? 55 : $SPM )); stress-ng --metrics --cpu $(nproc) --cpu-method div16 -t $SPM -Y /dev/stderr; sleep $((60 - $(date +%-S) )); done\'"'
 
 
 class Openssl(lib.DockerTask):
