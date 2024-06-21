@@ -74,6 +74,15 @@ class StressNgSingleCore(lib.DockerTask):
     command: str = "-c \"nice -n -20 stress-ng --metrics --cpu 1 --cpu-method div16 -t 20 -Y /dev/stderr\""
 
 
+class StressNgLongRun(lib.DockerTask):
+    parallel: bool = False
+    image: str = f"ghcr.io/colinianking/stress-ng:{STRESSNG_TAG}"
+    docker_opts: dict = lib.DOCKER_OPTS | dict(entrypoint="sh")
+    version_docker_opts: dict = dict(entrypoint="sh")
+    version_command: str = "-c \"stress-ng --version | awk '{print $3}'\""
+    command: str = '-c "nice -n -20 for _ in {1..1440}; do stress-ng --metrics --cpu $(nproc) --cpu-method div16 -t 55 -Y /dev/stderr && sleep $((60 - $(date +%-S.%N) )); done"'
+
+
 class Openssl(lib.DockerTask):
     parallel: bool = False
     priority: int = 3
