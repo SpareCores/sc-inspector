@@ -1,3 +1,4 @@
+from datetime import timedelta
 from typing import Callable
 import lib
 import os
@@ -93,6 +94,7 @@ class StressNgLongRun(lib.DockerTask):
         ("hcloud", "ccx13"),
     }
     parallel: bool = False
+    timeout: timedelta = timedelta(hours=26)
     image: str = f"ghcr.io/colinianking/stress-ng:{STRESSNG_TAG}"
     docker_opts: dict = lib.DOCKER_OPTS | dict(entrypoint="sh")
     version_docker_opts: dict = dict(entrypoint="sh")
