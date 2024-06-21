@@ -77,9 +77,11 @@ class StressNgSingleCore(lib.DockerTask):
 class StressNgLongRun(lib.DockerTask):
     """
     Runs the StressNg task for an extended time by running
-    stress-ng for 55 seconds in every minute, then sleeping until the
-    start of the next minute, repeated 1440 times.
-    This task is limited to a few instance types.
+    stress-ng for an increasing number of seconds per minute, then
+    sleeping until the start of the next minute, repeated 1440 times,
+    so running for a full day.
+    The load is increased from 5 seconds per minute (in the 1st hour)
+    to 55 seconds per minute (from the 11th hour) linearly.
     """
 
     servers_only = {
