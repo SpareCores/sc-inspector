@@ -499,7 +499,14 @@ def inspect(ctx, vendor, instance, gpu_count, threads):
     data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, instance)
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
-    lib.run_tasks(vendor, data_dir, gpu_count=gpu_count, nthreads=threads)
+    lib.run_tasks(
+        vendor,
+        data_dir,
+        vendor=vendor,
+        instance=instance,
+        gpu_count=gpu_count,
+        nthreads=threads,
+    )
 
 
 if __name__ == "__main__":

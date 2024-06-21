@@ -158,7 +158,7 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
     return False
 
 
-def should_run(task: Task, data_dir: str | os.PathLike, gpu_count: int) -> bool:
+def should_run(task: Task, data_dir: str | os.PathLike, vendor: str, instance: str, gpu_count: int) -> bool:
     """Return True if we should run a task."""
     meta = load_task_meta(task, data_dir)
     thash = task_hash(task)
@@ -170,6 +170,8 @@ def should_run(task: Task, data_dir: str | os.PathLike, gpu_count: int) -> bool:
     if task.gpu and not gpu_count:
         logging.info(f"Skipping task {task.name} because it requires GPU, but gpu_count is {gpu_count}")
         # skip tasks which require GPUs on a server which doesn't have one
+        return False
+    if task.servers_only and (vendor, instance) not in task.servers_only:
         return False
     if meta.end and task.rerun and (datetime.now() - meta.end) >= task.rerun and meta.exit_code == 0:
         return True
@@ -295,7 +297,7 @@ def run_task(q: Queue, data_dir: str | os.PathLike) -> None:
             q.task_done()
 
 
-def run_tasks(vendor, data_dir: str | os.PathLike, gpu_count: int = 0, nthreads: int = 8):
+def run_tasks(vendor, data_dir: str | os.PathLike, vendor: str, instance: str, gpu_count: int = 0, nthreads: int = 8):
     taskgroups = get_taskgroups(vendor)
 
     # initialize thread pool
@@ -309,7 +311,7 @@ def run_tasks(vendor, data_dir: str | os.PathLike, gpu_count: int = 0, nthreads:
     # non-parallel ones)
     for taskgroup in sorted(taskgroups.keys()):
         for task in taskgroups[taskgroup]:
-            if not should_run(task, data_dir, gpu_count):
+            if not should_run(task, data_dir, vendor, instance, gpu_count):
                 continue
             logging.info(f"Starting {task.name}")
             q.put(task)
