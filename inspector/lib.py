@@ -60,7 +60,7 @@ class Task(BaseModel):
     parse_output: list[Callable] = []  # functions to parse the already collected outputs from the repo
     rerun: timedelta | None = None  # re-run the task after a delay on successful execution, None means no re-evaluation
     timeout: timedelta = timedelta(minutes=30)  # timeout for the task
-    name: str  # name of the task
+    name: str | None = None  # name of the task
     gpu: bool = False  # requires a machine with GPU(s)
     minimum_memory: float = 0  # minimum memory in GiBs for this test
 
@@ -99,15 +99,14 @@ def task_hash(task: Task) -> str:
 def get_taskgroups(vendor: str) -> dict[tuple[float, bool], list[Task]]:
     import tasks
     taskgroups = defaultdict(list)
-    for name, model in inspect.getmembers(tasks):
-        if inspect.isclass(model) and issubclass(model, Task) and model not in (Task, DockerTask):
-            # I couldn't find a better way to have the model's class name inside the instance other than to
-            # explicitly pass it as an argument
-            obj = model(name=model.__name__.lower())
+    for name, task in inspect.getmembers(tasks):
+        if isinstance(task, Task) or isinstance(task, DockerTask):
+            # task name becomes the variable's name
+            task.name = name.lower()
             # only add the task if vendor is listed in vendors_only or if it's empty
-            if vendor in obj.vendors_only or not obj.vendors_only:
+            if vendor in task.vendors_only or not task.vendors_only:
                 # execute parallel tasks first by negating the parallel option, so it gets forward during sorting
-                taskgroups[(obj.priority, not obj.parallel)].append(obj)
+                taskgroups[(task.priority, not task.parallel)].append(task)
     return taskgroups
 
 
