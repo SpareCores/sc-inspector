@@ -103,6 +103,7 @@ class Compression_Text(lib.DockerTask):
     image: str = "ghcr.io/sparecores/benchmark:main"
     # try to protect the inspector from OOM situations
     docker_opts: dict = lib.DOCKER_OPTS | dict(mem_limit=int(mem_bytes * 0.85))
+    minimum_memory: float = 1
     command: str = "nice -n -20 python /usr/local/bin/compress.py"
 
 
@@ -110,4 +111,5 @@ class Bw_mem(lib.DockerTask):
     parallel: bool = False
     priority: int = 6
     image: str = "ghcr.io/sparecores/benchmark:main"
+    minimum_memory: float = 1
     command: str = "bw_mem.sh"
