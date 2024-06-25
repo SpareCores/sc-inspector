@@ -136,4 +136,5 @@ bw_mem = DockerTask(
     priority=6,
     image="ghcr.io/sparecores/benchmark:main",
     minimum_memory=1,
-    command="bw_mem.sh"
+    command="bw_mem.sh",
+)
