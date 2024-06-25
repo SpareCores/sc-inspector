@@ -52,6 +52,7 @@ class Meta(BaseModel):
 
 class Task(BaseModel):
     vendors_only: set = set()  # run for these vendors only, empty means all
+    servers_only: set[tuple] = ()  # run for these vendor/server pairs only, empty means all
     parallel: bool = False  # should we run this task concurrently with other tasks in the same priority group?
     priority: int | float = math.inf  # lower priority runs earlier, missing means last
     version_command: str | list | None = None  # command to run to get the version
@@ -132,6 +133,9 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
         mem_gib = srv.memory_amount / 1024
         logging.info(f"Skipping task {task.name} because it requires {task.minimum_memory} GiB RAM, but this machine has only {mem_gib:.03}")
         return False
+    if task.servers_only and (srv.vendor_id, srv.api_reference) not in task.servers_only:
+        logging.info(f"Skipping task {task.name} because it is not enabled for {srv.vendor_id}/{srv.api_reference}")
+        return False
 
     if meta.start:
         if (datetime.now() - meta.start) >= FAIL_IF_NO_OUTPUT and (meta.end is None or meta.exit_code is None):
@@ -154,7 +158,7 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
     return False
 
 
-def should_run(task: Task, data_dir: str | os.PathLike, gpu_count: int) -> bool:
+def should_run(task: Task, data_dir: str | os.PathLike, vendor: str, instance: str, gpu_count: int) -> bool:
     """Return True if we should run a task."""
     meta = load_task_meta(task, data_dir)
     thash = task_hash(task)
@@ -166,6 +170,9 @@ def should_run(task: Task, data_dir: str | os.PathLike, gpu_count: int) -> bool:
     if task.gpu and not gpu_count:
         logging.info(f"Skipping task {task.name} because it requires GPU, but gpu_count is {gpu_count}")
         # skip tasks which require GPUs on a server which doesn't have one
+        return False
+    if task.servers_only and (vendor, instance) not in task.servers_only:
+        logging.info(f"Skipping task {task.name} because it is not enabled for {vendor}/{instance}")
         return False
     if meta.end and task.rerun and (datetime.now() - meta.end) >= task.rerun and meta.exit_code == 0:
         return True
@@ -290,7 +297,7 @@ def run_task(q: Queue, data_dir: str | os.PathLike) -> None:
             q.task_done()
 
 
-def run_tasks(vendor, data_dir: str | os.PathLike, gpu_count: int = 0, nthreads: int = 8):
+def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: int = 0, nthreads: int = 8):
     taskgroups = get_taskgroups(vendor)
 
     # initialize thread pool
@@ -304,7 +311,7 @@ def run_tasks(vendor, data_dir: str | os.PathLike, gpu_count: int = 0, nthreads:
     # non-parallel ones)
     for taskgroup in sorted(taskgroups.keys()):
         for task in taskgroups[taskgroup]:
-            if not should_run(task, data_dir, gpu_count):
+            if not should_run(task, data_dir, vendor, instance, gpu_count):
                 continue
             logging.info(f"Starting {task.name}")
             q.put(task)

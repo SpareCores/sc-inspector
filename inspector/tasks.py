@@ -1,3 +1,4 @@
+from datetime import timedelta
 from lib import DockerTask, DOCKER_OPTS
 import os
 import parse
@@ -71,6 +72,32 @@ stressngsinglecore = DockerTask(
     command="-c \"nice -n -20 stress-ng --metrics --cpu 1 --cpu-method div16 -t 20 -Y /dev/stderr\"",
 )
 
+# An extended version of the multicore StressNg task: running
+# stress-ng for an increasing number of seconds per minute, then
+# sleeping until the start of the next minute, repeated 1440 times,
+# so running for a full day.
+# The load is increased from 5 seconds per minute (in the 1st hour)
+# to 55 seconds per minute (from the 11th hour) linearly.
+stressnglongrung = DockerTask(
+    servers_only={
+        ("aws", "t4g.medium"),
+        ("aws", "c7g.large"),
+        ("gcp", "e2-medium"),
+        ("gcp", "c2d-highcpu-2"),
+        ("hcloud", "cx21"),
+        ("hcloud", "cx22"),
+        ("hcloud", "cax11"),
+        ("hcloud", "ccx13"),
+    },
+    parallel=False,
+    timeout=timedelta(hours=26),
+    image=f"ghcr.io/colinianking/stress-ng:{STRESSNG_TAG}",
+    docker_opts=DOCKER_OPTS | dict(entrypoint="sh"),
+    version_docker_opts=dict(entrypoint="sh"),
+    version_command="-c \"stress-ng --version | awk '{print $3}'\"",
+    command="-c \"nice -n -20 sh -c 'for i in $(seq 1 1440); do SPM=$(($(($i / 60 + 1)) * 5)); SPM=$(( $SPM > 55 ? 55 : $SPM )); stress-ng --metrics --cpu $(nproc) --cpu-method div16 -t $SPM -Y /dev/stderr; sleep $((60 - $(date +%-S) )); done'\"",
+)
+
 openssl = DockerTask(
     parallel=False,
     priority=3,
@@ -109,5 +136,5 @@ bw_mem = DockerTask(
     priority=6,
     image="ghcr.io/sparecores/benchmark:main",
     minimum_memory=1,
-    command="bw_mem.sh"
+    command="bw_mem.sh",
 )
