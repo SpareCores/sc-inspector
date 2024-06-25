@@ -52,7 +52,7 @@ class Meta(BaseModel):
 
 class Task(BaseModel):
     vendors_only: set = set()  # run for these vendors only, empty means all
-    servers_only: set[tuple] = ()  # run for these vendor/server pairs only, empty means all
+    servers_only: set[tuple] = set()  # run for these vendor/server pairs only, empty means all
     parallel: bool = False  # should we run this task concurrently with other tasks in the same priority group?
     priority: int | float = math.inf  # lower priority runs earlier, missing means last
     version_command: str | list | None = None  # command to run to get the version
