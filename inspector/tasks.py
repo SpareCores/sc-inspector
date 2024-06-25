@@ -80,8 +80,10 @@ stressngsinglecore = DockerTask(
 # to 55 seconds per minute (from the 11th hour) linearly.
 stressnglongrung = DockerTask(
     servers_only={
-        ("aws", "t4g.large"),
-        ("aws", "m7g.large"),
+        ("aws", "t4g.medium"),
+        ("aws", "c7g.large"),
+        ("gcp", "e2-medium"),
+        ("gcp", "c2d-highcpu-2"),
         ("hcloud", "cx21"),
         ("hcloud", "cx22"),
         ("hcloud", "cax11"),
