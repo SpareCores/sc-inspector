@@ -38,7 +38,8 @@ def get_repo(repo_url=REPO_URL, repo_path=REPO_PATH):
 @synchronized
 def push_path(path: str | os.PathLike, msg: str):
     repo = get_repo()
-    changes = repo.index.add(path)
+    repo.index.add(path)
+    changes = repo.index.diff("HEAD")
     if len(changes):
         repo.index.commit(msg)
         origin = repo.remote(name="origin")
