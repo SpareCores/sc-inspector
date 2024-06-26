@@ -348,13 +348,13 @@ def start(ctx, exclude, start_only):
                 bootdisk_init_opts |= dict(image="ubuntu-2404-lts-arm64", size=16)
             else:
                 bootdisk_init_opts |= dict(image="ubuntu-2404-lts-amd64", size=16)
+
+            is_preemptible = server.startswith("e2")
             resource_opts |= dict(bootdisk_init_opts=bootdisk_init_opts,
                                   scheduling_opts=dict(
-                                  #     automatic_restart=False,
-                                  #     instance_termination_action="DELETE",
-                                      on_host_maintenance="TERMINATE",
-                                  #     preemptible=True,
-                                  )
+                                      preemptible=is_preemptible,
+                                      automatic_restart=False if is_preemptible else True,
+                                      on_host_maintenance="TERMINATE")
                                   )
             instance_opts |= dict(metadata_startup_script=user_data)
 
