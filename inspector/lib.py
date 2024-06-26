@@ -31,7 +31,7 @@ FAIL_IF_NO_OUTPUT = timedelta(days=7)
 FAIL_ON_ERROR = timedelta(days=7)
 # destroy the instance one hour after it has been started
 DESTROY_AFTER = timedelta(hours=1)
-DOCKER_OPTS = dict(detach=True, privileged=True)
+DOCKER_OPTS = dict(detach=True, privileged=True, network_mode="host")
 DOCKER_OPTS_GPU = dict(device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])])
 
 
