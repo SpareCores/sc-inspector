@@ -170,8 +170,8 @@ RESOURCE_OPTS = {
 }
 USER_DATA = """#!/bin/sh
 
-# just to be sure, schedule a shutdown in 60 minutes
-shutdown --no-wall +60
+# just to be sure, schedule a shutdown early
+shutdown --no-wall +{SHUTDOWN_MINS}
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
@@ -271,7 +271,7 @@ def cli(repo_path):
 @click.option("--exclude", type=(str, str), default=EXCLUDE_INSTANCES, multiple=True, help="Exclude $vendor $instance")
 @click.option("--start-only", type=(str, str), multiple=True, help="Start only $vendor $instance")
 def start(ctx, exclude, start_only):
-    from datetime import datetime
+    from datetime import datetime, timedelta
     from sc_runner import runner
     from sc_runner.resources import default, supported_vendors
     import base64
@@ -306,9 +306,11 @@ def start(ctx, exclude, start_only):
             logging.info(f"No tasks for {vendor}/{server}")
             continue
         logging.info(f"Starting {vendor}/{server}")
+        sum_timeout = timedelta()
         for task in tasks:
             meta = lib.Meta(start=datetime.now(), task_hash=lib.task_hash(task))
             lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
+            sum_timeout += task.timeout
         if os.environ.get("GITHUB_TOKEN"):
             repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
         # start instance
@@ -321,6 +323,7 @@ def start(ctx, exclude, start_only):
             VENDOR=vendor,
             INSTANCE=server,
             GPU_COUNT=gpu_count,
+            SHUTDOWN_MINS=int(sum_timeout.total_seconds()/60),
         )
         b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
         # get default instance opts for the vendor and add ours
