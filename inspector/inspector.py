@@ -414,10 +414,11 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[]):
     if already_ended and all(already_ended):
         destroy = f"Destroying {vendor}/{server}, all tasks have finished"
 
-    # if DESTROY_AFTER has already passed since the newest start time, we should destroy the stack/instance
+    # if DESTROY_AFTER has already passed since the newest start time + max timeout,
+    # we should destroy the stack/instance
     if start_times:
         last_start = max(start_times)
-        if datetime.now() - lib.DESTROY_AFTER >= last_start:
+        if datetime.now() - lib.DESTROY_AFTER >= last_start + max([t.timeout for t in tasks]):
             destroy = f"Destroying {vendor}/{server}, last task start date: {last_start}"
 
     if destroy:
