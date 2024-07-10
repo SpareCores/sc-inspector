@@ -4,6 +4,7 @@ dmiparser
 docker
 fastnumbers
 lxml
+psutil
 requests
 sparecores-crawler
 sparecores-data
