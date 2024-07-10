@@ -115,6 +115,8 @@ geekbench = DockerTask(
     docker_opts=DOCKER_OPTS | dict(
         environment={"BENCHMARK_SECRETS_PASSPHRASE": os.environ.get("BENCHMARK_SECRETS_PASSPHRASE")},
         mem_limit=int(mem_bytes * 0.85),
+        memswap_limit=int(mem_bytes * 0.85),
+        mem_swappiness=0,
     ),
     minimum_memory=1.3,
     transform_output=[transform.raw, transform.fetch_geekbench_results],
@@ -126,7 +128,11 @@ compression_text = DockerTask(
     priority=5,
     image="ghcr.io/sparecores/benchmark:main",
     # try to protect the inspector from OOM situations
-    docker_opts=DOCKER_OPTS | dict(mem_limit=int(mem_bytes * 0.85)),
+    docker_opts=DOCKER_OPTS | dict(
+        mem_limit=int(mem_bytes * 0.85),
+        memswap_limit=int(mem_bytes * 0.85),
+        mem_swappiness=0,
+    ),
     minimum_memory=1,
     command="nice -n -20 python /usr/local/bin/compress.py"
 )
