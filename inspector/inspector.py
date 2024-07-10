@@ -366,11 +366,7 @@ def start(ctx, exclude, start_only):
             for zone in zones:
                 resource_opts["zone"] = zone
                 # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-                try:
-                    runner.destroy(vendor, {}, resource_opts | dict(instance=server))
-                except Exception:
-                    # GCP fails on already deleted resource, don't fail on it
-                    logging.exception("Error while destroying stack")
+                runner.destroy(vendor, {}, resource_opts | dict(instance=server))
                 try:
                     runner.create(vendor, {}, resource_opts | dict(instance=server, instance_opts=instance_opts))
                     break
