@@ -129,13 +129,6 @@ compression_text = DockerTask(
     parallel=False,
     priority=5,
     image="ghcr.io/sparecores/benchmark:main",
-    # try to protect the inspector from OOM situations
-    docker_opts=DOCKER_OPTS | dict(
-        mem_limit=int(mem_bytes * 0.85),
-        memswap_limit=int(mem_bytes * 0.85),
-        mem_swappiness=0,
-    ),
-    minimum_memory=1,
     command="nice -n -20 python /usr/local/bin/compress.py"
 )
 
