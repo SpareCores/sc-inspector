@@ -306,12 +306,13 @@ def start(ctx, exclude, start_only):
         if not tasks:
             logging.info(f"No tasks for {vendor}/{server}")
             continue
-        logging.info(f"Starting {vendor}/{server}")
         sum_timeout = timedelta()
         for task in tasks:
             meta = lib.Meta(start=datetime.now(), task_hash=lib.task_hash(task))
             lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
             sum_timeout += task.timeout
+        timeout_mins = int(sum_timeout.total_seconds()/60)
+        logging.info(f"Starting {vendor}/{server} with {timeout_mins}m timeout")
         if os.environ.get("GITHUB_TOKEN"):
             repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
         # start instance
@@ -324,7 +325,7 @@ def start(ctx, exclude, start_only):
             VENDOR=vendor,
             INSTANCE=server,
             GPU_COUNT=gpu_count,
-            SHUTDOWN_MINS=int(sum_timeout.total_seconds()/60),
+            SHUTDOWN_MINS=timeout_mins,
         )
         b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
         # get default instance opts for the vendor and add ours
