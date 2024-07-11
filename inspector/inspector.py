@@ -388,7 +388,7 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[]):
     Some vendors support creating resources in regions, without explicitly specifying the zone, some don't,
     so we support both of them. We'll go through all regions or zones whatever is specified.
     """
-    from datetime import datetime
+    from datetime import datetime, timedelta
     from sc_runner import runner
 
     tasks = list(lib.get_tasks(vendor))
@@ -400,27 +400,37 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[]):
 
     start_times = []
     already_ended = []
+    sum_timeout = timedelta()
+    # get the maximum possible timeout for this server
+    max_timeout = sum([task.timeout for task in tasks if not (task.servers_only and (vendor, server) not in task.servers_only)], timedelta())
     for task in tasks:
+        if task.servers_only and (vendor, server) not in task.servers_only:
+            # this task doesn't run on this server, leave it out
+            continue
         meta = lib.load_task_meta(task, data_dir=data_dir)
         if not meta.start:
             continue
         start_times.append(meta.start)
         if meta.end:
-            if meta.end >= meta.start:
-                already_ended.append(True)
-        else:
+            # the task has already finished
+            already_ended.append(True)
+        elif datetime.now() <= meta.start + max_timeout + lib.DESTROY_AFTER:
+            # only count tasks which might already be running and leave out those, which have started before the maximum
+            # timeout has passed to exclude hung tasks from the past
             already_ended.append(False)
+            logging.info(f"Adding task {task.name} timeout: {task.timeout}")
+            sum_timeout += task.timeout
+
+    if start_times and sum_timeout and datetime.now() >= (wait_time := max(start_times) + sum_timeout + lib.DESTROY_AFTER):
+        # We can only estimate the time by which all tasks should have been completed, as the start date is added
+        # to the git repository before the machine starts up, the machine startup can take a long time, and the
+        # tasks do not necessarily run sequentially.
+        # So here, we are using the sum_timeout, which is the sum of all timeouts for unfinished jobs.
+        destroy = f"Destroying {vendor}/{server}, last_start: {max(start_times)}, wait time: {wait_time}"
 
     # if all tasks have already finished, we can destroy the stack
     if already_ended and all(already_ended):
         destroy = f"Destroying {vendor}/{server}, all tasks have finished"
-
-    # if DESTROY_AFTER has already passed since the newest start time + max timeout,
-    # we should destroy the stack/instance
-    if start_times:
-        last_start = max(start_times)
-        if datetime.now() - lib.DESTROY_AFTER >= last_start + max([t.timeout for t in tasks]):
-            destroy = f"Destroying {vendor}/{server}, last task start date: {last_start}"
 
     if destroy:
         resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor), {})
