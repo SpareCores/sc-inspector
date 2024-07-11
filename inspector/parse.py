@@ -1,4 +1,5 @@
 from dmiparser import DmiParser
+import csv
 import copy
 import dateparser
 import fastnumbers
@@ -181,3 +182,24 @@ def openssl(meta, task, task_dir) -> None:
                 parsed_output.append(dict(algo=algo, block_size=blocksizes[i], speed=float(speed[i])))
     with open(os.path.join(task_dir, "parsed.json"), "w") as f:
         json.dump(parsed_output, f, indent=2)
+
+
+class YamlLike(str):
+    def extract(self, key):
+        return re.search(f"{key}: ([0-9:\\.]*)\\n", self).group(1)
+
+    def slice(self):
+        return [YamlLike(s) for s in self.split("...\n---")]
+
+
+def stressnglongrun(meta, task, task_dir) -> None:
+    output = open(os.path.join(task_dir, "stderr"), "r").read()
+    chunks = YamlLike(output).slice()
+    with open(os.path.join(task_dir, "parsed.csv"), "w", newline="") as f:
+        csvfile = csv.writer(f)
+        for chunk in chunks:
+            date = chunk.extract("date-yyyy-mm-dd").replace(":", "-")
+            time = chunk.extract(r"time-hh-mm-ss")
+            value = chunk.extract("bogo-ops-per-second-real-time")
+            duration = chunk.extract("wall-clock-time")
+            csvfile.writerow([date + "T" + time, duration, value])
