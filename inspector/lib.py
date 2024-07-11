@@ -13,6 +13,7 @@ import json
 import logging
 import math
 import os
+import psutil
 import repo
 import subprocess
 import threading
@@ -35,7 +36,7 @@ DOCKER_OPTS = dict(detach=True, privileged=True, network_mode="host")
 DOCKER_OPTS_GPU = dict(device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])])
 
 
-mem_bytes = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+mem_bytes = psutil.virtual_memory().available
 
 
 class Meta(BaseModel):
@@ -163,8 +164,8 @@ def should_run(task: Task, data_dir: str | os.PathLike, vendor: str, instance: s
     meta = load_task_meta(task, data_dir)
     thash = task_hash(task)
     # minimum_memory is GiB
-    if mem_bytes < task.minimum_memory * 1024 ** 2:
-        mem_gib = mem_bytes / 1024 ** 2
+    if mem_bytes < task.minimum_memory * 1024 ** 3:
+        mem_gib = mem_bytes / 1024 ** 3
         logging.info(f"Skipping task {task.name} because it requires {task.minimum_memory} GiB RAM, but this machine has only {mem_gib:.03}")
         return False
     if task.gpu and not gpu_count:
