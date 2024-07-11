@@ -8,7 +8,7 @@ import transform
 STRESSNG_TAG = "b7c7a5877501679a3b0a67d877e6274a801d1e4e"  # V0.17.08
 
 # get the amount of available memory
-mem_bytes = psutil.virtual_memory().available / 1024 ** 2
+mem_bytes = psutil.virtual_memory().available
 
 
 dmidecode = DockerTask(
