@@ -418,7 +418,7 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[]):
             # only count tasks which might already be running and leave out those, which have started before the maximum
             # timeout has passed to exclude hung tasks from the past
             already_ended.append(False)
-            logging.info(f"Adding task {task.name} timeout: {task.timeout}")
+            logging.info(f"{vendor}/{server} Adding task {task.name} timeout: {task.timeout}")
             sum_timeout += task.timeout
 
     if start_times and sum_timeout and datetime.now() >= (wait_time := max(start_times) + sum_timeout + lib.DESTROY_AFTER):
