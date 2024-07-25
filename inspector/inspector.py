@@ -211,7 +211,7 @@ def start(ctx, exclude, start_only):
                 bootdisk_init_opts |= dict(image="ubuntu-2404-lts-amd64", size=16)
 
             # e2 needs to be spot, also, we have only spot quotas for selected GPU instances
-            is_preemptible = server.startswith("e2") or gpu_count
+            is_preemptible = server.startswith("e2") or gpu_count > 0
             resource_opts |= dict(bootdisk_init_opts=bootdisk_init_opts,
                                   scheduling_opts=dict(
                                       preemptible=is_preemptible,
