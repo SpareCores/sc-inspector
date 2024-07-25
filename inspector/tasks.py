@@ -136,11 +136,7 @@ compression_text = DockerTask(
 bw_mem = DockerTask(
     parallel=False,
     priority=6,
+    minimum_memory=1,
     image="ghcr.io/sparecores/benchmark:main",
     command="bw_mem.sh",
-    docker_opts=DOCKER_OPTS | dict(
-        mem_limit=int(mem_bytes * 0.85),
-        memswap_limit=int(mem_bytes * 0.85),
-        mem_swappiness=0,
-    ),
 )
