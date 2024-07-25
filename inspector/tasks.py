@@ -138,4 +138,9 @@ bw_mem = DockerTask(
     priority=6,
     image="ghcr.io/sparecores/benchmark:main",
     command="bw_mem.sh",
+    docker_opts=DOCKER_OPTS | dict(
+        mem_limit=int(mem_bytes * 0.85),
+        memswap_limit=int(mem_bytes * 0.85),
+        mem_swappiness=0,
+    ),
 )
