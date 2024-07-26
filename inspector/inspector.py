@@ -274,11 +274,11 @@ def start(ctx, exclude, start_only):
                 lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
             repo.push_path(data_dir, f"Failed to start server from {repo.gha_url()}")
         # XXX temporary
-        break
-        # count += 1
-        # if count == 3:
+        # break
+        count += 1
+        if count == 3:
             # start three per round
-            # break
+            break
 
 
 def cleanup_task(vendor, server, data_dir, regions=[], zones=[]):
