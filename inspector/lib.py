@@ -141,7 +141,7 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
     if meta.start:
         if (datetime.now() - meta.start) >= FAIL_IF_NO_OUTPUT and (meta.end is None or meta.exit_code is None):
             raise RuntimeError(f"{task.name} was started at {meta.start}, but didn't produce output!")
-        if (datetime.now() - meta.start) >= FAIL_ON_ERROR and meta.exit_code != 0:
+        if (datetime.now() - meta.start) >= FAIL_ON_ERROR and meta.exit_code > 0:
             raise RuntimeError(f"{task.name} was last started at {meta.start} and failed!")
     if meta.end and task.rerun and (datetime.now() - meta.end) >= task.rerun and meta.exit_code == 0:
         # if rerun is set and there's a successful run, run the task again if rerun time interval has passed
