@@ -285,7 +285,9 @@ def start(ctx, exclude, start_only):
             except Exception:
                 # on failure, try the next one
                 logging.exception("Couldn't start instance")
+        logging.info("XXX1")
         if vendor == "gcp":
+            logging.info("XXX2")
             # select the first zone from the list
             bootdisk_init_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "bootdisk_init_opts")
             if "arm" in srv.cpu_architecture:
@@ -303,6 +305,7 @@ def start(ctx, exclude, start_only):
                                   )
             instance_opts |= dict(metadata_startup_script=user_data)
 
+            logging.info(f"XXX3", zones)
             for zone in zones:
                 logging.info(f"Trying {zone}")
                 resource_opts["zone"] = zone
