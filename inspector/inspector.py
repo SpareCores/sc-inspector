@@ -283,7 +283,6 @@ def start(ctx, exclude, start_only):
             except Exception:
                 # on failure, try the next one
                 logging.exception("Couldn't start instance")
-                continue
         if vendor == "gcp":
             # select the first zone from the list
             bootdisk_init_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "bootdisk_init_opts")
