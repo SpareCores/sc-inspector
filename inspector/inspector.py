@@ -273,7 +273,7 @@ def start(ctx, exclude, start_only):
                 )
                 lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
             repo.push_path(data_dir, f"Failed to start server from {repo.gha_url()}")
-        # break
+        break
         # count += 1
         # if count == 3:
         #     break
