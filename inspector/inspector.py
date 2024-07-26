@@ -4,6 +4,7 @@ preserve memory for running the benchmarks.
 All other modules should be imported lazily, where needed.
 """
 from concurrent.futures import ThreadPoolExecutor
+from pprint import pprint as pp
 import click
 import copy
 import itertools
@@ -317,6 +318,8 @@ def start(ctx, exclude, start_only):
                         resource_opts | dict(instance=server, instance_opts=instance_opts),
                         stack_opts=stack_opts,
                     )
+                    logging.info("Error messages:")
+                    pp(error_msgs)
                     # empty it if create succeeded, just in case
                     error_msgs = []
                     break
