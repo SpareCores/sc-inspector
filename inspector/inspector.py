@@ -325,8 +325,9 @@ def start(ctx, exclude, start_only):
 
         if error_msgs and os.environ.get("GITHUB_TOKEN"):
             # upload error message if we couldn't start the instance
+            now = datetime.now()
+            logging.info("Failed to start instance, uploading error messages")
             for task in tasks:
-                now = datetime.now()
                 meta = lib.Meta(
                     start=now,
                     end=now,
