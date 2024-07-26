@@ -283,7 +283,7 @@ def run_task(q: Queue, data_dir: str | os.PathLike) -> None:
                 meta.version = ver
             except Exception as e:
                 failed = True
-                meta.exit_code = -1
+                meta.exit_code = -2
                 meta.error_msg = str(e)
             task_dir = os.path.join(data_dir, task.name)
             os.makedirs(task_dir, exist_ok=True)
