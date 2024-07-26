@@ -89,7 +89,6 @@ EXCLUDE_INSTANCES: list[tuple[str, str]] = [
 
 RESOURCE_OPTS = {
     "aws": dict(region="us-west-2"),
-    "gcp": dict(zone="us-central1-a"),
 }
 USER_DATA = """#!/bin/sh
 
@@ -215,14 +214,15 @@ def start(ctx, exclude, start_only):
             # sc-runner can't yet handle this vendor
             continue
         resource_opts = RESOURCE_OPTS.get(vendor, {})
-        if resource_opts and RESOURCE_OPTS.get(vendor, {}).get("region") and RESOURCE_OPTS.get(vendor, {}).get("region") not in regions:
-            # if this server is unavailable in the default region, use a different one
-            resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor))
-            resource_opts["region"] = regions.pop(0)
-        if resource_opts and RESOURCE_OPTS.get(vendor, {}).get("zone") and RESOURCE_OPTS.get(vendor, {}).get("zone") not in zones:
-            # if this server is unavailable in the default region, use a different one
-            resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor))
-            resource_opts["zone"] = zones.pop(0)
+        if vendor in {"aws"}:
+            if resource_opts and RESOURCE_OPTS.get(vendor, {}).get("region") and RESOURCE_OPTS.get(vendor, {}).get("region") not in regions:
+                # if this server is unavailable in the default region, use a different one
+                resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor))
+                resource_opts["region"] = regions.pop(0)
+            if resource_opts and RESOURCE_OPTS.get(vendor, {}).get("zone") and RESOURCE_OPTS.get(vendor, {}).get("zone") not in zones:
+                # if this server is unavailable in the default zone, use a different one
+                resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor))
+                resource_opts["zone"] = zones.pop(0)
 
         gpu_count = srv.gpu_count
         logging.info(f"Evaluating {vendor}/{server} with {gpu_count} GPUs")
@@ -285,9 +285,8 @@ def start(ctx, exclude, start_only):
             except Exception:
                 # on failure, try the next one
                 logging.exception("Couldn't start instance")
-        logging.info("XXX1")
+
         if vendor == "gcp":
-            logging.info("XXX2")
             # select the first zone from the list
             bootdisk_init_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "bootdisk_init_opts")
             if "arm" in srv.cpu_architecture:
@@ -305,7 +304,6 @@ def start(ctx, exclude, start_only):
                                   )
             instance_opts |= dict(metadata_startup_script=user_data)
 
-            logging.info(f"XXX3 {zones}")
             for zone in zones:
                 logging.info(f"Trying {zone}")
                 resource_opts["zone"] = zone
