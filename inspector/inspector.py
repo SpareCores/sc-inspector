@@ -319,14 +319,13 @@ def start(ctx, exclude, start_only):
                         resource_opts | dict(instance=server, instance_opts=instance_opts),
                         stack_opts=stack_opts,
                     )
-                    logging.info(f"Error messages: {error_msgs}")
                     # empty it if create succeeded, just in case
                     error_msgs = []
                     break
                 except Exception:
                     # on failure, try the next one
                     logging.exception("Couldn't start instance")
-        logging.info(f"XXXX, ERROR MSG {error_msgs}")
+
         if error_msgs and os.environ.get("GITHUB_TOKEN"):
             # upload error message if we couldn't start the instance
             now = datetime.now()
