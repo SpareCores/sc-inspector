@@ -280,6 +280,8 @@ def start(ctx, exclude, start_only):
                     resource_opts | dict(instance=server, instance_opts=instance_opts),
                     stack_opts=stack_opts,
                 )
+                # empty it if create succeeded, just in case
+                error_msgs = []
             except Exception:
                 # on failure, try the next one
                 logging.exception("Couldn't start instance")
@@ -314,6 +316,8 @@ def start(ctx, exclude, start_only):
                         resource_opts | dict(instance=server, instance_opts=instance_opts),
                         stack_opts=stack_opts,
                     )
+                    # empty it if create succeeded, just in case
+                    error_msgs = []
                     break
                 except Exception:
                     # on failure, try the next one
