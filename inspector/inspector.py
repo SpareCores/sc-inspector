@@ -306,7 +306,19 @@ def start(ctx, exclude, start_only):
             for zone in zones:
                 resource_opts["zone"] = zone
                 # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-                runner.destroy(vendor, {}, resource_opts | dict(instance=server))
+                error_msgs = []
+                stack_opts = dict(on_output=print, on_event=lambda event: pulumi_event_filter(event, error_msgs))
+                try:
+                    runner.destroy(vendor, {}, resource_opts | dict(instance=server), stack_opts=stack_opts)
+                except Exception:
+                    if any("was not found" in err for err in error_msgs):
+                        # a not found might indicate that the server is not available in that zone, skip this error
+                        # and try to create
+                        pass
+                    else:
+                        # raise the error otherwise as it might be an error
+                        raise
+
                 error_msgs = []
                 stack_opts = dict(on_output=print, on_event=lambda event: pulumi_event_filter(event, error_msgs))
                 try:
