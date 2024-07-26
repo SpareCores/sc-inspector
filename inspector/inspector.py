@@ -318,7 +318,6 @@ def start(ctx, exclude, start_only):
                 except Exception:
                     # on failure, try the next one
                     logging.exception("Couldn't start instance")
-                    continue
         if error_msgs and os.environ.get("GITHUB_TOKEN"):
             # upload error message if we couldn't start the instance
             for task in tasks:
