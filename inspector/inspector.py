@@ -305,7 +305,7 @@ def start(ctx, exclude, start_only):
                                   )
             instance_opts |= dict(metadata_startup_script=user_data)
 
-            logging.info(f"XXX3", zones)
+            logging.info(f"XXX3 {zones}")
             for zone in zones:
                 logging.info(f"Trying {zone}")
                 resource_opts["zone"] = zone
