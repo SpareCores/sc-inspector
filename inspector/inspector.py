@@ -189,6 +189,14 @@ def cli(repo_path):
     pass
 
 
+def pulumi_event_filter(event, error_msgs):
+    try:
+        if event.diagnostic_event.severity == "error" and "error occurred" in event.diagnostic_event.message:
+            error_msgs.append(event.diagnostic_event.message)
+    except Exception:
+        pass
+
+
 @cli.command()
 @click.pass_context
 @click.option("--exclude", type=(str, str), default=EXCLUDE_INSTANCES, multiple=True, help="Exclude $vendor $instance")
@@ -201,6 +209,7 @@ def start(ctx, exclude, start_only):
     import sc_runner.resources
 
     count = 0
+    error_msgs = []
     for (vendor, server), (srv, regions, zones) in available_servers().items():
         if vendor not in supported_vendors:
             # sc-runner can't yet handle this vendor
@@ -262,8 +271,15 @@ def start(ctx, exclude, start_only):
             )
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
             runner.destroy(vendor, {}, resource_opts | dict(instance=server))
+            error_msgs = []
+            stack_opts = dict(on_output=print, on_event=lambda event: pulumi_event_filter(event, error_msgs))
             try:
-                runner.create(vendor, {}, resource_opts | dict(instance=server, instance_opts=instance_opts))
+                runner.create(
+                    vendor,
+                    {},
+                    resource_opts | dict(instance=server, instance_opts=instance_opts),
+                    stack_opts=stack_opts,
+                )
             except Exception:
                 # on failure, try the next one
                 logging.exception("Couldn't start instance")
@@ -290,14 +306,33 @@ def start(ctx, exclude, start_only):
                 resource_opts["zone"] = zone
                 # before starting, destroy everything to make sure the user-data will run (this is the first boot)
                 runner.destroy(vendor, {}, resource_opts | dict(instance=server))
+                error_msgs = []
+                stack_opts = dict(on_output=print, on_event=lambda event: pulumi_event_filter(event, error_msgs))
                 try:
-                    runner.create(vendor, {}, resource_opts | dict(instance=server, instance_opts=instance_opts))
+                    runner.create(
+                        vendor,
+                        {},
+                        resource_opts | dict(instance=server, instance_opts=instance_opts),
+                        stack_opts=stack_opts,
+                    )
                     break
                 except Exception:
                     # on failure, try the next one
                     logging.exception("Couldn't start instance")
                     continue
-
+        if error_msgs and os.environ.get("GITHUB_TOKEN"):
+            # upload error message if we couldn't start the instance
+            for task in tasks:
+                now = datetime.now()
+                meta = lib.Meta(
+                    start=now,
+                    end=now,
+                    exit_code=-1,
+                    error_msg=error_msgs[-1],
+                    task_hash=lib.task_hash(task),
+                )
+                lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
+            repo.push_path(data_dir, f"Failed to start server from {repo.gha_url()}")
         # XXX temporary
         break
         # count += 1
