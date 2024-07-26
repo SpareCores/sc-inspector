@@ -4,7 +4,6 @@ preserve memory for running the benchmarks.
 All other modules should be imported lazily, where needed.
 """
 from concurrent.futures import ThreadPoolExecutor
-from pprint import pprint as pp
 import click
 import copy
 import itertools
@@ -305,6 +304,7 @@ def start(ctx, exclude, start_only):
             instance_opts |= dict(metadata_startup_script=user_data)
 
             for zone in zones:
+                logging.info(f"Trying {zone}")
                 resource_opts["zone"] = zone
                 # before starting, destroy everything to make sure the user-data will run (this is the first boot)
                 runner.destroy(vendor, {}, resource_opts | dict(instance=server))
@@ -318,15 +318,14 @@ def start(ctx, exclude, start_only):
                         resource_opts | dict(instance=server, instance_opts=instance_opts),
                         stack_opts=stack_opts,
                     )
-                    logging.info("Error messages:")
-                    pp(error_msgs)
+                    logging.info(f"Error messages: {error_msgs}")
                     # empty it if create succeeded, just in case
                     error_msgs = []
                     break
                 except Exception:
                     # on failure, try the next one
                     logging.exception("Couldn't start instance")
-        print("XXXX, ERROR MSG", error_msgs)
+        logging.info(f"XXXX, ERROR MSG {error_msgs}")
         if error_msgs and os.environ.get("GITHUB_TOKEN"):
             # upload error message if we couldn't start the instance
             now = datetime.now()
