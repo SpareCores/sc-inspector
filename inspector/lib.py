@@ -151,6 +151,10 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
         # This will be triggered when a task is first created or if it has been changed.
         logging.info(f"Task {task.name} should run as its task hash has changed: {meta.task_hash} -> {thash}")
         return True
+    if meta.exit_code == -1 and "InsufficientInstanceCapacity" in meta.error_msg:
+        # Retry insufficient instance capacity startup errors
+        logging.info(f"Retrying task {task.name} due to insufficient capacity, meta: {meta}")
+        return True
     # Skip the task. If it was started, but hasn't yet produced output, we won't start a new run, as it would
     # ruin the above checks for failing outputs, and we don't want to constantly and silently restart the tasks.
     if meta.exit_code != 0:
