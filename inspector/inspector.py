@@ -331,7 +331,7 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[]):
         destroy = f"Destroying {vendor}/{server}, all tasks have finished"
 
     if destroy:
-        resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor), {})
+        resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor, {}))
         # use either regions or zones for cleaning up the stacks
         for opt_name, value in itertools.chain(zip(["region"] * len(regions), regions), zip(["zone"] * len(zones), zones)):
             resource_opts[opt_name] = value
@@ -359,6 +359,7 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[]):
 def cleanup(ctx, threads):
     from sc_runner import runner
     from sc_runner.resources import supported_vendors
+    futures = []
     with ThreadPoolExecutor(max_workers=threads) as executor:
         for (vendor, server), (_, regions, zones) in available_servers().items():
             if vendor not in supported_vendors:
@@ -368,10 +369,12 @@ def cleanup(ctx, threads):
             # process the cleanup in a thread as getting Pulumi state is very slow
             if vendor in {"aws"}:
                 # with these vendors we use region to create resources, so clean those up
-                executor.submit(cleanup_task, vendor, server, data_dir, regions=regions)
+                futures.append(executor.submit(cleanup_task, vendor, server, data_dir, regions=regions))
             else:
                 # the others use zones
-                executor.submit(cleanup_task, vendor, server, data_dir, zones=zones)
+                futures.append(executor.submit(cleanup_task, vendor, server, data_dir, zones=zones))
+    for f in futures:
+        f.result()
 
 
 @cli.command()
