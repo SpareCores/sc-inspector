@@ -13,6 +13,7 @@ import os
 import pulumi_aws as aws
 import repo
 import sys
+import tempfile
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
@@ -332,24 +333,26 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[]):
 
     if destroy:
         resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor, {}))
-        # use either regions or zones for cleaning up the stacks
-        for opt_name, value in itertools.chain(zip(["region"] * len(regions), regions), zip(["zone"] * len(zones), zones)):
-            resource_opts[opt_name] = value
-            # In order not to cause unnecessary locks in Pulumi, we first get the stack's resources to see if
-            # it's already empty, and in that case, we don't destroy it.
-            try:
-                stack = runner.get_stack(vendor, {}, resource_opts | dict(instance=server))
-            except AttributeError:
-                # this vendor is not yet supported
-                return
-            resources = stack.export_stack().deployment.get("resources", [])
-            if len(resources) <= 1:
-                # a non-existent stack will have zero, a clean (already destroyed) stack should have exactly one
-                # resource (the Pulumi Stack itself). If we can see either of these, we have nothing to clean up.
-                logging.debug(f"Pulumi stack for {vendor}/{server} has {len(resources)} resources, no cleanup needed")
-                return
-            logging.info(destroy)
-            runner.destroy(vendor, {}, resource_opts | dict(instance=server))
+        with tempfile.TemporaryDirectory() as tempdir:
+            pulumi_opts = dict(work_dir=tempdir)
+            # use either regions or zones for cleaning up the stacks
+            for opt_name, value in itertools.chain(zip(["region"] * len(regions), regions), zip(["zone"] * len(zones), zones)):
+                resource_opts[opt_name] = value
+                # In order not to cause unnecessary locks in Pulumi, we first get the stack's resources to see if
+                # it's already empty, and in that case, we don't destroy it.
+                try:
+                    stack = runner.get_stack(vendor, pulumi_opts, resource_opts | dict(instance=server))
+                except AttributeError:
+                    # this vendor is not yet supported
+                    return
+                resources = stack.export_stack().deployment.get("resources", [])
+                if len(resources) <= 1:
+                    # a non-existent stack will have zero, a clean (already destroyed) stack should have exactly one
+                    # resource (the Pulumi Stack itself). If we can see either of these, we have nothing to clean up.
+                    logging.debug(f"Pulumi stack for {vendor}/{server} has {len(resources)} resources, no cleanup needed")
+                    return
+                logging.info(destroy)
+                runner.destroy(vendor, pulumi_opts, resource_opts | dict(instance=server))
 
 
 @cli.command()
@@ -369,12 +372,16 @@ def cleanup(ctx, threads):
             # process the cleanup in a thread as getting Pulumi state is very slow
             if vendor in {"aws"}:
                 # with these vendors we use region to create resources, so clean those up
-                futures.append(executor.submit(cleanup_task, vendor, server, data_dir, regions=regions))
+                futures.append([vendor, server, executor.submit(cleanup_task, vendor, server, data_dir, regions=regions)])
             else:
                 # the others use zones
-                futures.append(executor.submit(cleanup_task, vendor, server, data_dir, zones=zones))
-    for f in futures:
-        f.result()
+                futures.append([vendor, server, executor.submit(cleanup_task, vendor, server, data_dir, zones=zones)])
+    for vendor, server, f in futures:
+        try:
+            f.result()
+        except Exception:
+            logging.exception(f"Error in processing {vendor}/{server}")
+            raise
 
 
 @cli.command()
