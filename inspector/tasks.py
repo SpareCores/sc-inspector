@@ -1,5 +1,5 @@
 from datetime import timedelta
-from lib import DockerTask, DOCKER_OPTS
+from lib import Task, DockerTask, DOCKER_OPTS
 import os
 import parse
 import psutil
@@ -37,10 +37,9 @@ lscpu = DockerTask(
     command="bash -c 'lscpu -JB | jq'",
 )
 
-nvidia_smi = DockerTask(
+nvidia_smi = Task(
     parallel=True,
     priority=0,
-    image="nvidia/cuda:12.4.1-base-ubuntu22.04",
     gpu=True,
     version_command="bash -c \"nvidia-smi -h | head -1 | egrep -o 'v[0-9.]+'\"",
     command="nvidia-smi -q -x",
