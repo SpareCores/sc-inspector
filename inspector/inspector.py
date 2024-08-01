@@ -31,26 +31,25 @@ shutdown --no-wall +{SHUTDOWN_MINS}
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
+# Add the required repositories to Apt sources:
 apt-get install -y ca-certificates curl
 install -m 0755 -d /etc/apt/keyrings
+# docker
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
 chmod a+r /etc/apt/keyrings/docker.asc
-
-# Add the repository to Apt sources:
 echo \
   "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
   $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
   tee /etc/apt/sources.list.d/docker.list > /dev/null
-apt-get update -y >> /tmp/output 2>&1
-# https://ubuntu.com/server/docs/nvidia-drivers-installation
-apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin ubuntu-drivers-common >> /tmp/output 2>&1
-ubuntu-drivers install >> /tmp/output 2>&1
-curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
+# nvidia drivers
+add-apt-repository ppa:graphics-drivers/ppa -y
+# nvidia container toolkit
+curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
   && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
     sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-    tee /etc/apt/sources.list.d/nvidia-container-toolkit.list >> /tmp/output 2>&1
+    sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
 apt-get update -y >> /tmp/output 2>&1
-apt-get install -y nvidia-container-toolkit >> /tmp/output 2>&1
+apt-get install -y nvidia-driver-525 nvidia-container-toolkit docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >> /tmp/output 2>&1
 systemctl restart docker
 # stop some services to preserve memory
 snap stop amazon-ssm-agent >> /tmp/output 2>&1
