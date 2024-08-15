@@ -57,7 +57,7 @@ apt-get install -y $NVIDIA_PKGS docker-ce docker-ce-cli containerd.io docker-bui
 systemctl restart docker
 # stop some services to preserve memory
 snap stop amazon-ssm-agent >> /tmp/output 2>&1
-systemctl stop chrony acpid cron multipathd snapd systemd-timedated unattended-upgrades >> /tmp/output 2>&1
+systemctl stop chrony acpid cron multipathd snapd systemd-timedated unattended-upgrades polkit packagekit systemd-udevd >> /tmp/output 2>&1
 # remove unwanted packages
 apt-get autoremove -y apport unattended-upgrades snapd >> /tmp/output 2>&1
 docker run --rm --network=host -v /var/run/docker.sock:/var/run/docker.sock \
@@ -421,6 +421,11 @@ def parse(ctx):
 @click.option("--threads", default=8, show_default=True, help="Parallelism in a given task group")
 def inspect(ctx, vendor, instance, gpu_count, threads):
     """Run inspection on this machine."""
+    # Disable OOM killer for this task as Linux tends to kill this instead of benchmarks, like bw_mem
+    pid=os.getpid()
+    with open(f"/proc/{pid}/oom_adj", mode="w+") as f:
+        f.write("-17")
+
     if os.environ.get("GITHUB_TOKEN"):
         logging.info("Updating the git repo")
         # we must clone the repo before writing anything to it
