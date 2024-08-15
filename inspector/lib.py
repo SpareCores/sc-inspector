@@ -81,6 +81,7 @@ def load_task_meta(task: Task, data_dir: str | os.PathLike, **kwargs) -> Meta:
         meta |= kwargs
         return Meta.model_validate(meta)
     else:
+        logging.info(f"{fn} not found, return an empty Meta object")
         return Meta(**kwargs)
 
 
@@ -323,6 +324,7 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: int
                 meta = load_task_meta(task, data_dir)
                 if meta.exit_code is None:
                     # update meta, if it doesn't yet have an exit code
+                    meta.start = datetime.now()
                     meta.end = datetime.now()
                     meta.exit_code = -2
                     meta.error_msg = "Task should not be running on this instance"
