@@ -57,7 +57,7 @@ apt-get install -y $NVIDIA_PKGS docker-ce docker-ce-cli containerd.io docker-bui
 systemctl restart docker
 # stop some services to preserve memory
 snap stop amazon-ssm-agent >> /tmp/output 2>&1
-systemctl stop chrony acpid cron multipathd snapd systemd-timedated >> /tmp/output 2>&1
+systemctl stop chrony acpid cron multipathd snapd systemd-timedated unattended-upgrades >> /tmp/output 2>&1
 # remove unwanted packages
 apt-get autoremove -y apport unattended-upgrades snapd >> /tmp/output 2>&1
 docker run --rm --network=host -v /var/run/docker.sock:/var/run/docker.sock \
