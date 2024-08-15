@@ -320,11 +320,13 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: int
     for taskgroup in sorted(taskgroups.keys()):
         for task in taskgroups[taskgroup]:
             if not should_run(task, data_dir, vendor, instance, gpu_count):
-                # update meta, so we have data
-                meta = Meta(start=datetime.now(), task_hash=task_hash(task))
-                meta.exit_code = -2
-                meta.error_msg = "Task should not be running on this instance"
-                # write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
+                meta = load_task_meta(task, data_dir)
+                if meta.exit_code is None:
+                    # update meta, if it doesn't yet have an exit code
+                    meta.end = datetime.now()
+                    meta.exit_code = -2
+                    meta.error_msg = "Task should not be running on this instance"
+                    write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
                 continue
             logging.info(f"Starting {task.name}")
             q.put(task)
