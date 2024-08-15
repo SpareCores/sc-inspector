@@ -322,12 +322,11 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: int
         for task in taskgroups[taskgroup]:
             if not should_run(task, data_dir, vendor, instance, gpu_count):
                 meta = load_task_meta(task, data_dir)
-                if meta.exit_code is None:
-                    # update meta, if it doesn't yet have an exit code
-                    meta.start = datetime.now()
+                if meta.start and meta.exit_code is None:
+                    # update meta, if it doesn't yet have an exit code, so the monitoring won't fail on this
                     meta.end = datetime.now()
                     meta.exit_code = -2
-                    meta.error_msg = "Task should not be running on this instance"
+                    meta.error_msg = "Task doesn't need to run on this instance"
                     write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
                 continue
             logging.info(f"Starting {task.name}")
