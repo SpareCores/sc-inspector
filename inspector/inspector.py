@@ -58,8 +58,8 @@ systemctl restart docker
 # stop some services to preserve memory
 snap stop amazon-ssm-agent >> /tmp/output 2>&1
 systemctl stop chrony acpid cron multipathd snapd systemd-timedated >> /tmp/output 2>&1
-# we don't want to submit crash dumps anywhere
-apt-get autoremove -y apport >> /tmp/output 2>&1
+# remove unwanted packages
+apt-get autoremove -y apport unattended-upgrades >> /tmp/output 2>&1
 docker run --rm --network=host -v /var/run/docker.sock:/var/run/docker.sock \
     -e GITHUB_TOKEN={GITHUB_TOKEN} \
     -e GITHUB_SERVER_URL={GITHUB_SERVER_URL} \
