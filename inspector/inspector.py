@@ -60,7 +60,7 @@ snap stop amazon-ssm-agent >> /tmp/output 2>&1
 systemctl stop chrony acpid cron multipathd snapd systemd-timedated unattended-upgrades polkit packagekit systemd-udevd >> /tmp/output 2>&1
 # remove unwanted packages
 apt-get autoremove -y apport unattended-upgrades snapd >> /tmp/output 2>&1
-docker run --rm --network=host -v /var/run/docker.sock:/var/run/docker.sock \
+docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/docker.sock \
     -e GITHUB_TOKEN={GITHUB_TOKEN} \
     -e GITHUB_SERVER_URL={GITHUB_SERVER_URL} \
     -e GITHUB_REPOSITORY={GITHUB_REPOSITORY} \
