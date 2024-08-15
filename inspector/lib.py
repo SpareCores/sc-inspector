@@ -81,7 +81,7 @@ def load_task_meta(task: Task, data_dir: str | os.PathLike, **kwargs) -> Meta:
         meta |= kwargs
         return Meta.model_validate(meta)
     else:
-        logging.info(f"{fn} not found, return an empty Meta object")
+        logging.info(f"{fn} not found, returning an empty Meta object")
         return Meta(**kwargs)
 
 
