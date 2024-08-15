@@ -32,7 +32,7 @@ def get_repo(repo_url=REPO_URL, repo_path=REPO_PATH):
     try:
         return git.Repo(repo_path)
     except (git.InvalidGitRepositoryError, git.NoSuchPathError):
-        return git.Repo.clone_from(repo_url, repo_path, depth=1)
+        return git.Repo.clone_from(repo_url, repo_path)
 
 
 @synchronized
