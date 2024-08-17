@@ -11,6 +11,13 @@ RUN \
     git config --global --add safe.directory /repo/sc-inspector-data && \
     git config --global user.email "inspector@sparecores.com" && \
     git config --global user.name "Spare Cores"
+RUN --mount=type=tmpfs,target=/tmp,rw \
+    --mount=id=var_cache_apt,type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=id=var_lib_apt,type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update --error-on=any && \
+    apt-get update && \
+    apt-get install -y lshw jq
+
 FROM base AS build
 RUN \
     python -m venv --without-pip ${VIRTUAL_ENV} && \
