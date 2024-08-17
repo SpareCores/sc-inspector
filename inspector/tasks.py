@@ -44,6 +44,8 @@ nvidia_smi = DockerTask(
     gpu=True,
     version_command="bash -c \"nvidia-smi -h | head -1 | egrep -o 'v[0-9.]+'\"",
     command="nvidia-smi -q -x",
+    precheck_command="lshw -C display -json | jq -r '.[].vendor'",
+    precheck_regex="nvidia"
 )
 
 # We use this benchmark to determine the "SCore" of a given instance. This should represent the relative
