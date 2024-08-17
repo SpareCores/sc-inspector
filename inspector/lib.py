@@ -124,6 +124,9 @@ def get_tasks(vendor: str) -> list[Task]:
 def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
     """Return True if we should start a server for this task."""
     meta = load_task_meta(task, data_dir)
+    if not meta.start:
+        logging.info(f"Task {task.name} should run, no start field")
+        return True
     if meta.start and (datetime.now() - meta.start) <= WAIT_SINCE_LAST_START:
         logging.info(f"Skipping task {task.name}, last start: {meta.start}")
         return False
