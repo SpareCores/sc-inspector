@@ -339,6 +339,10 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: int
                 check_res = subprocess.run(task.precheck_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 if not re.search(task.precheck_regex, check_res.stdout, re.IGNORECASE):
                     logging.info("Task precheck_regex didn't match, skipping")
+                    meta.end = datetime.now()
+                    meta.exit_code = -3
+                    meta.error_msg = "Task precheck_regex didn't match"
+                    write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
                     continue
 
             logging.info(f"Starting {task.name}")
