@@ -14,6 +14,7 @@ import logging
 import math
 import os
 import psutil
+import re
 import repo
 import subprocess
 import threading
@@ -65,6 +66,8 @@ class Task(BaseModel):
     name: str | None = None  # name of the task
     gpu: bool = False  # requires a machine with GPU(s)
     minimum_memory: float = 0  # minimum memory in GiBs for this test
+    precheck_command: str | list | None = None  # check if we should run this task
+    precheck_regex: str | None  # regular expression to match the precheck command's stdout
 
 
 class DockerTask(Task):
@@ -332,6 +335,12 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: int
                     meta.error_msg = "Task doesn't need to run on this instance"
                     write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
                 continue
+            if task.precheck_command and task.precheck_regex:
+                check_res = subprocess.run(task.precheck_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                if not re.search(task.precheck_regex, check_res.stdout, re.IGNORECASE):
+                    logging.info("Task precheck_regex didn't match, skipping")
+                    continue
+
             logging.info(f"Starting {task.name}")
             q.put(task)
             if not task.parallel:
