@@ -124,9 +124,6 @@ def get_tasks(vendor: str) -> list[Task]:
 def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
     """Return True if we should start a server for this task."""
     meta = load_task_meta(task, data_dir)
-    if not meta.start:
-        logging.info(f"Task {task.name} should run, no start field")
-        return True
     if meta.start and (datetime.now() - meta.start) <= WAIT_SINCE_LAST_START:
         logging.info(f"Skipping task {task.name}, last start: {meta.start}")
         return False
@@ -160,6 +157,9 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
     if meta.exit_code == -1 and "InsufficientInstanceCapacity" in meta.error_msg:
         # Retry insufficient instance capacity startup errors
         logging.info(f"Retrying task {task.name} due to insufficient capacity, meta: {meta}")
+        return True
+    if not meta.start:
+        logging.info(f"Task {task.name} should run, no start field")
         return True
     # Skip the task. If it was started, but hasn't yet produced output, we won't start a new run, as it would
     # ruin the above checks for failing outputs, and we don't want to constantly and silently restart the tasks.
