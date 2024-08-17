@@ -332,6 +332,7 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: int
                     # update meta, if it doesn't yet have an exit code, so the monitoring won't fail on this
                     meta.end = datetime.now()
                     meta.exit_code = -2
+                    meta.task_hash=task_hash(task)
                     meta.error_msg = "Task doesn't need to run on this instance"
                     write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
                 continue
@@ -341,6 +342,7 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: int
                     logging.info("Task precheck_regex didn't match, skipping")
                     meta.end = datetime.now()
                     meta.exit_code = -3
+                    meta.task_hash=task_hash(task)
                     meta.error_msg = "Task precheck_regex didn't match"
                     write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
                     continue
