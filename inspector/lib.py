@@ -67,7 +67,7 @@ class Task(BaseModel):
     gpu: bool = False  # requires a machine with GPU(s)
     minimum_memory: float = 0  # minimum memory in GiBs for this test
     precheck_command: str | list | None = None  # check if we should run this task
-    precheck_regex: str | None  # regular expression to match the precheck command's stdout
+    precheck_regex: str | None = None  # regular expression to match the precheck command's stdout
 
 
 class DockerTask(Task):
