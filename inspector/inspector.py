@@ -60,6 +60,9 @@ snap stop amazon-ssm-agent >> /tmp/output 2>&1
 systemctl stop chrony acpid cron multipathd snapd systemd-timedated unattended-upgrades polkit packagekit systemd-udevd >> /tmp/output 2>&1
 # remove unwanted packages
 apt-get autoremove -y apport unattended-upgrades snapd >> /tmp/output 2>&1
+# https://github.com/NVIDIA/nvidia-container-toolkit/issues/202
+# on some machines docker initialization times out with a lot of GPUs. Enable persistence mode to overcome that.
+nvidia-smi -pm 1
 docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/docker.sock \
     -e GITHUB_TOKEN={GITHUB_TOKEN} \
     -e GITHUB_SERVER_URL={GITHUB_SERVER_URL} \
