@@ -203,11 +203,8 @@ def start(ctx, exclude, start_only):
         instance_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts")
         if vendor == "aws":
             instance_opts |= dict(
-                user_data_base64=b64_user_data,
                 key_name="spare-cores",
                 instance_initiated_shutdown_behavior="terminate",
-                # increase root volume size
-                root_block_device=aws.ec2.InstanceRootBlockDeviceArgs(volume_size=16),
             )
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
             runner.destroy(vendor, {}, resource_opts | dict(instance=server))
@@ -217,7 +214,7 @@ def start(ctx, exclude, start_only):
                 runner.create(
                     vendor,
                     {},
-                    resource_opts | dict(instance=server, instance_opts=instance_opts),
+                    resource_opts | dict(instance=server, instance_opts=instance_opts, user_data=b64_user_data, disk_size=16),
                     stack_opts=stack_opts,
                 )
                 # empty it if create succeeded, just in case
@@ -230,9 +227,9 @@ def start(ctx, exclude, start_only):
             # select the first zone from the list
             bootdisk_init_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "bootdisk_init_opts")
             if "arm" in srv.cpu_architecture:
-                bootdisk_init_opts |= dict(image="ubuntu-2404-lts-arm64", size=16)
+                bootdisk_init_opts |= dict(image="ubuntu-2404-lts-arm64")
             else:
-                bootdisk_init_opts |= dict(image="ubuntu-2404-lts-amd64", size=16)
+                bootdisk_init_opts |= dict(image="ubuntu-2404-lts-amd64")
 
             # e2 needs to be spot, also, we have only spot quotas for selected GPU instances
             is_preemptible = server.startswith("e2") or gpu_count > 0
