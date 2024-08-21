@@ -11,6 +11,8 @@ import lib
 import logging
 import os
 import pulumi_aws as aws
+import random
+import re
 import repo
 import sys
 import tempfile
@@ -20,6 +22,11 @@ logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
 # We can't (yet) start these
 EXCLUDE_INSTANCES: list[tuple[str, str]] = []
+# non-retryable Pulumi errors. The message that matches one of these regexes will be saved in meta.json.
+PULUMI_ERRORS = {
+    re.compile(r"error occurred"),   # AWS permanent error
+    re.compile(r"creating .* error"),  # Azure errors
+}
 
 RESOURCE_OPTS = {
     "aws": dict(region="us-west-2"),
@@ -122,15 +129,32 @@ def available_servers(vendor: str | None = None, region: str | None = None):
     return servers
 
 
+def custom_sort(lst, key):
+    """Shuffles a list, but always returns `key` as the first element."""
+    if key in lst:
+        lst.remove(key)
+
+    random.shuffle(lst)
+    lst.insert(0, key)
+
+    return lst
+
 @click.group()
 @click.option("--repo-path", default=os.environ.get("REPO_PATH", os.getcwd()), help="Directory which contains the repository")
 def cli(repo_path):
     pass
 
 
+def pulumi_output_filter(message, error_msgs):
+    # print output to the console
+    print(message)
+    if any([regex.search(message) for regex in PULUMI_ERRORS]):
+        error_msgs.append(message)
+
+
 def pulumi_event_filter(event, error_msgs):
     try:
-        if event.diagnostic_event.severity == "error" and "error occurred" in event.diagnostic_event.message:
+        if event.diagnostic_event.severity == "error" and any([regex.search(event.diagnostic_event.message) for regex in PULUMI_ERRORS]):
             error_msgs.append(event.diagnostic_event.message)
     except Exception:
         pass
@@ -199,9 +223,12 @@ def start(ctx, exclude, start_only):
             SHUTDOWN_MINS=timeout_mins,
         )
         b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
-        # get default instance opts for the vendor and add ours
-        instance_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts")
+        if vendor in ("aws", "gcp"):
+            # get default instance opts for the vendor and add ours
+            instance_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts")
         if vendor == "aws":
+            # we use the key_name in instance_opts instead of creating a new key
+            resource_opts["public-key"] = ""
             instance_opts |= dict(
                 key_name="spare-cores",
                 instance_initiated_shutdown_behavior="terminate",
@@ -222,6 +249,31 @@ def start(ctx, exclude, start_only):
             except Exception:
                 # on failure, try the next one
                 logging.exception("Couldn't start instance")
+
+        if vendor == "azure":
+            # prefer westeurope due to quota reasons
+            for region in custom_sort(regions, "westeurope"):
+                logging.info(f"Trying {region}")
+                resource_opts["region"] = region
+                # before starting, destroy everything to make sure the user-data will run (this is the first boot)
+                runner.destroy(vendor, {}, resource_opts | dict(instance=server))
+
+                error_msgs = []
+                # Azure native doesn't give sensible error events, use its output
+                stack_opts = dict(on_output=lambda message: pulumi_output_filter(message, error_msgs))
+                try:
+                    runner.create(
+                        vendor,
+                        {},
+                        resource_opts | dict(instance=server, user_data=b64_user_data),
+                        stack_opts=stack_opts,
+                        )
+                    # empty it if create succeeded, just in case
+                    error_msgs = []
+                    break
+                except Exception:
+                    # on failure, try the next one
+                    logging.exception("Couldn't start instance")
 
         if vendor == "gcp":
             # select the first zone from the list
@@ -375,7 +427,7 @@ def cleanup(ctx, threads):
                 continue
             data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
             # process the cleanup in a thread as getting Pulumi state is very slow
-            if vendor in {"aws"}:
+            if vendor in {"aws", "azure"}:
                 # with these vendors we use region to create resources, so clean those up
                 futures.append([vendor, server, executor.submit(cleanup_task, vendor, server, data_dir, regions=regions)])
             else:
