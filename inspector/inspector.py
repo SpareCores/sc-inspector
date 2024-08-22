@@ -231,7 +231,7 @@ def start(ctx, exclude, start_only):
             instance_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts")
         if vendor == "aws":
             # we use the key_name in instance_opts instead of creating a new key
-            resource_opts["public-key"] = ""
+            resource_opts["public_key"] = ""
             instance_opts |= dict(
                 key_name="spare-cores",
                 instance_initiated_shutdown_behavior="terminate",
