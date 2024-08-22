@@ -205,7 +205,7 @@ def run_native(meta: Meta, task: Task, data_dir: str | os.PathLike) -> tuple[str
     try:
         if task.version_command:
             res = subprocess.run(task.version_command, capture_output=True, timeout=task.timeout.total_seconds())
-            ver = res.stdout.strip().decode("utf-8")
+            ver = res.stdout.strip().decode("utf-8").replace("\n", ", ")
     except Exception as e:
         meta.error_msg = str(e)
         return ver, b"", b""
