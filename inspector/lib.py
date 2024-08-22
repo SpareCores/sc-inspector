@@ -240,7 +240,7 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike) -> tup
     try:
         d = docker.from_env()
         if task.version_command:
-            ver = d.containers.run(task.image, task.version_command, **version_docker_opts).strip().decode("utf-8")
+            ver = d.containers.run(task.image, task.version_command, **version_docker_opts).strip().decode("utf-8").replace("\n", ", ")
         c = d.containers.run(task.image, task.command, **docker_opts)
     except Exception as e:
         meta.error_msg = str(e)
