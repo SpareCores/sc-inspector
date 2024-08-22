@@ -148,5 +148,6 @@ static_web = DockerTask(
     priority=7,
     image="ghcr.io/sparecores/benchmark:main",
     parse_output=[parse.wrk],
+    version_command="bash -c \"(binserve --version; wrk -v) | egrep -o '(binserve|wrk) [0-9.]+'\"",
     command="nice -n -20 /usr/local/bin/static-web.sh",
 )
