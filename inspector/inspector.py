@@ -177,6 +177,9 @@ def start(ctx, exclude, start_only):
         if vendor not in supported_vendors:
             # sc-runner can't yet handle this vendor
             continue
+        if vendor == "azure":
+            # skip it for now
+            continue
         resource_opts = RESOURCE_OPTS.get(vendor, {})
         if vendor in {"aws"}:
             if resource_opts and RESOURCE_OPTS.get(vendor, {}).get("region") and RESOURCE_OPTS.get(vendor, {}).get("region") not in regions:
