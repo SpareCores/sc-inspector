@@ -142,3 +142,10 @@ bw_mem = DockerTask(
     image="ghcr.io/sparecores/benchmark:main",
     command="bw_mem.sh",
 )
+
+static_web = DockerTask(
+    parallel=False,
+    priority=7,
+    image="ghcr.io/sparecores/benchmark:main",
+    command="static-web.sh",
+)
