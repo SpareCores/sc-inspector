@@ -147,5 +147,5 @@ static_web = DockerTask(
     parallel=False,
     priority=7,
     image="ghcr.io/sparecores/benchmark:main",
-    command="static-web.sh",
+    command="nice -n -20 /usr/local/bin/static-web.sh",
 )
