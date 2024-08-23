@@ -250,6 +250,7 @@ def start(ctx, exclude, start_only):
                     )
                     # empty it if create succeeded, just in case
                     error_msgs = []
+                    break
                 except Exception:
                     # on failure, try the next one
                     logging.exception("Couldn't start instance")
