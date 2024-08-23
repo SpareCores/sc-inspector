@@ -28,9 +28,6 @@ PULUMI_ERRORS = {
     re.compile(r"creating .* error"),  # Azure errors
 }
 
-RESOURCE_OPTS = {
-    "aws": dict(region="us-west-2"),
-}
 USER_DATA = """#!/bin/sh
 
 # just to be sure, schedule a shutdown early
@@ -178,17 +175,7 @@ def start(ctx, exclude, start_only):
         if vendor not in supported_vendors:
             # sc-runner can't yet handle this vendor
             continue
-        resource_opts = RESOURCE_OPTS.get(vendor, {})
-        if vendor in {"aws"}:
-            if resource_opts and RESOURCE_OPTS.get(vendor, {}).get("region") and RESOURCE_OPTS.get(vendor, {}).get("region") not in regions:
-                # if this server is unavailable in the default region, use a different one
-                resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor))
-                resource_opts["region"] = regions.pop(0)
-            if resource_opts and RESOURCE_OPTS.get(vendor, {}).get("zone") and RESOURCE_OPTS.get(vendor, {}).get("zone") not in zones:
-                # if this server is unavailable in the default zone, use a different one
-                resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor))
-                resource_opts["zone"] = zones.pop(0)
-
+        resource_opts = {}
         gpu_count = srv.gpu_count
         logging.info(f"Evaluating {vendor}/{server} with {gpu_count} GPUs")
         if (vendor, server) in exclude:
@@ -234,22 +221,26 @@ def start(ctx, exclude, start_only):
                 key_name="spare-cores",
                 instance_initiated_shutdown_behavior="terminate",
             )
-            # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts | dict(instance=server))
-            error_msgs = []
-            stack_opts = dict(on_output=print, on_event=lambda event: pulumi_event_filter(event, error_msgs))
-            try:
-                runner.create(
-                    vendor,
-                    {},
-                    resource_opts | dict(instance=server, instance_opts=instance_opts, user_data=b64_user_data, disk_size=16),
-                    stack_opts=stack_opts,
-                )
-                # empty it if create succeeded, just in case
+            for region in custom_sort(regions, "us-west-2"):
+                logging.info(f"Trying {region}")
+                resource_opts["region"] = region
+
+                # before starting, destroy everything to make sure the user-data will run (this is the first boot)
+                runner.destroy(vendor, {}, resource_opts | dict(instance=server))
                 error_msgs = []
-            except Exception:
-                # on failure, try the next one
-                logging.exception("Couldn't start instance")
+                stack_opts = dict(on_output=print, on_event=lambda event: pulumi_event_filter(event, error_msgs))
+                try:
+                    runner.create(
+                        vendor,
+                        {},
+                        resource_opts | dict(instance=server, instance_opts=instance_opts, user_data=b64_user_data, disk_size=16),
+                        stack_opts=stack_opts,
+                    )
+                    # empty it if create succeeded, just in case
+                    error_msgs = []
+                except Exception:
+                    # on failure, try the next one
+                    logging.exception("Couldn't start instance")
 
         if vendor == "azure":
             image_sku = "server"
