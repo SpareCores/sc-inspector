@@ -151,3 +151,11 @@ static_web = DockerTask(
     version_command="bash -c \"(binserve --version; wrk -v) | egrep -o '(binserve|wrk) [0-9.]+'\"",
     command="nice -n -20 /usr/local/bin/static-web.sh",
 )
+
+redis = DockerTask(
+    parallel=False,
+    priority=8,
+    image="ghcr.io/sparecores/benchmark-redis:main",
+    version_command="redis-server -v",
+    command="nice -n -20 /usr/local/bin/benchmark.sh",
+)
