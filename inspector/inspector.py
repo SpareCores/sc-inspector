@@ -66,7 +66,7 @@ systemctl restart docker
 snap stop amazon-ssm-agent >> /tmp/output 2>&1
 systemctl stop chrony acpid cron multipathd snapd systemd-timedated unattended-upgrades polkit packagekit systemd-udevd >> /tmp/output 2>&1
 # remove unwanted packages
-apt-get autoremove -y apport unattended-upgrades snapd >> /tmp/output 2>&1
+apt-get autoremove -y apport unattended-upgrades snapd packagekit >> /tmp/output 2>&1
 # https://github.com/NVIDIA/nvidia-container-toolkit/issues/202
 # on some machines docker initialization times out with a lot of GPUs. Enable persistence mode to overcome that.
 nvidia-smi -pm 1
@@ -145,9 +145,10 @@ def cli(repo_path):
     pass
 
 
-def pulumi_output_filter(message, error_msgs):
+def pulumi_output_filter(message, error_msgs, output):
     # print output to the console
     print(message)
+    output.append(message)
     if any([regex.search(message) for regex in PULUMI_ERRORS]):
         error_msgs.append(message)
 
@@ -176,9 +177,6 @@ def start(ctx, exclude, start_only):
     for (vendor, server), (srv, regions, zones) in available_servers().items():
         if vendor not in supported_vendors:
             # sc-runner can't yet handle this vendor
-            continue
-        if vendor == "azure":
-            # skip it for now
             continue
         resource_opts = RESOURCE_OPTS.get(vendor, {})
         if vendor in {"aws"}:
@@ -254,7 +252,11 @@ def start(ctx, exclude, start_only):
                 logging.exception("Couldn't start instance")
 
         if vendor == "azure":
+            image_sku = "server"
+            if "arm" in srv.cpu_architecture:
+                image_sku = "server-arm64"
             # prefer westeurope due to quota reasons
+            done = False
             for region in custom_sort(regions, "westeurope"):
                 logging.info(f"Trying {region}")
                 resource_opts["region"] = region
@@ -262,21 +264,40 @@ def start(ctx, exclude, start_only):
                 runner.destroy(vendor, {}, resource_opts | dict(instance=server))
 
                 error_msgs = []
+                output = []
                 # Azure native doesn't give sensible error events, use its output
-                stack_opts = dict(on_output=lambda message: pulumi_output_filter(message, error_msgs))
-                try:
-                    runner.create(
-                        vendor,
-                        {},
-                        resource_opts | dict(instance=server, user_data=b64_user_data),
-                        stack_opts=stack_opts,
-                        )
-                    # empty it if create succeeded, just in case
-                    error_msgs = []
+                stack_opts = dict(on_output=lambda message: pulumi_output_filter(message, error_msgs, output))
+                for _ in range(2):
+                    # try normal images first, then gen1 if we get Hypervisor Generation '2' error
+                    try:
+                        runner.create(
+                            vendor,
+                            {},
+                            resource_opts | dict(instance=server, user_data=b64_user_data, image_sku=image_sku),
+                            stack_opts=stack_opts,
+                            )
+                        # empty it if create succeeded, just in case
+                        error_msgs = []
+                        done = True
+                        break
+                    except Exception:
+                        if image_sku.endswith("-gen1"):
+                            # we already know it's a gen1 instance, don't try to create twice with the same options
+                            done = True
+                            break
+                        # The selected VM size 'Standard_A0' cannot boot Hypervisor Generation '2'. If this was a
+                        # Create operation please check that the Hypervisor Generation of the Image matches the
+                        # Hypervisor Generation of the selected VM Size. If this was an Update operation please select
+                        # a Hypervisor Generation '2' VM Size. For more information, see https://aka.ms/azuregen2vm
+                        if any(["cannot boot Hypervisor Generation '2'" in s for s in output]):
+                            logging.exception(f"Hypervisor Generation error, image_sku={image_sku}, adding -gen1")
+                            if "gen1" not in image_sku:
+                                image_sku += "-gen1"
+                            continue
+                        # on failure, try the next one
+                        logging.exception("Couldn't start instance")
+                if done:
                     break
-                except Exception:
-                    # on failure, try the next one
-                    logging.exception("Couldn't start instance")
 
         if vendor == "gcp":
             # select the first zone from the list
@@ -379,13 +400,14 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[]):
             sum_timeout += task.timeout
 
     if start_times and datetime.now() >= (wait_time := max(start_times) + max_timeout + lib.DESTROY_AFTER):
+        # safety net: after the max timeout has passed, the machine must be terminated
         destroy = f"Destroying {vendor}/{server}, last_start: {max(start_times)}, last timeout: {wait_time}"
-    if end_times and datetime.now() >= (wait_time := max(end_times) + sum_timeout + lib.DESTROY_AFTER):
+    if start_times and datetime.now() >= (wait_time := max(start_times) + sum_timeout + lib.DESTROY_AFTER):
         # We can only estimate the time by which all tasks should have been completed, as the start date is added
         # to the git repository before the machine starts up, the machine startup can take a long time, and the
         # tasks do not necessarily run sequentially.
         # So here, we are using the sum_timeout, which is the sum of all timeouts for unfinished jobs.
-        destroy = f"Destroying {vendor}/{server}, last_end: {max(end_times)}, wait time: {wait_time}"
+        destroy = f"Destroying {vendor}/{server}, last_start: {max(start_times)}, wait time: {wait_time}"
 
     # if all tasks have already finished, we can destroy the stack
     if already_ended and all(already_ended):
