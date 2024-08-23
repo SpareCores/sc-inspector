@@ -405,7 +405,7 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[]):
         destroy = f"Destroying {vendor}/{server}, all tasks have finished"
 
     if destroy:
-        resource_opts = copy.deepcopy(RESOURCE_OPTS.get(vendor, {}))
+        resource_opts = {}
         with tempfile.TemporaryDirectory() as tempdir:
             pulumi_opts = dict(work_dir=tempdir)
             # use either regions or zones for cleaning up the stacks
