@@ -22,6 +22,10 @@ logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
 # We can't (yet) start these
 EXCLUDE_INSTANCES: list[tuple[str, str]] = []
+# filter error_msg which is written to meta.json for these, we don't want to leak information
+FILTER_ERROR_MSG = {
+    re.compile(r"Submit a request for Quota increase at https.*to succeed\."),
+}
 # non-retryable Pulumi errors. The message that matches one of these regexes will be saved in meta.json.
 PULUMI_ERRORS = {
     re.compile(r"error occurred"),   # AWS permanent error
@@ -126,6 +130,12 @@ def available_servers(vendor: str | None = None, region: str | None = None):
     return servers
 
 
+def remove_matches(regexes, input_string):
+    for regex in regexes:
+        input_string = re.sub(regex, '', input_string)
+    return input_string
+
+
 def custom_sort(lst, key):
     """Shuffles a list, but always returns `key` as the first element."""
     if key in lst:
@@ -174,6 +184,8 @@ def start(ctx, exclude, start_only):
     for (vendor, server), (srv, regions, zones) in available_servers().items():
         if vendor not in supported_vendors:
             # sc-runner can't yet handle this vendor
+            continue
+        if vendor != "aws":
             continue
         resource_opts = {}
         gpu_count = srv.gpu_count
@@ -339,7 +351,7 @@ def start(ctx, exclude, start_only):
                     start=now,
                     end=now,
                     exit_code=-1,
-                    error_msg=error_msgs[-1],
+                    error_msg=remove_matches(FILTER_ERROR_MSG, error_msgs[-1]),
                     task_hash=lib.task_hash(task),
                 )
                 lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
