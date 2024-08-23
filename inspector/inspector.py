@@ -443,12 +443,13 @@ def cleanup(ctx, threads):
                 continue
             data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
             # process the cleanup in a thread as getting Pulumi state is very slow
-            if vendor in {"aws", "azure"}:
-                # with these vendors we use region to create resources, so clean those up
-                futures.append([vendor, server, executor.submit(cleanup_task, vendor, server, data_dir, regions=regions)])
-            else:
-                # the others use zones
+            if vendor in {"gcp"}:
+                # we use zones with these vendors
                 futures.append([vendor, server, executor.submit(cleanup_task, vendor, server, data_dir, zones=zones)])
+            else:
+                # others use regions
+                futures.append([vendor, server, executor.submit(cleanup_task, vendor, server, data_dir, regions=regions)])
+
     for vendor, server, f in futures:
         try:
             f.result()
