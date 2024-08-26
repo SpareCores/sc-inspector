@@ -157,5 +157,5 @@ redis = DockerTask(
     priority=8,
     image="ghcr.io/sparecores/benchmark-redis:main",
     version_command="redis-server -v",
-    command="nice -n -20 /usr/local/bin/benchmark.sh",
+    command="nice -n -20 python /usr/local/bin/benchmark.py",
 )
