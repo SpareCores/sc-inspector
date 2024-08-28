@@ -422,14 +422,15 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[]):
                 try:
                     stack = runner.get_stack(vendor, pulumi_opts, resource_opts | dict(instance=server))
                 except AttributeError:
+                    logging.exception("Couldn't get stack")
                     # this vendor is not yet supported
                     return
                 resources = stack.export_stack().deployment.get("resources", [])
                 if len(resources) <= 1:
                     # a non-existent stack will have zero, a clean (already destroyed) stack should have exactly one
                     # resource (the Pulumi Stack itself). If we can see either of these, we have nothing to clean up.
-                    logging.debug(f"Pulumi stack for {vendor}/{server} has {len(resources)} resources, no cleanup needed")
-                    return
+                    logging.info(f"Pulumi stack for {vendor}/{value}/{server} has {len(resources)} resources, no cleanup needed")
+                    continue
                 logging.info(destroy)
                 runner.destroy(vendor, pulumi_opts, resource_opts | dict(instance=server))
 
