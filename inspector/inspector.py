@@ -258,7 +258,6 @@ def start(ctx, exclude, start_only):
             if "arm" in srv.cpu_architecture:
                 image_sku = "server-arm64"
             # prefer westeurope due to quota reasons
-            done = False
             for region in custom_sort(regions, "westeurope"):
                 logging.info(f"Trying {region}")
                 resource_opts["region"] = region
@@ -280,12 +279,10 @@ def start(ctx, exclude, start_only):
                             )
                         # empty it if create succeeded, just in case
                         error_msgs = []
-                        done = True
                         break
                     except Exception:
                         if image_sku.endswith("-gen1"):
                             # we already know it's a gen1 instance, don't try to create twice with the same options
-                            done = True
                             break
                         # The selected VM size 'Standard_A0' cannot boot Hypervisor Generation '2'. If this was a
                         # Create operation please check that the Hypervisor Generation of the Image matches the
@@ -298,8 +295,6 @@ def start(ctx, exclude, start_only):
                             continue
                         # on failure, try the next one
                         logging.exception("Couldn't start instance")
-                if done:
-                    break
 
         if vendor == "gcp":
             # select the first zone from the list
