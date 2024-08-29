@@ -178,6 +178,7 @@ def start(ctx, exclude, start_only):
     from sc_runner.resources import default, supported_vendors
     import base64
     import sc_runner.resources
+    import time
 
     count = 0
     error_msgs = []
@@ -257,6 +258,7 @@ def start(ctx, exclude, start_only):
             image_sku = "server"
             if "arm" in srv.cpu_architecture:
                 image_sku = "server-arm64"
+            done = False
             # prefer westeurope due to quota reasons
             for region in custom_sort(regions, "westeurope"):
                 logging.info(f"Trying {region}")
@@ -279,6 +281,7 @@ def start(ctx, exclude, start_only):
                             )
                         # empty it if create succeeded, just in case
                         error_msgs = []
+                        done = True
                         break
                     except Exception:
                         if image_sku.endswith("-gen1"):
@@ -292,14 +295,22 @@ def start(ctx, exclude, start_only):
                             logging.exception(f"Hypervisor Generation error, image_sku={image_sku}, adding -gen1")
                             if "gen1" not in image_sku:
                                 image_sku += "-gen1"
+                            # The NIC will be blocked for 180s, so wait until we retry
+                            # Nic(s) in request is reserved for another Virtual Machine for 180 seconds.
+                            logging.info("Sleeping 180s to make the NIC free again")
+                            time.sleep(180)
                             continue
                         logging.exception("Couldn't start instance")
-                        # on failure, destroy the stack, then try the next one
+                        # on failure, destroy the stack, then try the next one, but first sleep, as we can't yet
+                        # delete the NIC (see above)
+                        logging.info("Sleeping 180s to be able to delete the NIC")
+                        time.sleep(180)
                         try:
                             runner.destroy(vendor, {}, resource_opts | dict(instance=server))
                         except Exception:
                             logging.exception("Failed to destroy")
-
+                if done:
+                    break
 
         if vendor == "gcp":
             # select the first zone from the list
