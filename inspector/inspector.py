@@ -293,8 +293,13 @@ def start(ctx, exclude, start_only):
                             if "gen1" not in image_sku:
                                 image_sku += "-gen1"
                             continue
-                        # on failure, try the next one
                         logging.exception("Couldn't start instance")
+                        # on failure, destroy the stack, then try the next one
+                        try:
+                            runner.destroy(vendor, {}, resource_opts | dict(instance=server))
+                        except Exception:
+                            logging.exception("Failed to destroy")
+
 
         if vendor == "gcp":
             # select the first zone from the list
