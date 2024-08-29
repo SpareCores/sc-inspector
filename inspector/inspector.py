@@ -309,6 +309,7 @@ def start(ctx, exclude, start_only):
                             runner.destroy(vendor, {}, resource_opts | dict(instance=server))
                         except Exception:
                             logging.exception("Failed to destroy")
+                        break
                 if done:
                     break
 
