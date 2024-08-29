@@ -437,7 +437,7 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[]):
 
 @cli.command()
 @click.pass_context
-@click.option("--threads", type=int, default=64, show_default=True,
+@click.option("--threads", type=int, default=32, show_default=True,
               help="Number of threads to run Pulumi concurrently. Each thread consumes around 60 MiB of RAM.")
 def cleanup(ctx, threads):
     from sc_runner import runner
