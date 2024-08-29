@@ -123,7 +123,7 @@ geekbench = DockerTask(
         memswap_limit=int(mem_bytes * 0.85),
         mem_swappiness=0,
     ),
-    minimum_memory=1.3,
+    minimum_memory=1.1,
     transform_output=[transform.raw, transform.fetch_geekbench_results],
     command="nice -n -20 geekbench.sh",
 )
