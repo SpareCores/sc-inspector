@@ -17,8 +17,24 @@ import repo
 import sys
 import tempfile
 
-logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+RESET = "\033[0m"
+YELLOW = "\033[33m"
+GREEN = "\033[32m"
 
+# Create a formatter string with color codes
+formatter_str = (
+    f"{YELLOW}%(asctime)s{RESET}/"
+    f"{GREEN}%(levelname)s{RESET} - "
+    "%(message)s"
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    stream=sys.stdout,
+    format=formatter_str,
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
 
 # We can't (yet) start these
 EXCLUDE_INSTANCES: list[tuple[str, str]] = []
@@ -153,8 +169,8 @@ def cli(repo_path):
 
 
 def pulumi_output_filter(message, error_msgs, output):
-    # print output to the console
-    print(message)
+    # print output to the console with logger, so we have the dates
+    logging.info(message)
     output.append(message)
     if any([regex.search(message) for regex in PULUMI_ERRORS]):
         error_msgs.append(message)
@@ -177,203 +193,209 @@ def start(ctx, exclude, start_only):
     from sc_runner import runner
     from sc_runner.resources import default, supported_vendors
     import base64
+    import concurrent.futures
     import sc_runner.resources
     import time
 
-    count = 0
-    error_msgs = []
-    for (vendor, server), (srv, regions, zones) in available_servers().items():
-        if vendor not in supported_vendors:
-            # sc-runner can't yet handle this vendor
-            continue
-        # XXX: skip azure for now
-        if vendor == "azure":
-            continue
-        resource_opts = {}
-        gpu_count = srv.gpu_count
-        logging.info(f"Evaluating {vendor}/{server} with {gpu_count} GPUs")
-        if (vendor, server) in exclude:
-            logging.info(f"Excluding {vendor}/{server}")
-            continue
-        if start_only and (vendor, server) not in start_only:
-            logging.info(f"Excluding {vendor}/{server} as --start-only {start_only} is given")
-            continue
-        data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
-        tasks = list(filter(lambda task: lib.should_start(task, data_dir, srv), lib.get_tasks(vendor)))
-        if not tasks:
-            logging.info(f"No tasks for {vendor}/{server}")
-            continue
-        sum_timeout = timedelta()
-        for task in tasks:
-            meta = lib.Meta(start=datetime.now(), task_hash=lib.task_hash(task))
-            lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
-            sum_timeout += task.timeout
-        timeout_mins = int(sum_timeout.total_seconds()/60)
-        logging.info(f"Starting {vendor}/{server} with {timeout_mins}m timeout")
-        if os.environ.get("GITHUB_TOKEN"):
-            repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
-        # start instance
-        user_data = USER_DATA.format(
-            GITHUB_TOKEN=os.environ.get("GITHUB_TOKEN"),
-            GITHUB_SERVER_URL=os.environ.get("GITHUB_SERVER_URL"),
-            GITHUB_REPOSITORY=os.environ.get("GITHUB_REPOSITORY"),
-            GITHUB_RUN_ID=os.environ.get("GITHUB_RUN_ID"),
-            BENCHMARK_SECRETS_PASSPHRASE=os.environ.get("BENCHMARK_SECRETS_PASSPHRASE"),
-            VENDOR=vendor,
-            INSTANCE=server,
-            GPU_COUNT=gpu_count,
-            SHUTDOWN_MINS=timeout_mins,
-        )
-        b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
-        if vendor in ("aws", "gcp"):
-            # get default instance opts for the vendor and add ours
-            instance_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts")
-        if vendor == "aws":
-            # we use the key_name in instance_opts instead of creating a new key
-            resource_opts["public_key"] = ""
-            instance_opts |= dict(
-                key_name="spare-cores",
-                instance_initiated_shutdown_behavior="terminate",
+    def delayed_destroy(vendor, resource_opts):
+        # to be run in the background
+        time.sleep(180)
+        try:
+            runner.destroy(vendor, {}, resource_opts)
+        except Exception:
+            logging.exception("Failed to destroy")
+
+    # use a context manager, so it'll wait for all submitted tasks on exit
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        count = 0
+        error_msgs = []
+        for (vendor, server), (srv, regions, zones) in available_servers().items():
+            if vendor not in supported_vendors:
+                # sc-runner can't yet handle this vendor
+                continue
+            # XXX: skip azure for now
+            if vendor == "azure":
+                continue
+            resource_opts = {}
+            gpu_count = srv.gpu_count
+            logging.info(f"Evaluating {vendor}/{server} with {gpu_count} GPUs")
+            if (vendor, server) in exclude:
+                logging.info(f"Excluding {vendor}/{server}")
+                continue
+            if start_only and (vendor, server) not in start_only:
+                logging.info(f"Excluding {vendor}/{server} as --start-only {start_only} is given")
+                continue
+            data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
+            tasks = list(filter(lambda task: lib.should_start(task, data_dir, srv), lib.get_tasks(vendor)))
+            if not tasks:
+                logging.info(f"No tasks for {vendor}/{server}")
+                continue
+            sum_timeout = timedelta()
+            for task in tasks:
+                meta = lib.Meta(start=datetime.now(), task_hash=lib.task_hash(task))
+                lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
+                sum_timeout += task.timeout
+            timeout_mins = int(sum_timeout.total_seconds()/60)
+            logging.info(f"Starting {vendor}/{server} with {timeout_mins}m timeout")
+            if os.environ.get("GITHUB_TOKEN"):
+                repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
+            # start instance
+            user_data = USER_DATA.format(
+                GITHUB_TOKEN=os.environ.get("GITHUB_TOKEN"),
+                GITHUB_SERVER_URL=os.environ.get("GITHUB_SERVER_URL"),
+                GITHUB_REPOSITORY=os.environ.get("GITHUB_REPOSITORY"),
+                GITHUB_RUN_ID=os.environ.get("GITHUB_RUN_ID"),
+                BENCHMARK_SECRETS_PASSPHRASE=os.environ.get("BENCHMARK_SECRETS_PASSPHRASE"),
+                VENDOR=vendor,
+                INSTANCE=server,
+                GPU_COUNT=gpu_count,
+                SHUTDOWN_MINS=timeout_mins,
             )
-            for region in custom_sort(regions, "us-west-2"):
-                logging.info(f"Trying {region}")
-                resource_opts["region"] = region
+            b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
+            if vendor in ("aws", "gcp"):
+                # get default instance opts for the vendor and add ours
+                instance_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts")
+            if vendor == "aws":
+                # we use the key_name in instance_opts instead of creating a new key
+                resource_opts["public_key"] = ""
+                instance_opts |= dict(
+                    key_name="spare-cores",
+                    instance_initiated_shutdown_behavior="terminate",
+                )
+                for region in custom_sort(regions, "us-west-2"):
+                    logging.info(f"Trying {region}")
+                    resource_opts["region"] = region
 
-                # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-                runner.destroy(vendor, {}, resource_opts | dict(instance=server))
-                error_msgs = []
-                stack_opts = dict(on_output=print, on_event=lambda event: pulumi_event_filter(event, error_msgs))
-                try:
-                    runner.create(
-                        vendor,
-                        {},
-                        resource_opts | dict(instance=server, instance_opts=instance_opts, user_data=b64_user_data, disk_size=16),
-                        stack_opts=stack_opts,
-                    )
-                    # empty it if create succeeded, just in case
+                    # before starting, destroy everything to make sure the user-data will run (this is the first boot)
+                    runner.destroy(vendor, {}, resource_opts | dict(instance=server))
                     error_msgs = []
-                    break
-                except Exception:
-                    # on failure, try the next one
-                    logging.exception("Couldn't start instance")
-
-        if vendor == "azure":
-            image_sku = "server"
-            if "arm" in srv.cpu_architecture:
-                image_sku = "server-arm64"
-            done = False
-            # prefer westeurope due to quota reasons
-            for region in custom_sort(regions, "westeurope"):
-                logging.info(f"Trying {region}")
-                resource_opts["region"] = region
-                # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-                runner.destroy(vendor, {}, resource_opts | dict(instance=server))
-
-                error_msgs = []
-                output = []
-                # Azure native doesn't give sensible error events, use its output
-                stack_opts = dict(on_output=lambda message: pulumi_output_filter(message, error_msgs, output))
-                for _ in range(2):
-                    # try normal images first, then gen1 if we get Hypervisor Generation '2' error
+                    stack_opts = dict(on_output=logging.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
                     try:
                         runner.create(
                             vendor,
                             {},
-                            resource_opts | dict(instance=server, user_data=b64_user_data, image_sku=image_sku),
+                            resource_opts | dict(instance=server, instance_opts=instance_opts, user_data=b64_user_data, disk_size=16),
                             stack_opts=stack_opts,
-                            )
+                        )
                         # empty it if create succeeded, just in case
                         error_msgs = []
-                        done = True
                         break
                     except Exception:
-                        if image_sku.endswith("-gen1"):
-                            # we already know it's a gen1 instance, don't try to create twice with the same options
-                            break
-                        # The selected VM size 'Standard_A0' cannot boot Hypervisor Generation '2'. If this was a
-                        # Create operation please check that the Hypervisor Generation of the Image matches the
-                        # Hypervisor Generation of the selected VM Size. If this was an Update operation please select
-                        # a Hypervisor Generation '2' VM Size. For more information, see https://aka.ms/azuregen2vm
-                        if any(["cannot boot Hypervisor Generation '2'" in s for s in output]):
-                            logging.exception(f"Hypervisor Generation error, image_sku={image_sku}, adding -gen1")
-                            if "gen1" not in image_sku:
-                                image_sku += "-gen1"
-                            # The NIC will be blocked for 180s, so wait until we retry
-                            # Nic(s) in request is reserved for another Virtual Machine for 180 seconds.
-                            logging.info("Sleeping 180s to make the NIC free again")
-                            time.sleep(180)
-                            continue
+                        # on failure, try the next one
                         logging.exception("Couldn't start instance")
-                        # on failure, destroy the stack, then try the next one, but first sleep, as we can't yet
-                        # delete the NIC (see above)
-                        logging.info("Sleeping 180s to be able to delete the NIC")
-                        time.sleep(180)
-                        try:
-                            runner.destroy(vendor, {}, resource_opts | dict(instance=server))
-                        except Exception:
-                            logging.exception("Failed to destroy")
-                        break
-                if done:
-                    break
 
-        if vendor == "gcp":
-            # select the first zone from the list
-            bootdisk_init_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "bootdisk_init_opts")
-            if "arm" in srv.cpu_architecture:
-                bootdisk_init_opts |= dict(image="ubuntu-2404-lts-arm64")
-            else:
-                bootdisk_init_opts |= dict(image="ubuntu-2404-lts-amd64")
+            if vendor == "azure":
+                image_sku = "server"
+                if "arm" in srv.cpu_architecture:
+                    image_sku = "server-arm64"
+                done = False
+                # prefer westeurope due to quota reasons
+                for region in custom_sort(regions, "westeurope"):
+                    logging.info(f"Trying {region}")
+                    resource_opts["region"] = region
+                    # before starting, destroy everything to make sure the user-data will run (this is the first boot)
+                    runner.destroy(vendor, {}, resource_opts | dict(instance=server))
 
-            # e2 needs to be spot, also, we have only spot quotas for selected GPU instances
-            is_preemptible = server.startswith("e2") or gpu_count > 0
-            resource_opts |= dict(bootdisk_init_opts=bootdisk_init_opts,
-                                  scheduling_opts=dict(
-                                      preemptible=is_preemptible,
-                                      automatic_restart=False if is_preemptible else True,
-                                      on_host_maintenance="TERMINATE")
-                                  )
-            instance_opts |= dict(metadata_startup_script=user_data)
-
-            for zone in zones:
-                logging.info(f"Trying {zone}")
-                resource_opts["zone"] = zone
-                # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-                runner.destroy(vendor, {}, resource_opts | dict(instance=server))
-
-                error_msgs = []
-                stack_opts = dict(on_output=print, on_event=lambda event: pulumi_event_filter(event, error_msgs))
-                try:
-                    runner.create(
-                        vendor,
-                        {},
-                        resource_opts | dict(instance=server, instance_opts=instance_opts),
-                        stack_opts=stack_opts,
-                    )
-                    # empty it if create succeeded, just in case
                     error_msgs = []
-                    break
-                except Exception:
-                    # on failure, try the next one
-                    logging.exception("Couldn't start instance")
+                    output = []
+                    # Azure native doesn't give sensible error events, use its output
+                    stack_opts = dict(on_output=lambda message: pulumi_output_filter(message, error_msgs, output))
+                    for _ in range(2):
+                        # try normal images first, then gen1 if we get Hypervisor Generation '2' error
+                        try:
+                            runner.create(
+                                vendor,
+                                {},
+                                resource_opts | dict(instance=server, user_data=b64_user_data, image_sku=image_sku),
+                                stack_opts=stack_opts,
+                                )
+                            # empty it if create succeeded, just in case
+                            error_msgs = []
+                            done = True
+                            break
+                        except Exception:
+                            if image_sku.endswith("-gen1"):
+                                # we already know it's a gen1 instance, don't try to create twice with the same options
+                                break
+                            # The selected VM size 'Standard_A0' cannot boot Hypervisor Generation '2'. If this was a
+                            # Create operation please check that the Hypervisor Generation of the Image matches the
+                            # Hypervisor Generation of the selected VM Size. If this was an Update operation please select
+                            # a Hypervisor Generation '2' VM Size. For more information, see https://aka.ms/azuregen2vm
+                            if any(["cannot boot Hypervisor Generation '2'" in s for s in output]):
+                                logging.exception(f"Hypervisor Generation error, image_sku={image_sku}, adding -gen1")
+                                if "gen1" not in image_sku:
+                                    image_sku += "-gen1"
+                                # The NIC will be blocked for 180s, so wait until we retry
+                                # Nic(s) in request is reserved for another Virtual Machine for 180 seconds.
+                                logging.info("Sleeping 180s to make the NIC free again")
+                                time.sleep(180)
+                                continue
+                            logging.exception("Couldn't start instance, deleting the stack in the background")
+                            # on failure, destroy the stack in the background (as we have to wait 180s for the NIC), so we're
+                            # not blocking further tries
+                            executor.submit(delayed_destroy, vendor, resource_opts)
+                            break
+                    if done:
+                        break
 
-        if error_msgs and os.environ.get("GITHUB_TOKEN"):
-            # upload error message if we couldn't start the instance
-            now = datetime.now()
-            logging.info("Failed to start instance, uploading error messages")
-            for task in tasks:
-                meta = lib.Meta(
-                    start=now,
-                    end=now,
-                    exit_code=-1,
-                    error_msg=remove_matches(FILTER_ERROR_MSG, error_msgs[-1]),
-                    task_hash=lib.task_hash(task),
-                )
-                lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
-            repo.push_path(data_dir, f"Failed to start server from {repo.gha_url()}")
-        break
-        # count += 1
-        # if count == 3:
-        #     break
+            if vendor == "gcp":
+                # select the first zone from the list
+                bootdisk_init_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "bootdisk_init_opts")
+                if "arm" in srv.cpu_architecture:
+                    bootdisk_init_opts |= dict(image="ubuntu-2404-lts-arm64")
+                else:
+                    bootdisk_init_opts |= dict(image="ubuntu-2404-lts-amd64")
+
+                # e2 needs to be spot, also, we have only spot quotas for selected GPU instances
+                is_preemptible = server.startswith("e2") or gpu_count > 0
+                resource_opts |= dict(bootdisk_init_opts=bootdisk_init_opts,
+                                      scheduling_opts=dict(
+                                          preemptible=is_preemptible,
+                                          automatic_restart=False if is_preemptible else True,
+                                          on_host_maintenance="TERMINATE")
+                                      )
+                instance_opts |= dict(metadata_startup_script=user_data)
+
+                for zone in zones:
+                    logging.info(f"Trying {zone}")
+                    resource_opts["zone"] = zone
+                    # before starting, destroy everything to make sure the user-data will run (this is the first boot)
+                    runner.destroy(vendor, {}, resource_opts | dict(instance=server))
+
+                    error_msgs = []
+                    stack_opts = dict(on_output=logging.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
+                    try:
+                        runner.create(
+                            vendor,
+                            {},
+                            resource_opts | dict(instance=server, instance_opts=instance_opts),
+                            stack_opts=stack_opts,
+                        )
+                        # empty it if create succeeded, just in case
+                        error_msgs = []
+                        break
+                    except Exception:
+                        # on failure, try the next one
+                        logging.exception("Couldn't start instance")
+
+            if error_msgs and os.environ.get("GITHUB_TOKEN"):
+                # upload error message if we couldn't start the instance
+                now = datetime.now()
+                logging.info("Failed to start instance, uploading error messages")
+                for task in tasks:
+                    meta = lib.Meta(
+                        start=now,
+                        end=now,
+                        exit_code=-1,
+                        error_msg=remove_matches(FILTER_ERROR_MSG, error_msgs[-1]),
+                        task_hash=lib.task_hash(task),
+                    )
+                    lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
+                repo.push_path(data_dir, f"Failed to start server from {repo.gha_url()}")
+            break
+            # count += 1
+            # if count == 3:
+            #     break
 
 
 def cleanup_task(vendor, server, data_dir, regions=[], zones=[]):
