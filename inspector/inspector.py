@@ -186,6 +186,9 @@ def start(ctx, exclude, start_only):
         if vendor not in supported_vendors:
             # sc-runner can't yet handle this vendor
             continue
+        # XXX: skip azure for now
+        if vendor == "azure":
+            continue
         resource_opts = {}
         gpu_count = srv.gpu_count
         logging.info(f"Evaluating {vendor}/{server} with {gpu_count} GPUs")
