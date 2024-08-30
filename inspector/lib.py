@@ -161,6 +161,10 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
         # Retry insufficient instance capacity startup errors
         logging.info(f"Retrying task {task.name} due to insufficient capacity, meta: {meta}")
         return True
+    if meta.exit_code == -1 and "PublicIPCountLimitReached" in meta.error_msg:
+        # Retry Azure public IP count limit reached errors
+        logging.info(f"Retrying task {task.name} due to PublicIPCountLimitReached, meta: {meta}")
+        return True
     if not meta.start:
         logging.info(f"Task {task.name} should run, no start field")
         return True
