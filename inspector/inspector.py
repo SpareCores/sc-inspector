@@ -213,9 +213,6 @@ def start(ctx, exclude, start_only):
             if vendor not in supported_vendors:
                 # sc-runner can't yet handle this vendor
                 continue
-            # XXX: skip azure for now
-            if vendor == "azure":
-                continue
             resource_opts = {}
             gpu_count = srv.gpu_count
             logging.info(f"Evaluating {vendor}/{server} with {gpu_count} GPUs")
@@ -290,7 +287,9 @@ def start(ctx, exclude, start_only):
                     image_sku = "server-arm64"
                 done = False
                 # prefer westeurope due to quota reasons
-                for region in custom_sort(regions, "westeurope"):
+                # for region in custom_sort(regions, "westeurope"):
+                # we have quota in these regions
+                for region in ["centralus", "australiacentral", "australiaeast", "canadacentral"]:
                     logging.info(f"Trying {region}")
                     resource_opts["region"] = region
                     # before starting, destroy everything to make sure the user-data will run (this is the first boot)
