@@ -415,7 +415,7 @@ def start(ctx, exclude, start_only):
                 break
 
 
-def cleanup_task(vendor, server, data_dir, regions=[], zones=[]):
+def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
     """
     Some vendors support creating resources in regions, without explicitly specifying the zone, some don't,
     so we support both of them. We'll go through all regions or zones whatever is specified.
@@ -469,6 +469,10 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[]):
     if already_ended and all(already_ended):
         destroy = f"Destroying {vendor}/{server}, all tasks have finished"
 
+    if not destroy and force:
+        # forced cleanup, even if there's no meta for the server
+        destroy = f"Forced cleanup of {vendor}/{server}"
+
     if destroy:
         resource_opts = {}
         with tempfile.TemporaryDirectory() as tempdir:
@@ -498,7 +502,8 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[]):
 @click.pass_context
 @click.option("--threads", type=int, default=32, show_default=True,
               help="Number of threads to run Pulumi concurrently. Each thread consumes around 60 MiB of RAM.")
-def cleanup(ctx, threads):
+@click.option("--force/--no-force", type=bool, default=False, help="Do a cleanup even if there's no meta for the server")
+def cleanup(ctx, threads, force):
     from sc_runner import runner
     from sc_runner.resources import supported_vendors
     futures = []
@@ -515,10 +520,10 @@ def cleanup(ctx, threads):
             # process the cleanup in a thread as getting Pulumi state is very slow
             if vendor in {"gcp"}:
                 # we use zones with these vendors
-                futures.append([vendor, server, executor.submit(cleanup_task, vendor, server, data_dir, zones=zones)])
+                futures.append([vendor, server, executor.submit(cleanup_task, vendor, server, data_dir, zones=zones, force=force)])
             else:
                 # others use regions
-                futures.append([vendor, server, executor.submit(cleanup_task, vendor, server, data_dir, regions=regions)])
+                futures.append([vendor, server, executor.submit(cleanup_task, vendor, server, data_dir, regions=regions, force=force)])
 
     for vendor, server, f in futures:
         try:
