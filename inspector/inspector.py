@@ -473,7 +473,7 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[]):
                     logging.info(f"Pulumi stack for {vendor}/{value}/{server} has {len(resources)} resources, no cleanup needed")
                     continue
                 logging.info(destroy)
-                runner.destroy(vendor, pulumi_opts, resource_opts | dict(instance=server))
+                runner.destroy_stack(vendor, pulumi_opts, resource_opts | dict(instance=server))
 
 
 @cli.command()
