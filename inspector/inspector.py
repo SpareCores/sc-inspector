@@ -469,8 +469,9 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
     if already_ended and all(already_ended):
         destroy = f"Destroying {vendor}/{server}, all tasks have finished"
 
-    if not destroy and force:
-        # forced cleanup, even if there's no meta for the server
+    if not destroy and not start_times and force:
+        # forced cleanup, even if there are metas for the server (might be due to a forced retry from git, by deleting
+        # the files)
         destroy = f"Forced cleanup of {vendor}/{server}"
 
     if destroy:
