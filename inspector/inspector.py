@@ -484,8 +484,9 @@ def cleanup(ctx, threads):
     from sc_runner import runner
     from sc_runner.resources import supported_vendors
     futures = []
+    servers = lib.sort_available_servers(available_servers(), data_dir=os.path.join(ctx.parent.params["repo_path"], "data"))
     with ThreadPoolExecutor(max_workers=threads) as executor:
-        for (vendor, server), (_, regions, zones) in available_servers().items():
+        for (vendor, server), (_, regions, zones) in servers:
             if vendor not in supported_vendors:
                 # sc-runner can't yet handle this vendor
                 continue

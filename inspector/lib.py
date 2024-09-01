@@ -84,7 +84,7 @@ def load_task_meta(task: Task, data_dir: str | os.PathLike, **kwargs) -> Meta:
         meta |= kwargs
         return Meta.model_validate(meta)
     else:
-        logging.info(f"{fn} not found, returning an empty Meta object")
+        logging.debug(f"{fn} not found, returning an empty Meta object")
         return Meta(**kwargs)
 
 
@@ -361,3 +361,25 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: int
         if os.environ.get("GITHUB_TOKEN"):
             repo.push_path(data_dir, f"Inspecting server from {repo.gha_url()}")
     q.join()
+
+
+def get_last_start(data_dir, vendor, server):
+    tasks = list(get_tasks(vendor))
+    if not tasks:
+        # if there are no tasks, return a low value which can be used as a sort key
+        return datetime.min
+    tasks = [task for task in tasks if not (task.servers_only and (vendor, server) not in task.servers_only)]
+    data_dir = os.path.join(data_dir, vendor, server)
+    meta_starts = [load_task_meta(task, data_dir=data_dir).start for task in tasks]
+    meta_starts = [start for start in meta_starts if start]
+    if not meta_starts:
+        # put it to the back
+        last_start = datetime.min
+    else:
+        last_start = max(meta_starts)
+    return last_start
+
+
+def sort_available_servers(available_servers: dict, data_dir, reverse=True):
+    sorted_servers = sorted(available_servers.items(), key=lambda item: get_last_start(data_dir, item[0][0], item[0][1]), reverse=reverse)
+    return sorted_servers
