@@ -4,6 +4,7 @@ preserve memory for running the benchmarks.
 All other modules should be imported lazily, where needed.
 """
 from concurrent.futures import ThreadPoolExecutor
+from functools import cache
 import click
 import copy
 import itertools
@@ -96,6 +97,19 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT} >> /tmp/output 2>&1
 poweroff
 """
+
+
+@cache
+def get_regions(vendor: str):
+    """Return all regions for a vendor."""
+    from sc_crawler.tables import ServerPrice, Server, Region, Zone
+    from sqlmodel import create_engine, Session, select
+    import sc_data
+    path = sc_data.db.path
+    engine = create_engine(f"sqlite:///{path}")
+    session = Session(engine)
+    stmt = select(Region).where(Region.vendor_id==vendor)
+    return [region.region_id for region in session.exec(stmt.distinct()).all()]
 
 
 def servers():
@@ -288,8 +302,12 @@ def start(ctx, exclude, start_only):
                 done = False
                 # prefer westeurope due to quota reasons
                 # for region in custom_sort(regions, "westeurope"):
-                # we have quota in these regions
+                # XXX: temporary hack: we have quota in these regions, don't try others
                 for region in ["centralus", "australiacentral", "australiaeast", "canadacentral"]:
+                    if region not in regions:
+                        # this server is not available in this region, skip
+                        logging.info(f"{server} not available in {region}, skipping")
+                        continue
                     logging.info(f"Trying {region}")
                     resource_opts["region"] = region
                     # before starting, destroy everything to make sure the user-data will run (this is the first boot)
@@ -487,6 +505,9 @@ def cleanup(ctx, threads):
     servers = lib.sort_available_servers(available_servers(), data_dir=os.path.join(ctx.parent.params["repo_path"], "data"))
     with ThreadPoolExecutor(max_workers=threads) as executor:
         for (vendor, server), (_, regions, zones) in servers:
+            # XXX: temporary action, clean up all regions, due to a quota-related hardcoded region list for Azure,
+            # because of which we've created resources even if the server is not available in that region
+            regions = get_regions(vendor)
             if vendor not in supported_vendors:
                 # sc-runner can't yet handle this vendor
                 continue
