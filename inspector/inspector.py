@@ -232,8 +232,6 @@ def start(ctx, exclude, start_only):
             if (vendor, server) in exclude:
                 logging.info(f"Excluding {vendor}/{server}")
                 continue
-                if server != "Standard_B1s":
-                    continue
             if start_only and (vendor, server) not in start_only:
                 logging.info(f"Excluding {vendor}/{server} as --start-only {start_only} is given")
                 continue
@@ -245,12 +243,12 @@ def start(ctx, exclude, start_only):
             sum_timeout = timedelta()
             for task in tasks:
                 meta = lib.Meta(start=datetime.now(), task_hash=lib.task_hash(task))
-                lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
+                # lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
                 sum_timeout += task.timeout
             timeout_mins = int(sum_timeout.total_seconds()/60)
             logging.info(f"Starting {vendor}/{server} with {timeout_mins}m timeout")
-            if os.environ.get("GITHUB_TOKEN"):
-                repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
+            # if os.environ.get("GITHUB_TOKEN"):
+            #     repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
             # start instance
             user_data = USER_DATA.format(
                 GITHUB_TOKEN=os.environ.get("GITHUB_TOKEN"),
@@ -299,7 +297,6 @@ def start(ctx, exclude, start_only):
             if vendor == "azure":
                 # explicitly set SSH key from envvar
                 resource_opts = dict(public_key=os.environ.get("SSH_PUBLIC_KEY"))
-                logging.info(f"XXX DEBUG {len(resource_opts['public_key'])}")
                 image_sku = "server"
                 if "arm" in srv.cpu_architecture:
                     image_sku = "server-arm64"
@@ -307,9 +304,7 @@ def start(ctx, exclude, start_only):
                 # prefer westeurope due to quota reasons
                 # for region in custom_sort(regions, "westeurope"):
                 # XXX: temporary hack: we have quota in these regions, don't try others
-                for region in ["centralus"
-                    # , "australiacentral", "australiaeast", "canadacentral"
-                               ]:
+                for region in ["centralus", "australiacentral", "australiaeast", "canadacentral"]:
                     if region not in regions:
                         # this server is not available in this region, skip
                         logging.info(f"{server} not available in {region}, skipping")
@@ -414,9 +409,9 @@ def start(ctx, exclude, start_only):
                         error_msg=remove_matches(FILTER_ERROR_MSG, error_msgs[-1]),
                         task_hash=lib.task_hash(task),
                     )
-                    lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
-                repo.push_path(data_dir, f"Failed to start server from {repo.gha_url()}")
-            break
+                    # lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
+                # repo.push_path(data_dir, f"Failed to start server from {repo.gha_url()}")
+            # break
             count += 1
             if count == 3:
                 break
