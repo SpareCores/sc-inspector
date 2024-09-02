@@ -243,12 +243,12 @@ def start(ctx, exclude, start_only):
             sum_timeout = timedelta()
             for task in tasks:
                 meta = lib.Meta(start=datetime.now(), task_hash=lib.task_hash(task))
-                # lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
+                lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
                 sum_timeout += task.timeout
             timeout_mins = int(sum_timeout.total_seconds()/60)
             logging.info(f"Starting {vendor}/{server} with {timeout_mins}m timeout")
-            # if os.environ.get("GITHUB_TOKEN"):
-            #     repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
+            if os.environ.get("GITHUB_TOKEN"):
+                repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
             # start instance
             user_data = USER_DATA.format(
                 GITHUB_TOKEN=os.environ.get("GITHUB_TOKEN"),
@@ -409,8 +409,8 @@ def start(ctx, exclude, start_only):
                         error_msg=remove_matches(FILTER_ERROR_MSG, error_msgs[-1]),
                         task_hash=lib.task_hash(task),
                     )
-                    # lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
-                # repo.push_path(data_dir, f"Failed to start server from {repo.gha_url()}")
+                    lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
+                repo.push_path(data_dir, f"Failed to start server from {repo.gha_url()}")
             # break
             count += 1
             if count == 3:
