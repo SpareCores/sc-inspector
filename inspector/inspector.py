@@ -510,8 +510,9 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
 @click.option("--threads", type=int, default=32, show_default=True,
               help="Number of threads to run Pulumi concurrently. Each thread consumes around 60 MiB of RAM.")
 @click.option("--force/--no-force", type=bool, default=False, help="Do a cleanup even if there's no meta for the server")
+@click.option("--all-regions/--no-all-regions", type=bool, default=False, help="Clean up in all regions, not just in those which list the server as available")
 @click.option("--lookback-mins", type=int, show_default=True, help="Only clean up those instances that started at most this many minutes ago")
-def cleanup(ctx, threads, force, lookback_mins):
+def cleanup(ctx, threads, force, all_regions, lookback_mins):
     from sc_runner import runner
     from sc_runner.resources import supported_vendors
     from datetime import datetime, timedelta
@@ -526,9 +527,8 @@ def cleanup(ctx, threads, force, lookback_mins):
     )
     with ThreadPoolExecutor(max_workers=threads) as executor:
         for (vendor, server), (_, regions, zones) in servers:
-            # XXX: temporary action, clean up all regions, due to a quota-related hardcoded region list for Azure,
-            # because of which we've created resources even if the server is not available in that region
-            regions = get_regions(vendor)
+            if all_regions:
+                regions = get_regions(vendor)
             if vendor not in supported_vendors:
                 # sc-runner can't yet handle this vendor
                 continue
