@@ -510,11 +510,20 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
 @click.option("--threads", type=int, default=32, show_default=True,
               help="Number of threads to run Pulumi concurrently. Each thread consumes around 60 MiB of RAM.")
 @click.option("--force/--no-force", type=bool, default=False, help="Do a cleanup even if there's no meta for the server")
-def cleanup(ctx, threads, force):
+@click.option("--lookback-mins", type=int, show_default=True, help="Only clean up those instances that started at most this many minutes ago")
+def cleanup(ctx, threads, force, lookback_mins):
     from sc_runner import runner
     from sc_runner.resources import supported_vendors
+    from datetime import datetime, timedelta
+    max_start = None
+    if lookback_mins:
+        max_start = datetime.now() - timedelta(minutes=lookback_mins)
     futures = []
-    servers = lib.sort_available_servers(available_servers(), data_dir=os.path.join(ctx.parent.params["repo_path"], "data"))
+    servers = lib.sort_available_servers(
+        available_servers(),
+        data_dir=os.path.join(ctx.parent.params["repo_path"], "data"),
+        max_start=max_start,
+    )
     with ThreadPoolExecutor(max_workers=threads) as executor:
         for (vendor, server), (_, regions, zones) in servers:
             # XXX: temporary action, clean up all regions, due to a quota-related hardcoded region list for Azure,

@@ -363,6 +363,7 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: int
     q.join()
 
 
+@cache
 def get_last_start(data_dir, vendor, server):
     tasks = list(get_tasks(vendor))
     if not tasks:
@@ -380,6 +381,8 @@ def get_last_start(data_dir, vendor, server):
     return last_start
 
 
-def sort_available_servers(available_servers: dict, data_dir, reverse=True):
+def sort_available_servers(available_servers: dict, data_dir, reverse=True, max_start=None):
+    if max_start:
+        available_servers = {k: v for k, v in available_servers.items() if get_last_start(data_dir, k[0], k[1]) >= max_start}
     sorted_servers = sorted(available_servers.items(), key=lambda item: get_last_start(data_dir, item[0][0], item[0][1]), reverse=reverse)
     return sorted_servers
