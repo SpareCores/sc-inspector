@@ -227,7 +227,6 @@ def start(ctx, exclude, start_only):
             if vendor not in supported_vendors:
                 # sc-runner can't yet handle this vendor
                 continue
-            resource_opts = {}
             gpu_count = srv.gpu_count
             logging.info(f"Evaluating {vendor}/{server} with {gpu_count} GPUs")
             if (vendor, server) in exclude:
@@ -268,7 +267,7 @@ def start(ctx, exclude, start_only):
                 instance_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts")
             if vendor == "aws":
                 # we use the key_name in instance_opts instead of creating a new key
-                resource_opts["public_key"] = ""
+                resource_opts = dict(public_key="")
                 instance_opts |= dict(
                     key_name="spare-cores",
                     instance_initiated_shutdown_behavior="terminate",
@@ -296,6 +295,7 @@ def start(ctx, exclude, start_only):
                         logging.exception("Couldn't start instance")
 
             if vendor == "azure":
+                resource_opts = {}
                 image_sku = "server"
                 if "arm" in srv.cpu_architecture:
                     image_sku = "server-arm64"
@@ -356,6 +356,7 @@ def start(ctx, exclude, start_only):
                         break
 
             if vendor == "gcp":
+                resource_opts = {}
                 # select the first zone from the list
                 bootdisk_init_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "bootdisk_init_opts")
                 if "arm" in srv.cpu_architecture:
