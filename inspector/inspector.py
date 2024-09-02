@@ -232,6 +232,8 @@ def start(ctx, exclude, start_only):
             if (vendor, server) in exclude:
                 logging.info(f"Excluding {vendor}/{server}")
                 continue
+                if server != "Standard_B1s":
+                    continue
             if start_only and (vendor, server) not in start_only:
                 logging.info(f"Excluding {vendor}/{server} as --start-only {start_only} is given")
                 continue
@@ -295,7 +297,9 @@ def start(ctx, exclude, start_only):
                         logging.exception("Couldn't start instance")
 
             if vendor == "azure":
-                resource_opts = {}
+                # explicitly set SSH key from envvar
+                resource_opts = dict(public_key=os.environ.get("SSH_PUBLIC_KEY"))
+                logging.info(f"XXX DEBUG {len(resource_opts['public_key'])}")
                 image_sku = "server"
                 if "arm" in srv.cpu_architecture:
                     image_sku = "server-arm64"
@@ -303,7 +307,9 @@ def start(ctx, exclude, start_only):
                 # prefer westeurope due to quota reasons
                 # for region in custom_sort(regions, "westeurope"):
                 # XXX: temporary hack: we have quota in these regions, don't try others
-                for region in ["centralus", "australiacentral", "australiaeast", "canadacentral"]:
+                for region in ["centralus"
+                    # , "australiacentral", "australiaeast", "canadacentral"
+                               ]:
                     if region not in regions:
                         # this server is not available in this region, skip
                         logging.info(f"{server} not available in {region}, skipping")
@@ -410,7 +416,7 @@ def start(ctx, exclude, start_only):
                     )
                     lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
                 repo.push_path(data_dir, f"Failed to start server from {repo.gha_url()}")
-            # break
+            break
             count += 1
             if count == 3:
                 break
