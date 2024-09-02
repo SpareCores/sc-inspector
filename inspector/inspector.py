@@ -208,6 +208,7 @@ def start(ctx, exclude, start_only):
     from sc_runner.resources import default, supported_vendors
     import base64
     import concurrent.futures
+    import random
     import sc_runner.resources
     import time
 
@@ -304,7 +305,8 @@ def start(ctx, exclude, start_only):
                 # prefer westeurope due to quota reasons
                 # for region in custom_sort(regions, "westeurope"):
                 # XXX: temporary hack: we have quota in these regions, don't try others
-                for region in ["centralus", "australiacentral", "australiaeast", "canadacentral"]:
+                temp_regions = ["centralus", "australiacentral", "australiaeast", "canadacentral"]
+                for region in random.sample(temp_regions, len(temp_regions)):
                     if region not in regions:
                         # this server is not available in this region, skip
                         logging.info(f"{server} not available in {region}, skipping")
