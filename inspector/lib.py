@@ -479,7 +479,7 @@ def delayed_destroy(vendor, resource_opts):
     # to be run in the background
     time.sleep(180)
     try:
-        runner.destroy(vendor, {}, resource_opts)
+        runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=logging.info))
     except Exception:
         logging.exception("Failed to destroy")
 
@@ -490,7 +490,7 @@ def remove_matches(regexes, input_string):
     return input_string
 
 
-def start_inspect(executor, data_dir, vendor, server, tasks, srv_data, regions, zones):
+def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, regions, zones):
     from sc_runner.resources import default
     from sc_runner import runner
     import sc_runner.resources
@@ -508,7 +508,9 @@ def start_inspect(executor, data_dir, vendor, server, tasks, srv_data, regions, 
     timeout_mins = int(sum_timeout.total_seconds()/60)
     logging.info(f"Starting {vendor}/{server} with {timeout_mins}m timeout")
     if os.environ.get("GITHUB_TOKEN"):
-        repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
+        with lock:
+            # don't run multiple pushes
+            repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
     # start instance
     user_data = USER_DATA.format(
         GITHUB_TOKEN=os.environ.get("GITHUB_TOKEN"),
@@ -569,6 +571,7 @@ def start_inspect(executor, data_dir, vendor, server, tasks, srv_data, regions, 
             if region not in regions:
                 # this server is not available in this region, skip
                 logging.info(f"{server} not available in {region}, skipping")
+                error_msgs.append(f"{server} not available in {region}")
                 continue
             logging.info(f"Trying {region}")
             resource_opts["region"] = region

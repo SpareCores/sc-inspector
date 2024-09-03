@@ -116,34 +116,46 @@ def start(ctx, exclude, start_only):
 
     threading.current_thread().name = "main"
 
-    # use a context manager, so it'll wait for all submitted tasks on exit
-    # we create two executors, one for the inspect tasks and another for background tasks started from those tasks,
-    # so we can't deadlock
-    with concurrent.futures.ThreadPoolExecutor() as inspect_executor, concurrent.futures.ThreadPoolExecutor() as delayed_executor:
-        count = 0
-        for (vendor, server), (srv_data, regions, zones) in available_servers().items():
-            if vendor not in supported_vendors:
-                # sc-runner can't yet handle this vendor
-                continue
-            gpu_count = srv_data.gpu_count
-            logging.info(f"Evaluating {vendor}/{server} with {gpu_count} GPUs")
-            if (vendor, server) in exclude:
-                logging.info(f"Excluding {vendor}/{server}")
-                continue
-            if start_only and (vendor, server) not in start_only:
-                logging.info(f"Excluding {vendor}/{server} as --start-only {start_only} is given")
-                continue
-            data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
-            tasks = list(filter(lambda task: lib.should_start(task, data_dir, srv_data), lib.get_tasks(vendor)))
-            if not tasks:
-                logging.info(f"No tasks for {vendor}/{server}")
-                continue
-            inspect_executor.submit(lib.start_inspect, delayed_executor, data_dir, vendor, server, tasks, srv_data, regions, zones)
-            count += 1
-            if count == 8:
-                break
+    futures = {}
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=64)
+    count = 0
+    lock = threading.Lock()
+    for (vendor, server), (srv_data, regions, zones) in available_servers().items():
+        if vendor not in supported_vendors:
+            # sc-runner can't yet handle this vendor
+            continue
+        if vendor != "azure":
+            continue
+        gpu_count = srv_data.gpu_count
+        logging.info(f"Evaluating {vendor}/{server} with {gpu_count} GPUs")
+        if (vendor, server) in exclude:
+            logging.info(f"Excluding {vendor}/{server}")
+            continue
+        if start_only and (vendor, server) not in start_only:
+            logging.info(f"Excluding {vendor}/{server} as --start-only {start_only} is given")
+            continue
+        data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
+        tasks = list(filter(lambda task: lib.should_start(task, data_dir, srv_data), lib.get_tasks(vendor)))
+        if not tasks:
+            logging.info(f"No tasks for {vendor}/{server}")
+            continue
+        f = executor.submit(lib.start_inspect, executor, lock, data_dir, vendor, server, tasks, srv_data, regions, zones)
+        futures[f] = (vendor, server)
+        count += 1
+        if count == 8:
+            break
+    for f in concurrent.futures.as_completed(futures):
+        vendor, server = futures[f]
+        try:
+            result = f.result()
+        except Exception:
+            logging.exception(f"Inspection for {vendor}/{server} raised an exception")
+    logging.info("Start completed")
+    executor.shutdown(wait=True)
+    logging.info("Waiting for executors to finish")
     if os.environ.get("GITHUB_TOKEN"):
         repo.push_path(os.path.join(ctx.parent.params["repo_path"], "data"), f"Start finished {repo.gha_url()}")
+        logging.info("Git push successful")
 
 
 def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
