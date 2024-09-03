@@ -499,6 +499,7 @@ def start_inspect(executor, data_dir, vendor, server, tasks, srv_data, regions, 
     current_thread = threading.current_thread()
     current_thread.name = f"{vendor}/{server}"
 
+    error_msgs = []
     sum_timeout = timedelta()
     for task in tasks:
         meta = Meta(start=datetime.now(), task_hash=task_hash(task))

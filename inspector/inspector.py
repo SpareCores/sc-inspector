@@ -121,7 +121,6 @@ def start(ctx, exclude, start_only):
     # so we can't deadlock
     with concurrent.futures.ThreadPoolExecutor() as inspect_executor, concurrent.futures.ThreadPoolExecutor() as delayed_executor:
         count = 0
-        error_msgs = []
         for (vendor, server), (srv_data, regions, zones) in available_servers().items():
             if vendor not in supported_vendors:
                 # sc-runner can't yet handle this vendor
