@@ -139,6 +139,10 @@ def start(ctx, exclude, start_only):
         if not tasks:
             logging.info(f"No tasks for {vendor}/{server}")
             continue
+        # XXX: temporary until we have more quota
+        if vendor == "azure" and srv_data.vcpus > 4:
+            logging.info(f"Skipping {vendor}/{server} with {srv_data.vcpus}")
+            continue
         f = executor.submit(lib.start_inspect, executor, lock, data_dir, vendor, server, tasks, srv_data, regions, zones)
         futures[f] = (vendor, server)
         count += 1
