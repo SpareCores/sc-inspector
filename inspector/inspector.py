@@ -142,6 +142,8 @@ def start(ctx, exclude, start_only):
             count += 1
             if count == 8:
                 break
+    if os.environ.get("GITHUB_TOKEN"):
+        repo.push_path(os.path.join(ctx.parent.params["repo_path"], "data"), f"Start finished {repo.gha_url()}")
 
 
 def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):

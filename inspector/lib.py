@@ -671,4 +671,3 @@ def start_inspect(executor, data_dir, vendor, server, tasks, srv_data, regions, 
                 task_hash=task_hash(task),
             )
             write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
-        repo.push_path(data_dir, f"Failed to start server from {repo.gha_url()}")
