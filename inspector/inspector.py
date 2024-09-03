@@ -3,17 +3,12 @@ Import only the necessary modules here, because the `inspect` will run on small 
 preserve memory for running the benchmarks.
 All other modules should be imported lazily, where needed.
 """
-from concurrent.futures import ThreadPoolExecutor
 from functools import cache
 import click
-import copy
 import itertools
 import lib
 import logging
 import os
-import pulumi_aws as aws
-import random
-import re
 import repo
 import sys
 import tempfile
@@ -21,11 +16,13 @@ import tempfile
 RESET = "\033[0m"
 YELLOW = "\033[33m"
 GREEN = "\033[32m"
+RED = "\033[31m"
+
 
 # Create a formatter string with color codes
 formatter_str = (
     f"{YELLOW}%(asctime)s{RESET}/"
-    f"{GREEN}%(levelname)s{RESET} - "
+    f"{GREEN}%(levelname)s{RESET}/{RED}%(threadName)s{RESET}: "
     "%(message)s"
 )
 
@@ -36,67 +33,9 @@ logging.basicConfig(
     format=formatter_str,
     datefmt="%Y-%m-%d %H:%M:%S"
 )
-
+lib.logging = logging
 # We can't (yet) start these
 EXCLUDE_INSTANCES: list[tuple[str, str]] = []
-# filter error_msg which is written to meta.json for these, we don't want to leak information
-FILTER_ERROR_MSG = {
-    re.compile(r"Submit a request for Quota increase at https.*to succeed\."),
-}
-# non-retryable Pulumi errors. The message that matches one of these regexes will be saved in meta.json.
-PULUMI_ERRORS = {
-    re.compile(r"error occurred"),   # AWS permanent error
-    re.compile(r"creating .* error"),  # Azure errors
-}
-
-USER_DATA = """#!/bin/sh
-
-# just to be sure, schedule a shutdown early
-shutdown --no-wall +{SHUTDOWN_MINS}
-
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
-# Add the required repositories to Apt sources:
-apt-get install -y ca-certificates curl
-install -m 0755 -d /etc/apt/keyrings
-# docker
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-chmod a+r /etc/apt/keyrings/docker.asc
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-  tee /etc/apt/sources.list.d/docker.list > /dev/null
-# nvidia drivers/toolkit in GPU_COUNT != 0
-NVIDIA_PKGS=""
-if [ {GPU_COUNT} -ne 0 ]; then
-    add-apt-repository ppa:graphics-drivers/ppa -y
-    # nvidia container toolkit
-    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
-      && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
-        sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-    NVIDIA_PKGS="nvidia-driver-525 nvidia-container-toolkit"
-fi
-apt-get update -y >> /tmp/output 2>&1
-apt-get install -y $NVIDIA_PKGS docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >> /tmp/output 2>&1
-systemctl restart docker
-# stop some services to preserve memory
-snap stop amazon-ssm-agent >> /tmp/output 2>&1
-systemctl stop chrony acpid cron multipathd snapd systemd-timedated unattended-upgrades polkit packagekit systemd-udevd >> /tmp/output 2>&1
-# remove unwanted packages
-apt-get autoremove -y apport unattended-upgrades snapd packagekit >> /tmp/output 2>&1
-# https://github.com/NVIDIA/nvidia-container-toolkit/issues/202
-# on some machines docker initialization times out with a lot of GPUs. Enable persistence mode to overcome that.
-nvidia-smi -pm 1
-docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/docker.sock \
-    -e GITHUB_TOKEN={GITHUB_TOKEN} \
-    -e GITHUB_SERVER_URL={GITHUB_SERVER_URL} \
-    -e GITHUB_REPOSITORY={GITHUB_REPOSITORY} \
-    -e GITHUB_RUN_ID={GITHUB_RUN_ID} \
-    -e BENCHMARK_SECRETS_PASSPHRASE={BENCHMARK_SECRETS_PASSPHRASE} \
-    ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT} >> /tmp/output 2>&1
-poweroff
-"""
 
 
 @cache
@@ -160,42 +99,10 @@ def available_servers(vendor: str | None = None, region: str | None = None):
     return servers
 
 
-def remove_matches(regexes, input_string):
-    for regex in regexes:
-        input_string = re.sub(regex, '', input_string)
-    return input_string
-
-
-def custom_sort(lst, key):
-    """Shuffles a list, but always returns `key` as the first element."""
-    if key in lst:
-        lst.remove(key)
-
-    random.shuffle(lst)
-    lst.insert(0, key)
-
-    return lst
-
 @click.group()
 @click.option("--repo-path", default=os.environ.get("REPO_PATH", os.getcwd()), help="Directory which contains the repository")
 def cli(repo_path):
     pass
-
-
-def pulumi_output_filter(message, error_msgs, output):
-    # print output to the console with logger, so we have the dates
-    logging.info(message)
-    output.append(message)
-    if any([regex.search(message) for regex in PULUMI_ERRORS]):
-        error_msgs.append(message)
-
-
-def pulumi_event_filter(event, error_msgs):
-    try:
-        if event.diagnostic_event.severity == "error" and any([regex.search(event.diagnostic_event.message) for regex in PULUMI_ERRORS]):
-            error_msgs.append(event.diagnostic_event.message)
-    except Exception:
-        pass
 
 
 @cli.command()
@@ -203,32 +110,23 @@ def pulumi_event_filter(event, error_msgs):
 @click.option("--exclude", type=(str, str), default=EXCLUDE_INSTANCES, multiple=True, help="Exclude $vendor $instance")
 @click.option("--start-only", type=(str, str), multiple=True, help="Start only $vendor $instance")
 def start(ctx, exclude, start_only):
-    from datetime import datetime, timedelta
-    from sc_runner import runner
-    from sc_runner.resources import default, supported_vendors
-    import base64
+    from sc_runner.resources import supported_vendors
     import concurrent.futures
-    import random
-    import sc_runner.resources
-    import time
+    import threading
 
-    def delayed_destroy(vendor, resource_opts):
-        # to be run in the background
-        time.sleep(180)
-        try:
-            runner.destroy(vendor, {}, resource_opts)
-        except Exception:
-            logging.exception("Failed to destroy")
+    threading.current_thread().name = "main"
 
     # use a context manager, so it'll wait for all submitted tasks on exit
-    with concurrent.futures.ThreadPoolExecutor() as executor:
+    # we create two executors, one for the inspect tasks and another for background tasks started from those tasks,
+    # so we can't deadlock
+    with concurrent.futures.ThreadPoolExecutor() as inspect_executor, concurrent.futures.ThreadPoolExecutor() as delayed_executor:
         count = 0
         error_msgs = []
-        for (vendor, server), (srv, regions, zones) in available_servers().items():
+        for (vendor, server), (srv_data, regions, zones) in available_servers().items():
             if vendor not in supported_vendors:
                 # sc-runner can't yet handle this vendor
                 continue
-            gpu_count = srv.gpu_count
+            gpu_count = srv_data.gpu_count
             logging.info(f"Evaluating {vendor}/{server} with {gpu_count} GPUs")
             if (vendor, server) in exclude:
                 logging.info(f"Excluding {vendor}/{server}")
@@ -237,185 +135,13 @@ def start(ctx, exclude, start_only):
                 logging.info(f"Excluding {vendor}/{server} as --start-only {start_only} is given")
                 continue
             data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
-            tasks = list(filter(lambda task: lib.should_start(task, data_dir, srv), lib.get_tasks(vendor)))
+            tasks = list(filter(lambda task: lib.should_start(task, data_dir, srv_data), lib.get_tasks(vendor)))
             if not tasks:
                 logging.info(f"No tasks for {vendor}/{server}")
                 continue
-            sum_timeout = timedelta()
-            for task in tasks:
-                meta = lib.Meta(start=datetime.now(), task_hash=lib.task_hash(task))
-                lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
-                sum_timeout += task.timeout
-            timeout_mins = int(sum_timeout.total_seconds()/60)
-            logging.info(f"Starting {vendor}/{server} with {timeout_mins}m timeout")
-            if os.environ.get("GITHUB_TOKEN"):
-                repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
-            # start instance
-            user_data = USER_DATA.format(
-                GITHUB_TOKEN=os.environ.get("GITHUB_TOKEN"),
-                GITHUB_SERVER_URL=os.environ.get("GITHUB_SERVER_URL"),
-                GITHUB_REPOSITORY=os.environ.get("GITHUB_REPOSITORY"),
-                GITHUB_RUN_ID=os.environ.get("GITHUB_RUN_ID"),
-                BENCHMARK_SECRETS_PASSPHRASE=os.environ.get("BENCHMARK_SECRETS_PASSPHRASE"),
-                VENDOR=vendor,
-                INSTANCE=server,
-                GPU_COUNT=gpu_count,
-                SHUTDOWN_MINS=timeout_mins,
-            )
-            b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
-            if vendor in ("aws", "gcp"):
-                # get default instance opts for the vendor and add ours
-                instance_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts")
-            if vendor == "aws":
-                # we use the key_name in instance_opts instead of creating a new key
-                resource_opts = dict(public_key="")
-                instance_opts |= dict(
-                    key_name="spare-cores",
-                    instance_initiated_shutdown_behavior="terminate",
-                )
-                for region in custom_sort(regions, "us-west-2"):
-                    logging.info(f"Trying {region}")
-                    resource_opts["region"] = region
-
-                    # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-                    runner.destroy(vendor, {}, resource_opts | dict(instance=server))
-                    error_msgs = []
-                    stack_opts = dict(on_output=logging.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
-                    try:
-                        runner.create(
-                            vendor,
-                            {},
-                            resource_opts | dict(instance=server, instance_opts=instance_opts, user_data=b64_user_data, disk_size=16),
-                            stack_opts=stack_opts,
-                        )
-                        # empty it if create succeeded, just in case
-                        error_msgs = []
-                        break
-                    except Exception:
-                        # on failure, try the next one
-                        logging.exception("Couldn't start instance")
-
-            if vendor == "azure":
-                # explicitly set SSH key from envvar
-                resource_opts = dict(public_key=os.environ.get("SSH_PUBLIC_KEY"))
-                image_sku = "server"
-                if "arm" in srv.cpu_architecture:
-                    image_sku = "server-arm64"
-                done = False
-                # prefer westeurope due to quota reasons
-                # for region in custom_sort(regions, "westeurope"):
-                # XXX: temporary hack: we have quota in these regions, don't try others
-                temp_regions = ["centralus", "australiacentral", "australiaeast", "canadacentral"]
-                for region in random.sample(temp_regions, len(temp_regions)):
-                    if region not in regions:
-                        # this server is not available in this region, skip
-                        logging.info(f"{server} not available in {region}, skipping")
-                        continue
-                    logging.info(f"Trying {region}")
-                    resource_opts["region"] = region
-                    # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-                    runner.destroy(vendor, {}, resource_opts | dict(instance=server))
-
-                    error_msgs = []
-                    output = []
-                    # Azure native doesn't give sensible error events, use its output
-                    stack_opts = dict(on_output=lambda message: pulumi_output_filter(message, error_msgs, output))
-                    for _ in range(2):
-                        # try normal images first, then gen1 if we get Hypervisor Generation '2' error
-                        try:
-                            runner.create(
-                                vendor,
-                                {},
-                                resource_opts | dict(instance=server, user_data=b64_user_data, image_sku=image_sku),
-                                stack_opts=stack_opts,
-                                )
-                            # empty it if create succeeded, just in case
-                            error_msgs = []
-                            done = True
-                            break
-                        except Exception:
-                            if image_sku.endswith("-gen1"):
-                                # we already know it's a gen1 instance, don't try to create twice with the same options
-                                break
-                            # The selected VM size 'Standard_A0' cannot boot Hypervisor Generation '2'. If this was a
-                            # Create operation please check that the Hypervisor Generation of the Image matches the
-                            # Hypervisor Generation of the selected VM Size. If this was an Update operation please select
-                            # a Hypervisor Generation '2' VM Size. For more information, see https://aka.ms/azuregen2vm
-                            if any(["cannot boot Hypervisor Generation '2'" in s for s in output]):
-                                logging.exception(f"Hypervisor Generation error, image_sku={image_sku}, adding -gen1")
-                                if "gen1" not in image_sku:
-                                    image_sku += "-gen1"
-                                # The NIC will be blocked for 180s, so wait until we retry
-                                # Nic(s) in request is reserved for another Virtual Machine for 180 seconds.
-                                logging.info("Sleeping 180s to make the NIC free again")
-                                time.sleep(180)
-                                continue
-                            logging.exception("Couldn't start instance, deleting the stack in the background")
-                            # on failure, destroy the stack in the background (as we have to wait 180s for the NIC), so we're
-                            # not blocking further tries
-                            executor.submit(delayed_destroy, vendor, resource_opts)
-                            break
-                    if done:
-                        break
-
-            if vendor == "gcp":
-                resource_opts = {}
-                # select the first zone from the list
-                bootdisk_init_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "bootdisk_init_opts")
-                if "arm" in srv.cpu_architecture:
-                    bootdisk_init_opts |= dict(image="ubuntu-2404-lts-arm64")
-                else:
-                    bootdisk_init_opts |= dict(image="ubuntu-2404-lts-amd64")
-
-                # e2 needs to be spot, also, we have only spot quotas for selected GPU instances
-                is_preemptible = server.startswith("e2") or gpu_count > 0
-                resource_opts |= dict(bootdisk_init_opts=bootdisk_init_opts,
-                                      scheduling_opts=dict(
-                                          preemptible=is_preemptible,
-                                          automatic_restart=False if is_preemptible else True,
-                                          on_host_maintenance="TERMINATE")
-                                      )
-                instance_opts |= dict(metadata_startup_script=user_data)
-
-                for zone in zones:
-                    logging.info(f"Trying {zone}")
-                    resource_opts["zone"] = zone
-                    # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-                    runner.destroy(vendor, {}, resource_opts | dict(instance=server))
-
-                    error_msgs = []
-                    stack_opts = dict(on_output=logging.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
-                    try:
-                        runner.create(
-                            vendor,
-                            {},
-                            resource_opts | dict(instance=server, instance_opts=instance_opts),
-                            stack_opts=stack_opts,
-                        )
-                        # empty it if create succeeded, just in case
-                        error_msgs = []
-                        break
-                    except Exception:
-                        # on failure, try the next one
-                        logging.exception("Couldn't start instance")
-
-            if error_msgs and os.environ.get("GITHUB_TOKEN"):
-                # upload error message if we couldn't start the instance
-                now = datetime.now()
-                logging.info("Failed to start instance, uploading error messages")
-                for task in tasks:
-                    meta = lib.Meta(
-                        start=now,
-                        end=now,
-                        exit_code=-1,
-                        error_msg=remove_matches(FILTER_ERROR_MSG, error_msgs[-1]),
-                        task_hash=lib.task_hash(task),
-                    )
-                    lib.write_meta(meta, os.path.join(data_dir, task.name, lib.META_NAME))
-                repo.push_path(data_dir, f"Failed to start server from {repo.gha_url()}")
-            # break
+            inspect_executor.submit(lib.start_inspect, delayed_executor, data_dir, vendor, server, tasks, srv_data, regions, zones)
             count += 1
-            if count == 3:
+            if count == 8:
                 break
 
 
@@ -513,9 +239,10 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
 @click.option("--all-regions/--no-all-regions", type=bool, default=False, help="Clean up in all regions, not just in those which list the server as available")
 @click.option("--lookback-mins", type=int, show_default=True, help="Only clean up those instances that started at most this many minutes ago")
 def cleanup(ctx, threads, force, all_regions, lookback_mins):
-    from sc_runner import runner
     from sc_runner.resources import supported_vendors
     from datetime import datetime, timedelta
+    import concurrent.futures
+
     max_start = None
     if lookback_mins:
         max_start = datetime.now() - timedelta(minutes=lookback_mins)
@@ -525,7 +252,7 @@ def cleanup(ctx, threads, force, all_regions, lookback_mins):
         data_dir=os.path.join(ctx.parent.params["repo_path"], "data"),
         max_start=max_start,
     )
-    with ThreadPoolExecutor(max_workers=threads) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
         for (vendor, server), (_, regions, zones) in servers:
             if all_regions:
                 regions = get_regions(vendor)
