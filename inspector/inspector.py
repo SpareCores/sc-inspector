@@ -165,10 +165,14 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
     """
     from datetime import datetime, timedelta
     from sc_runner import runner
+    import threading
 
     tasks = list(lib.get_tasks(vendor))
     if not tasks:
         return
+
+    # set thread name for logging
+    threading.current_thread().name = f"{vendor}/{server}"
 
     # see if we have to destroy the resources in the Pulumi stack
     destroy = ""
@@ -241,7 +245,7 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
                         logging.info(f"Pulumi stack for {vendor}/{value}/{server} has {len(resources)} resources, no cleanup needed")
                         continue
                 logging.info(destroy)
-                runner.destroy_stack(vendor, pulumi_opts, resource_opts | dict(instance=server))
+                runner.destroy_stack(vendor, pulumi_opts, resource_opts | dict(instance=server), stack_opts=dict(on_output=logging.info))
 
 
 @cli.command()

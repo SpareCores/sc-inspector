@@ -539,7 +539,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             resource_opts["region"] = region
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts | dict(instance=server))
+            runner.destroy(vendor, {}, resource_opts | dict(instance=server), stack_opts=dict(on_output=logging.info))
             error_msgs = []
             stack_opts = dict(on_output=logging.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
             try:
@@ -567,7 +567,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             logging.info(f"Trying {region}")
             resource_opts["region"] = region
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts | dict(instance=server))
+            runner.destroy(vendor, {}, resource_opts | dict(instance=server), stack_opts=dict(on_output=logging.info))
 
             error_msgs = []
             output = []
@@ -634,7 +634,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             logging.info(f"Trying {zone}")
             resource_opts["zone"] = zone
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts | dict(instance=server))
+            runner.destroy(vendor, {}, resource_opts | dict(instance=server), stack_opts=dict(on_output=logging.info))
 
             error_msgs = []
             stack_opts = dict(on_output=logging.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
