@@ -563,16 +563,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         if "arm" in srv_data.cpu_architecture:
             image_sku = "server-arm64"
         done = False
-        # prefer westeurope due to quota reasons
-        # for region in custom_sort(regions, "westeurope"):
-        # XXX: temporary hack: we have quota in these regions, don't try others
-        temp_regions = ["centralus", "australiacentral", "australiaeast", "canadacentral"]
-        for region in random.sample(temp_regions, len(temp_regions)):
-            if region not in regions:
-                # this server is not available in this region, skip
-                logging.info(f"{server} not available in {region}, skipping")
-                error_msgs.append(f"{server} not available in {region}")
-                continue
+        for region in random.sample(regions, len(regions)):
             logging.info(f"Trying {region}")
             resource_opts["region"] = region
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
