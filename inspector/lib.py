@@ -563,7 +563,8 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         if "arm" in srv_data.cpu_architecture:
             image_sku = "server-arm64"
         done = False
-        for region in random.sample(regions, len(regions)):
+        # we have larger quota in centralus, so prefer that
+        for region in custom_sort(regions, "centralus"):
             logging.info(f"Trying {region}")
             resource_opts["region"] = region
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
