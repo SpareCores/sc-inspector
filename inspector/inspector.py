@@ -254,7 +254,7 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
 
 @cli.command()
 @click.pass_context
-@click.option("--threads", type=int, default=32, show_default=True,
+@click.option("--threads", type=int, default=64, show_default=True,
               help="Number of threads to run Pulumi concurrently. Each thread consumes around 60 MiB of RAM.")
 @click.option("--force/--no-force", type=bool, default=False, help="Do a cleanup even if there's no meta for the server")
 @click.option("--all-regions/--no-all-regions", type=bool, default=False, help="Clean up in all regions, not just in those which list the server as available")
