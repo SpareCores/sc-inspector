@@ -473,11 +473,15 @@ def pulumi_event_filter(event, error_msgs):
         pass
 
 
-def delayed_destroy(vendor, resource_opts):
+def delayed_destroy(vendor, server, resource_opts):
     from sc_runner import runner
 
     # to be run in the background
     time.sleep(180)
+
+    # change the thread name for logging
+    current_thread = threading.current_thread()
+    current_thread.name = f"{vendor}/{server}"
     try:
         runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=logging.info))
     except Exception:
@@ -607,7 +611,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                     logging.exception("Couldn't start instance, deleting the stack in the background")
                     # on failure, destroy the stack in the background (as we have to wait 180s for the NIC), so we're
                     # not blocking further tries
-                    executor.submit(delayed_destroy, vendor, resource_opts)
+                    executor.submit(delayed_destroy, vendor, server, resource_opts)
                     break
             if done:
                 break
