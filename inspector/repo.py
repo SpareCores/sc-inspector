@@ -43,7 +43,7 @@ def push_path(path: str | os.PathLike, msg: str):
         repo.index.add(path)
         repo.index.commit(msg)
         origin = repo.remote(name="origin")
-        origin.pull(strategy_option="ours")
+        origin.pull(rebase=True)
         origin.push()
 
 
