@@ -529,7 +529,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         instance_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts")
     if vendor == "aws":
         # we use the key_name in instance_opts instead of creating a new key
-        resource_opts = dict(public_key="")
+        resource_opts = dict(public_key="", instance=server)
         instance_opts |= dict(
             key_name="spare-cores",
             instance_initiated_shutdown_behavior="terminate",
@@ -539,14 +539,14 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             resource_opts["region"] = region
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts | dict(instance=server), stack_opts=dict(on_output=logging.info))
+            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=logging.info))
             error_msgs = []
             stack_opts = dict(on_output=logging.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
             try:
                 runner.create(
                     vendor,
                     {},
-                    resource_opts | dict(instance=server, instance_opts=instance_opts, user_data=b64_user_data, disk_size=16),
+                    resource_opts | dict(instance_opts=instance_opts, user_data=b64_user_data, disk_size=16),
                     stack_opts=stack_opts,
                     )
                 # empty it if create succeeded, just in case
@@ -558,7 +558,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
 
     if vendor == "azure":
         # explicitly set SSH key from envvar
-        resource_opts = dict(public_key=os.environ.get("SSH_PUBLIC_KEY"))
+        resource_opts = dict(public_key=os.environ.get("SSH_PUBLIC_KEY"), instance=server)
         image_sku = "server"
         if "arm" in srv_data.cpu_architecture:
             image_sku = "server-arm64"
@@ -568,7 +568,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             logging.info(f"Trying {region}")
             resource_opts["region"] = region
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts | dict(instance=server), stack_opts=dict(on_output=logging.info))
+            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=logging.info))
 
             error_msgs = []
             output = []
@@ -580,7 +580,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                     runner.create(
                         vendor,
                         {},
-                        resource_opts | dict(instance=server, user_data=b64_user_data, image_sku=image_sku),
+                        resource_opts | dict(user_data=b64_user_data, image_sku=image_sku),
                         stack_opts=stack_opts,
                         )
                     # empty it if create succeeded, just in case
@@ -613,7 +613,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 break
 
     if vendor == "gcp":
-        resource_opts = {}
+        resource_opts = dict(instance=server)
         # select the first zone from the list
         bootdisk_init_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "bootdisk_init_opts")
         if "arm" in srv_data.cpu_architecture:
@@ -635,7 +635,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             logging.info(f"Trying {zone}")
             resource_opts["zone"] = zone
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts | dict(instance=server), stack_opts=dict(on_output=logging.info))
+            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=logging.info))
 
             error_msgs = []
             stack_opts = dict(on_output=logging.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
@@ -643,7 +643,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 runner.create(
                     vendor,
                     {},
-                    resource_opts | dict(instance=server, instance_opts=instance_opts),
+                    resource_opts | dict(instance_opts=instance_opts),
                     stack_opts=stack_opts,
                     )
                 # empty it if create succeeded, just in case
