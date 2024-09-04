@@ -41,7 +41,7 @@ def push_path(path: str | os.PathLike, msg: str):
     changes = repo.untracked_files + repo.index.diff(None)
     if len(changes):
         origin = repo.remote(name="origin")
-        origin.pull(rebase=True, strategy_option='theirs')
+        origin.pull(strategy_option="ours")
         repo.index.add(path)
         repo.index.commit(msg)
         origin.push()
