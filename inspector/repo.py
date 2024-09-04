@@ -39,7 +39,7 @@ def get_repo(repo_url=REPO_URL, repo_path=REPO_PATH):
 def push_path(path: str | os.PathLike, msg: str):
     repo = get_repo()
     changes = repo.untracked_files + repo.index.diff(None)
-    if len(changes):
+    if changes:
         origin = repo.remote(name="origin")
         origin.pull(strategy_option="ours")
         repo.index.add(path)
