@@ -494,6 +494,20 @@ def remove_matches(regexes, input_string):
     return input_string
 
 
+def retry_locked(func, *args, **kwargs):
+    """Retry a pulumi function with random backoff for locking issues"""
+    import pulumi
+
+    for i in range(3):
+        try:
+            return func(*args, **kwargs)
+        except pulumi.automation.errors.ConcurrentUpdateError:
+            logging.exception(f"ConcurrentUpdateError, retry #{i}")
+            time.sleep(random.randint(1, 5))
+        except Exception:
+            raise
+
+
 def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, regions, zones):
     from sc_runner.resources import default
     from sc_runner import runner
@@ -547,12 +561,9 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             error_msgs = []
             stack_opts = dict(on_output=logging.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
             try:
-                runner.create(
-                    vendor,
-                    {},
-                    resource_opts | dict(instance_opts=instance_opts, user_data=b64_user_data, disk_size=16),
-                    stack_opts=stack_opts,
-                    )
+                retry_locked(runner.create,vendor, {},
+                             resource_opts | dict(instance_opts=instance_opts, user_data=b64_user_data, disk_size=16),
+                             stack_opts=stack_opts)
                 # empty it if create succeeded, just in case
                 error_msgs = []
                 break
@@ -581,12 +592,9 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             for _ in range(2):
                 # try normal images first, then gen1 if we get Hypervisor Generation '2' error
                 try:
-                    runner.create(
-                        vendor,
-                        {},
-                        resource_opts | dict(user_data=b64_user_data, image_sku=image_sku),
-                        stack_opts=stack_opts,
-                        )
+                    retry_locked(runner.create, vendor, {},
+                                 resource_opts | dict(user_data=b64_user_data, image_sku=image_sku),
+                                 stack_opts=stack_opts)
                     # empty it if create succeeded, just in case
                     error_msgs = []
                     done = True
@@ -644,12 +652,9 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             error_msgs = []
             stack_opts = dict(on_output=logging.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
             try:
-                runner.create(
-                    vendor,
-                    {},
-                    resource_opts | dict(instance_opts=instance_opts),
-                    stack_opts=stack_opts,
-                    )
+                retry_locked(runner.create, vendor, {},
+                             resource_opts | dict(instance_opts=instance_opts),
+                             stack_opts=stack_opts)
                 # empty it if create succeeded, just in case
                 error_msgs = []
                 break
