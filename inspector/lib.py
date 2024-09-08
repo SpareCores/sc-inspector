@@ -388,8 +388,8 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: int
     # non-parallel ones)
     for taskgroup in sorted(taskgroups.keys()):
         for task in taskgroups[taskgroup]:
+            meta = load_task_meta(task, data_dir)
             if not should_run(task, data_dir, vendor, instance, gpu_count):
-                meta = load_task_meta(task, data_dir)
                 if meta.start and meta.exit_code is None:
                     # update meta, if it doesn't yet have an exit code, so the monitoring won't fail on this
                     meta.end = datetime.now()
