@@ -543,8 +543,8 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
     )
     b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
     if vendor in ("aws", "gcp"):
-        # get default instance opts for the vendor and add ours
-        instance_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts")
+        # get the copy (so we don't modify the original) of the default instance opts for the vendor and add ours
+        instance_opts = copy.deepcopy(default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts"))
     if vendor == "aws":
         # we use the key_name in instance_opts instead of creating a new key
         resource_opts = dict(public_key="", instance=server)
@@ -626,8 +626,8 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
 
     if vendor == "gcp":
         resource_opts = dict(instance=server)
-        # select the first zone from the list
-        bootdisk_init_opts = default(getattr(sc_runner.resources, vendor).DEFAULTS, "bootdisk_init_opts")
+        # select the first zone from the list, work on a copy as we modify it
+        bootdisk_init_opts = copy.deepcopy(default(getattr(sc_runner.resources, vendor).DEFAULTS, "bootdisk_init_opts"))
         if "arm" in srv_data.cpu_architecture:
             bootdisk_init_opts |= dict(image="ubuntu-2404-lts-arm64")
         else:
