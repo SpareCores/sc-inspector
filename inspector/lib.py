@@ -53,15 +53,16 @@ USER_DATA = """#!/bin/sh
 shutdown --no-wall +{SHUTDOWN_MINS}
 
 export DEBIAN_FRONTEND=noninteractive
+. /etc/os-release
 apt-get update -y
 # Add the required repositories to Apt sources:
 apt-get install -y ca-certificates curl
 install -m 0755 -d /etc/apt/keyrings
 # docker
-curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+curl -fsSL https://download.docker.com/linux/$ID/gpg -o /etc/apt/keyrings/docker.asc
 chmod a+r /etc/apt/keyrings/docker.asc
 echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$ID \
   $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
   tee /etc/apt/sources.list.d/docker.list > /dev/null
 # nvidia drivers/toolkit in GPU_COUNT != 0
@@ -633,6 +634,12 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             bootdisk_init_opts |= dict(image="ubuntu-2404-lts-arm64")
         else:
             bootdisk_init_opts |= dict(image="ubuntu-2404-lts-amd64")
+        # -416 machines won't boot with ubuntu-2404 (or any other ubuntu images), so use Debian for them
+        if server.endswith("-416"):
+            if "arm" in srv_data.cpu_architecture:
+                bootdisk_init_opts |= dict(image="debian-12-arm64")
+            else:
+                bootdisk_init_opts |= dict(image="debian-12")
 
         # e2 needs to be spot, also, we have only spot quotas for selected GPU instances
         is_preemptible = server.startswith("e2") or srv_data.gpu_count > 0
