@@ -45,6 +45,7 @@ FILTER_ERROR_MSG = {
 PULUMI_ERRORS = {
     re.compile(r"error occurred"),   # AWS permanent error
     re.compile(r"creating .* error"),  # Azure errors
+    re.compile(r"error waiting for.*to create"),   # GCP error
 }
 USER_DATA = """#!/bin/sh
 
