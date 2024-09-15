@@ -14,7 +14,6 @@ import json
 import logging
 import math
 import os
-import psutil
 import random
 import re
 import repo
@@ -96,8 +95,6 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT} >> /tmp/output 2>&1
 poweroff
 """
-
-mem_bytes = psutil.virtual_memory().available
 
 
 class Meta(BaseModel):
@@ -238,6 +235,9 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
 
 def should_run(task: Task, data_dir: str | os.PathLike, vendor: str, instance: str, gpu_count: int) -> bool:
     """Return True if we should run a task."""
+    import psutil  # lazy load
+
+    mem_bytes = psutil.virtual_memory().available
     meta = load_task_meta(task, data_dir)
     thash = task_hash(task)
     # minimum_memory is GiB
