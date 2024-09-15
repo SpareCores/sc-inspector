@@ -35,7 +35,11 @@ logging.basicConfig(
 )
 lib.logging = logging
 # We can't (yet) start these
-EXCLUDE_INSTANCES: list[tuple[str, str]] = []
+EXCLUDE_INSTANCES: list[tuple[str, str]] = [
+    ("aws", "p4de.24xlarge"),
+    ("aws", "p5.48xlarge"),
+    ("aws", "p5e.48xlarge"),
+]
 
 
 @cache
