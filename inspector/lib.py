@@ -619,10 +619,10 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                         logging.info("Sleeping 180s to make the NIC free again")
                         time.sleep(180)
                         continue
-                    logging.exception("Couldn't start instance, deleting the stack in the background")
+                    logging.exception(f"Couldn't start instance, deleting the stack for {region} in the background")
                     # on failure, destroy the stack in the background (as we have to wait 180s for the NIC), so we're
                     # not blocking further tries
-                    executor.submit(delayed_destroy, vendor, server, resource_opts)
+                    executor.submit(delayed_destroy, vendor, server, copy.deepcopy(resource_opts))
                     break
             if done:
                 break
