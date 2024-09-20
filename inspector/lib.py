@@ -319,7 +319,7 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike) -> tup
             break
     else:
         # timed out, stop container, set error message
-        c.stop(c)
+        c.stop()
         meta.error_msg = f"Execution timed out after {task.timeout.total_seconds()}s"
     meta.end = datetime.now()
     try:
