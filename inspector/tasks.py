@@ -158,3 +158,14 @@ redis = DockerTask(
     version_command="redis-server -v",
     command="nice -n -20 python /usr/local/bin/benchmark.py",
 )
+
+nvbandwidth = DockerTask(
+    parallel=False,
+    priority=9,
+    image="ghcr.io/sparecores/nvbandwidth:main",
+    gpu=True,
+    version_command="bash -c \"nvbandwidth --help | head -1 | egrep -o 'v[0-9.]+'\"",
+    command="nvbandwidth -j",
+    precheck_command="lshw -C display -json | jq -r '.[].vendor'",
+    precheck_regex="nvidia"
+)
