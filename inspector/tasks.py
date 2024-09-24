@@ -59,11 +59,11 @@ nvidia_smi = DockerTask(
 stressngfull = DockerTask(
     parallel=False,
     priority=1,
-    image=f"ghcr.io/colinianking/stress-ng:{STRESSNG_TAG}",
+    image=f"ghcr.io/sparecores/stress-ng:main",
     docker_opts=DOCKER_OPTS | dict(entrypoint="sh"),
     version_docker_opts=dict(entrypoint="sh"),
     version_command="-c \"stress-ng --version | awk '{print $3}'\"",
-    command=r"""-c 'for ncpu in $(seq 1 $(nproc)); do echo -n "$ncpu,"; nice -n -20 stress-ng --metrics --cpu $ncpu --cpu-method div16 -t 10 | egrep "metrc.*cpu" | awk "{print \$9}"; done'""",
+    command=r"""-c 'for ncpu in $(awk -f /usr/local/bin/count.awk $(nproc)); do echo -n "$ncpu,"; nice -n -20 stress-ng --metrics --cpu $ncpu --cpu-method div16 -t 10 | egrep "metrc.*cpu" | awk "{print \$9}"; done'""",
 )
 
 # An extended version of the multicore StressNg task: running
