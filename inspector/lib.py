@@ -47,6 +47,8 @@ PULUMI_ERRORS = {
     re.compile(r"creating failed"),  # Azure errors
     re.compile(r"error waiting for.*to create"),   # GCP error
 }
+# provision machines with storage (GiB)
+VOLUME_SIZE=32
 USER_DATA = """#!/bin/sh
 
 # just to be sure, schedule a shutdown early
@@ -551,7 +553,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         instance_opts = copy.deepcopy(default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts"))
     if vendor == "aws":
         # we use the key_name in instance_opts instead of creating a new key
-        resource_opts = dict(public_key="", instance=server)
+        resource_opts = dict(public_key="", instance=server, disk_size=VOLUME_SIZE)
         instance_opts |= dict(
             key_name="spare-cores",
             instance_initiated_shutdown_behavior="terminate",
@@ -566,7 +568,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             stack_opts = dict(on_output=logging.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
             try:
                 retry_locked(runner.create,vendor, {},
-                             resource_opts | dict(instance_opts=instance_opts, user_data=b64_user_data, disk_size=16),
+                             resource_opts | dict(instance_opts=instance_opts, user_data=b64_user_data),
                              stack_opts=stack_opts)
                 # empty it if create succeeded, just in case
                 error_msgs = []
@@ -577,7 +579,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
 
     if vendor == "azure":
         # explicitly set SSH key from envvar
-        resource_opts = dict(public_key=os.environ.get("SSH_PUBLIC_KEY"), instance=server)
+        resource_opts = dict(public_key=os.environ.get("SSH_PUBLIC_KEY"), instance=server, disk_size=VOLUME_SIZE)
         image_sku = "server"
         if "arm" in srv_data.cpu_architecture:
             image_sku = "server-arm64"
@@ -629,7 +631,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 break
 
     if vendor == "gcp":
-        resource_opts = dict(instance=server)
+        resource_opts = dict(instance=server, disk_size=VOLUME_SIZE)
         # select the first zone from the list, work on a copy as we modify it
         bootdisk_init_opts = copy.deepcopy(default(getattr(sc_runner.resources, vendor).DEFAULTS, "bootdisk_init_opts"))
         if "arm" in srv_data.cpu_architecture:
@@ -649,7 +651,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                               scheduling_opts=dict(
                                   preemptible=is_preemptible,
                                   automatic_restart=False if is_preemptible else True,
-                                  on_host_maintenance="TERMINATE")
+                                  on_host_maintenance="TERMINATE"),
                               )
         instance_opts |= dict(metadata_startup_script=user_data)
 
