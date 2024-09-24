@@ -56,19 +56,9 @@ nvidia_smi = DockerTask(
 #     HyperThreading `div16` showed approx. 1x performance when running with `--cpu 2`, other methods showed up to 1.8x.
 # Also, when running on HT machines with many cores, other methods gave either very low (like ~50x single core performance
 # on a 64 core machine) or very high (like ~130x on a 64/128 core/thread machine) scalability.
-stressng = DockerTask(
-    parallel=False,
-    priority=1,
-    image=f"ghcr.io/colinianking/stress-ng:{STRESSNG_TAG}",
-    docker_opts=DOCKER_OPTS | dict(entrypoint="sh"),
-    version_docker_opts=dict(entrypoint="sh"),
-    version_command="-c \"stress-ng --version | awk '{print $3}'\"",
-    command="-c \"nice -n -20 stress-ng --metrics --cpu $(nproc) --cpu-method div16 -t 20 -Y /dev/stderr\"",
-)
-
 stressngfull = DockerTask(
     parallel=False,
-    priority=2,
+    priority=1,
     image=f"ghcr.io/colinianking/stress-ng:{STRESSNG_TAG}",
     docker_opts=DOCKER_OPTS | dict(entrypoint="sh"),
     version_docker_opts=dict(entrypoint="sh"),
