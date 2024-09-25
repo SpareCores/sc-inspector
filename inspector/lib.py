@@ -18,6 +18,7 @@ import random
 import re
 import repo
 import subprocess
+import sys
 import threading
 import time
 import transform
@@ -710,3 +711,15 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 task_hash=task_hash(task),
             )
             write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
+
+
+def thread_monitor(executor, interval=60):
+    while True:
+        running_tasks = [task for task in executor._threads if task.is_alive()]
+        if not running_tasks:
+            logging.info("Executor shut down and no tasks left")
+            break
+        frames = sys._current_frames()
+        for t in running_tasks:
+            logging.info(f"thread {t.name}: {frames.get(t.ident)}")
+        time.sleep(interval)

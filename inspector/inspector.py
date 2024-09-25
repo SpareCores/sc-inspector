@@ -157,8 +157,10 @@ def start(ctx, exclude, start_only):
         except Exception:
             logging.exception(f"Inspection for {vendor}/{server} raised an exception")
     logging.info("Start completed")
-    executor.shutdown(wait=True)
+    # python will wait for all executors to finish
+    executor.shutdown(wait=False)
     logging.info("Waiting for executors to finish")
+    lib.thread_monitor(executor)
     if os.environ.get("GITHUB_TOKEN"):
         repo.push_path(os.path.join(ctx.parent.params["repo_path"], "data"), f"Start finished {repo.gha_url()}")
         logging.info("Git push successful")
