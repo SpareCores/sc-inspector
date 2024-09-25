@@ -424,7 +424,12 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: int
         q.join()
         # do a push at the end of each round
         if os.environ.get("GITHUB_TOKEN"):
-            repo.push_path(data_dir, f"Inspecting server from {repo.gha_url()}")
+            for i in range(3):
+                try:
+                    repo.push_path(data_dir, f"Inspecting server from {repo.gha_url()}")
+                except Exception:
+                    logging.exception("push failed")
+                    time.sleep(random.randint(1, 10))
     q.join()
 
 
