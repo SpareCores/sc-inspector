@@ -122,7 +122,7 @@ def start(ctx, exclude, start_only):
     threading.current_thread().name = "main"
 
     futures = {}
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=64)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=256)
     count = 0
     lock = threading.Lock()
     for (vendor, server), (srv_data, regions, zones) in available_servers().items():
