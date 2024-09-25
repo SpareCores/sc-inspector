@@ -525,15 +525,15 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
 
     error_msgs = []
     sum_timeout = timedelta()
-    for task in tasks:
-        meta = Meta(start=datetime.now(), task_hash=task_hash(task))
-        write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
-        sum_timeout += task.timeout
     timeout_mins = int(sum_timeout.total_seconds()/60)
     logging.info(f"Starting {vendor}/{server} with {timeout_mins}m timeout")
-    if os.environ.get("GITHUB_TOKEN"):
-        with lock:
-            # don't run multiple pushes
+    with lock:
+        repo.pull()
+        for task in tasks:
+            meta = Meta(start=datetime.now(), task_hash=task_hash(task))
+            write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
+            sum_timeout += task.timeout
+        if os.environ.get("GITHUB_TOKEN"):
             repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
     # start instance
     user_data = USER_DATA.format(

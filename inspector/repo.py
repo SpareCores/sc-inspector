@@ -25,7 +25,7 @@ def get_repo(repo_url=REPO_URL, repo_path=REPO_PATH):
     """
     Return git.Repo.
 
-    If there's an already existing repo, use that, otherwise do a clone.
+    If there"s an already existing repo, use that, otherwise do a clone.
     """
     if token := os.environ.get("GITHUB_TOKEN"):
         repo_url = add_token_auth(repo_url, token)
@@ -45,6 +45,14 @@ def push_path(path: str | os.PathLike, msg: str):
         origin = repo.remote(name="origin")
         origin.pull(rebase=True)
         origin.push()
+
+
+@synchronized
+def pull():
+    repo = get_repo()
+    origin = repo.remotes.origin
+    origin.fetch()
+    repo.git.merge("-X", "theirs", "origin/main")
 
 
 def gha_url():
