@@ -526,8 +526,6 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
 
     error_msgs = []
     sum_timeout = timedelta()
-    timeout_mins = int(sum_timeout.total_seconds()/60)
-    logging.info(f"Starting {vendor}/{server} with {timeout_mins}m timeout")
     with lock:
         repo.pull()
         for task in tasks:
@@ -536,6 +534,8 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             sum_timeout += task.timeout
         if os.environ.get("GITHUB_TOKEN"):
             repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
+    timeout_mins = int(sum_timeout.total_seconds()/60)
+    logging.info(f"Starting {vendor}/{server} with {timeout_mins}m timeout")
     # start instance
     user_data = USER_DATA.format(
         GITHUB_TOKEN=os.environ.get("GITHUB_TOKEN"),
