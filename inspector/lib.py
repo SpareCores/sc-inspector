@@ -548,9 +548,32 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         SHUTDOWN_MINS=timeout_mins,
     )
     b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
-    if vendor in ("aws", "gcp"):
+    if vendor in ("aws", "gcp", "hcloud"):
         # get the copy (so we don't modify the original) of the default instance opts for the vendor and add ours
         instance_opts = copy.deepcopy(default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts"))
+    if vendor == "hcloud":
+        resource_opts = dict(instance=server)
+        # allows only one key with the same fingerprint, so we need to use the already existing one
+        instance_opts |= dict(ssh_keys=["info@sparecores.com"])
+        for region in regions:
+            logging.info(f"Trying {region}")
+            resource_opts["region"] = region
+
+            # before starting, destroy everything to make sure the user-data will run (this is the first boot)
+            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=logging.info))
+            error_msgs = []
+            stack_opts = dict(on_output=logging.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
+            try:
+                retry_locked(runner.create,vendor, {},
+                             resource_opts | dict(instance_opts=instance_opts, user_data=user_data),
+                             stack_opts=stack_opts)
+                # empty it if create succeeded, just in case
+                error_msgs = []
+                break
+            except Exception:
+                # on failure, try the next one
+                logging.exception("Couldn't start instance")
+
     if vendor == "aws":
         # we use the key_name in instance_opts instead of creating a new key
         resource_opts = dict(public_key="", instance=server, disk_size=VOLUME_SIZE)
