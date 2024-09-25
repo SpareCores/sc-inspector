@@ -72,7 +72,7 @@ stressngfull = DockerTask(
 # so running for a full day.
 # The load is increased from 5 seconds per minute (in the 1st hour)
 # to 55 seconds per minute (from the 11th hour) linearly.
-stressnglongrung = DockerTask(
+stressnglongrun = DockerTask(
     servers_only={
         ("aws", "t4g.medium"),
         ("aws", "c7g.large"),
