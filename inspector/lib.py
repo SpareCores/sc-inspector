@@ -30,7 +30,7 @@ META_NAME = "meta.json"
 TASK_HASH_KEYS = {"command", "transform_output", "image"}
 # don't start task if it has already been started less than 2 hours ago
 WAIT_SINCE_LAST_START = timedelta(hours=2)
-# fail if a job has already started, but didn't produce output for 2 days
+# fail if a job has already started, but didn't produce output
 FAIL_IF_NO_OUTPUT = timedelta(days=365)
 FAIL_ON_ERROR = timedelta(days=7)
 # destroy the instance 15 mins after the last task has timed out
@@ -208,7 +208,7 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
     if meta.start:
         if (datetime.now() - meta.start) >= FAIL_IF_NO_OUTPUT and (meta.end is None or meta.exit_code is None):
             raise RuntimeError(f"{task.name} was started at {meta.start}, but didn't produce output!")
-        if (datetime.now() - meta.start) >= FAIL_ON_ERROR and meta.exit_code > 0:
+        if (datetime.now() - meta.start) >= FAIL_ON_ERROR and meta.exit_code is not None and meta.exit_code > 0:
             raise RuntimeError(f"{task.name} was last started at {meta.start} and failed!")
     if meta.end and task.rerun and (datetime.now() - meta.end) >= task.rerun and meta.exit_code == 0:
         # if rerun is set and there's a successful run, run the task again if rerun time interval has passed
