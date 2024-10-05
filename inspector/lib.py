@@ -31,7 +31,7 @@ TASK_HASH_KEYS = {"command", "transform_output", "image"}
 # don't start task if it has already been started less than 2 hours ago
 WAIT_SINCE_LAST_START = timedelta(hours=2)
 # fail if a job has already started, but didn't produce output for 2 days
-FAIL_IF_NO_OUTPUT = timedelta(days=7)
+FAIL_IF_NO_OUTPUT = timedelta(days=365)
 FAIL_ON_ERROR = timedelta(days=7)
 # destroy the instance 15 mins after the last task has timed out
 DESTROY_AFTER = timedelta(minutes=15)
