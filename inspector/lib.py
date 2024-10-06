@@ -32,7 +32,7 @@ TASK_HASH_KEYS = {"command", "transform_output", "image"}
 WAIT_SINCE_LAST_START = timedelta(hours=2)
 # fail if a job has already started, but didn't produce output
 FAIL_IF_NO_OUTPUT = timedelta(days=365)
-FAIL_ON_ERROR = timedelta(days=7)
+FAIL_ON_ERROR = timedelta(days=365)
 # destroy the instance 15 mins after the last task has timed out
 DESTROY_AFTER = timedelta(minutes=15)
 DOCKER_OPTS = dict(detach=True, privileged=True, network_mode="host")
