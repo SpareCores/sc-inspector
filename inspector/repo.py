@@ -57,16 +57,29 @@ def get_repo(repo_url=REPO_URL, repo_path=REPO_PATH):
         return git.Repo.clone_from(repo_url, repo_path, depth=1, branch="main", single_branch=True)
 
 
+def run_git_command(args, cwd):
+    """Helper function to run git commands using subprocess."""
+    result = subprocess.run(
+        ['git'] + args,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True
+    )
+    return result.stdout
+
 @synchronized
 def push_path(path: str | os.PathLike, msg: str):
+    repo_path = os.path.dirname(os.path.abspath(path))
     repo = get_repo()
     changes = repo.untracked_files + repo.index.diff(None)
     if changes:
-        repo.index.add(path)
-        repo.index.commit(msg)
-        origin = repo.remote(name="origin")
-        origin.pull(rebase=True)
-        origin.push()
+        # use git command instead of gitpython as the latter requires a lot of
+        # memory
+        run_git_command(['add', path], cwd=repo_path)
+        run_git_command(['commit', '-m', msg], cwd=repo_path)
+        run_git_command(['pull', '--rebase', 'origin'], cwd=repo_path)
+        run_git_command(['push', 'origin'], cwd=repo_path)
 
 
 @synchronized
