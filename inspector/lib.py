@@ -394,6 +394,7 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: int
     # iterate over tasks, sorted by task key (running parallel tasks in a group first, then
     # non-parallel ones)
     for taskgroup in sorted(taskgroups.keys()):
+        meta_changed = False
         for task in taskgroups[taskgroup]:
             meta = load_task_meta(task, data_dir)
             if not should_run(task, data_dir, vendor, instance, gpu_count):
@@ -404,6 +405,7 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: int
                     meta.task_hash=task_hash(task)
                     meta.error_msg = "Task doesn't need to run on this instance"
                     write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
+                    meta_changed = True
                 continue
             if task.precheck_command and task.precheck_regex:
                 check_res = subprocess.run(task.precheck_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -414,16 +416,18 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: int
                     meta.task_hash=task_hash(task)
                     meta.error_msg = "Task precheck_regex didn't match"
                     write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
+                    meta_changed = True
                     continue
 
             logging.info(f"Starting {task.name}")
             q.put(task)
+            meta_changed = True
             if not task.parallel:
                 q.join()
         # wait at the end of the taskgroup
         q.join()
-        # do a push at the end of each round
-        if os.environ.get("GITHUB_TOKEN"):
+        # do a push at the end of each round if we made changes
+        if os.environ.get("GITHUB_TOKEN") and meta_changed:
             for i in range(3):
                 try:
                     repo.push_path(data_dir, f"Inspecting server from {repo.gha_url()}")
