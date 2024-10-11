@@ -1,6 +1,8 @@
-import os
-import git
 import functools
+import git
+import os
+import psutil
+import subprocess
 from urllib.parse import urlparse, urlunparse
 from wrapt import synchronized
 
@@ -9,6 +11,26 @@ from wrapt import synchronized
 REPO_URL = os.environ.get("REPO_URL")
 REPO_PATH = os.environ.get("REPO_PATH")
 
+commands = [
+    ["git", "config", "--global", "core.bigFileThreshold", "1"],
+    ["git", "config", "--global", "core.deltaBaseCacheLimit", "0"],
+    ["git", "config", "--global", "gc.auto", "0"],
+    ["git", "config", "--global", "pack.deltaCacheLimit", "0"],
+    ["git", "config", "--global", "pack.deltaCacheSize", "1"],
+    ["git", "config", "--global", "pack.threads", "1"],
+    ["git", "config", "--global", "pack.windowMemory", "10m"],
+    ["git", "config", "--global", "checkout.thresholdForParallelism", "99999999"],
+    ["git", "config", "--global", "core.compression", "0"],
+    ["git", "config", "--global", "index.threads", "1"]
+]
+
+if psutil.virtual_memory().available < 1024 ** 3:
+    # try to reduce git's memory usage on small-mem machines
+    for command in commands:
+        try:
+            subprocess.run(command, check=True)
+        except subprocess.CalledProcessError as e:
+            print(f"Error executing command: {e}")
 
 def add_token_auth(url: str, token: str) -> str:
     parsed = urlparse(url)
@@ -32,7 +54,7 @@ def get_repo(repo_url=REPO_URL, repo_path=REPO_PATH):
     try:
         return git.Repo(repo_path)
     except (git.InvalidGitRepositoryError, git.NoSuchPathError):
-        return git.Repo.clone_from(repo_url, repo_path)
+        return git.Repo.clone_from(repo_url, repo_path, depth=1, branch="main", single_branch=True)
 
 
 @synchronized
