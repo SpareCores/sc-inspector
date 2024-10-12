@@ -39,7 +39,6 @@ EXCLUDE_INSTANCES: list[tuple[str, str]] = [
     ("aws", "p4de.24xlarge"),
     ("aws", "p5.48xlarge"),
     ("aws", "p5e.48xlarge"),
-    ("azure", "Standard_B1ls"),  # very low on memory
 ]
 
 
@@ -128,9 +127,6 @@ def start(ctx, exclude, start_only):
     for (vendor, server), (srv_data, regions, zones) in available_servers().items():
         if vendor not in supported_vendors:
             # sc-runner can't yet handle this vendor
-            continue
-        if vendor == "azure":
-            # exclude temporarily
             continue
         gpu_count = srv_data.gpu_count
         logging.info(f"Evaluating {vendor}/{server} with {gpu_count} GPUs")
