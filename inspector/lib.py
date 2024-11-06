@@ -119,7 +119,7 @@ class Task(BaseModel):
     parallel: bool = False  # should we run this task concurrently with other tasks in the same priority group?
     priority: int | float = math.inf  # lower priority runs earlier, missing means last
     version_command: str | list | None = None  # command to run to get the version
-    command: str | list  # command to run
+    command: str | list | None # command to run
     transform_output: list[Callable] = [transform.raw]  # functions to transform the output on the inspected node, write as raw if missing
     parse_output: list[Callable] = []  # functions to parse the already collected outputs from the repo
     rerun: timedelta | None = None  # re-run the task after a delay on successful execution, None means no re-evaluation

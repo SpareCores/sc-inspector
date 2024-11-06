@@ -159,3 +159,10 @@ nvbandwidth = DockerTask(
     precheck_command="lshw -C display -json | jq -r '.[].vendor'",
     precheck_regex="nvidia"
 )
+
+passmark = DockerTask(
+    parallel=False,
+    priority=10,
+    image="ghcr.io/sparecores/benchmark-passmark:main",
+    command=None,
+)
