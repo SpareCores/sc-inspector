@@ -2,7 +2,7 @@ FROM ghcr.io/sparecores/sc-runner:main AS base
 ENV REPO_URL="https://github.com/SpareCores/sc-inspector-data"
 ENV REPO_PATH="/repo/sc-inspector-data"
 ENV VIRTUAL_ENV="/venv/inspector"
-ENV PATH=${VIRTUAL_ENV}/bin:${PATH}
+ENV PATH=/root/.local/bin:${VIRTUAL_ENV}/bin:${PATH}
 ENV GIT_AUTHOR_EMAIL="inspector@sparecores.com"
 ENV GIT_COMMITTER_EMAIL="inspector@sparecores.com"
 ENV GIT_COMMITTER_NAME="Spare Cores"
@@ -19,11 +19,11 @@ RUN --mount=type=tmpfs,target=/tmp,rw \
     apt-get install -y lshw jq
 
 FROM base AS build
+ADD requirements.txt /tmp/requirements.txt
 RUN \
     python -m venv --without-pip ${VIRTUAL_ENV} && \
-    curl -sSLf https://bootstrap.pypa.io/get-pip.py | python -
-ADD requirements.txt /tmp/requirements.txt
-RUN pip install -r /tmp/requirements.txt
+    curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    uv pip install -r /tmp/requirements.txt
 
 FROM base AS final
 COPY --from=build ${VIRTUAL_ENV} ${VIRTUAL_ENV}
