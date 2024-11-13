@@ -555,7 +555,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         VENDOR=vendor,
         INSTANCE=server,
         GPU_COUNT=srv_data.gpu_count,
-        SHUTDOWN_MINS=timeout_mins,
+        SHUTDOWN_MINS=timeout_mins + 30,  # give enough time to set up the machine
     )
     b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
     if vendor in ("aws", "gcp", "hcloud"):
