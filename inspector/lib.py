@@ -84,9 +84,9 @@ apt-get install -y $NVIDIA_PKGS docker-ce docker-ce-cli containerd.io docker-bui
 systemctl restart docker
 # stop some services to preserve memory
 snap stop amazon-ssm-agent >> /tmp/output 2>&1
-systemctl stop chrony acpid cron multipathd snapd systemd-timedated unattended-upgrades polkit packagekit systemd-udevd hv-kvp-daemon.service >> /tmp/output 2>&1
+systemctl stop chrony acpid fwupd cron multipathd snapd systemd-timedated unattended-upgrades polkit packagekit systemd-udevd hv-kvp-daemon.service >> /tmp/output 2>&1
 # remove unwanted packages
-apt-get autoremove -y apport unattended-upgrades snapd packagekit walinuxagent >> /tmp/output 2>&1
+apt-get autoremove -y apport fwupd unattended-upgrades snapd packagekit walinuxagent >> /tmp/output 2>&1
 # https://github.com/NVIDIA/nvidia-container-toolkit/issues/202
 # on some machines docker initialization times out with a lot of GPUs. Enable persistence mode to overcome that.
 nvidia-smi -pm 1
