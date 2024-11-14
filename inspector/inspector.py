@@ -124,6 +124,7 @@ def start(ctx, exclude, start_only):
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=256)
     count = 0
     lock = threading.Lock()
+    exception = None
     for (vendor, server), (srv_data, regions, zones) in available_servers().items():
         if vendor not in supported_vendors:
             # sc-runner can't yet handle this vendor
@@ -137,7 +138,13 @@ def start(ctx, exclude, start_only):
             logging.info(f"Excluding {vendor}/{server} as --start-only {start_only} is given")
             continue
         data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
-        tasks = list(filter(lambda task: lib.should_start(task, data_dir, srv_data), lib.get_tasks(vendor)))
+        try:
+            tasks = list(filter(lambda task: lib.should_start(task, data_dir, srv_data), lib.get_tasks(vendor)))
+        except Exception as e:
+            # stop if an exception occurred
+            exception = e
+            logging.exception(f"{vendor}/{server} failed")
+            break
         if not tasks:
             logging.info(f"No tasks for {vendor}/{server}")
             continue
@@ -160,6 +167,9 @@ def start(ctx, exclude, start_only):
     if os.environ.get("GITHUB_TOKEN"):
         repo.push_path(os.path.join(ctx.parent.params["repo_path"], "data"), f"Start finished {repo.gha_url()}")
         logging.info("Git push successful")
+    if exception:
+        # fail if an exception was raised in should_start
+        raise exception
 
 
 def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
