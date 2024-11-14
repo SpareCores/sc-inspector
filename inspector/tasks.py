@@ -165,6 +165,7 @@ passmark = DockerTask(
     # might be slow on some machines
     timeout=timedelta(hours=1),
     priority=10,
+    minimum_memory=1,
     image="ghcr.io/sparecores/benchmark-passmark:main",
     command=None,
 )
