@@ -172,5 +172,5 @@ passmark = DockerTask(
     timeout=timedelta(hours=1),
     priority=10,
     image="ghcr.io/sparecores/benchmark-passmark:main",
-    command=f"bash -c \"nice -n -20 /usr/local/bin/pt_linux -r {passmark_suite} 1>&2; cat results_all.yml\"",
+    command=f"bash -c \"nice -n -20 /usr/local/bin/pt_linux -r {passmark_suite} 1>&2; cat results*.yml\"",
 )
