@@ -162,6 +162,8 @@ nvbandwidth = DockerTask(
 
 passmark = DockerTask(
     parallel=False,
+    # might be slow on some machines
+    timeout=timedelta(hours=1),
     priority=10,
     image="ghcr.io/sparecores/benchmark-passmark:main",
     command=None,
