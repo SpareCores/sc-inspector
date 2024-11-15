@@ -160,17 +160,11 @@ nvbandwidth = DockerTask(
     precheck_regex="nvidia"
 )
 
-# on small-mem machines run the CPU suite only
-# -r, -R enum enable autorun, enum values are:
-# 1 - CPU Suite only
-# 2 - Memory Suite only
-# 3 - All Suites
-passmark_suite = "1" if mem_bytes < 1024 ** 3 else "3"
 passmark = DockerTask(
     parallel=False,
     # might be slow on some machines
     timeout=timedelta(hours=1),
     priority=10,
     image="ghcr.io/sparecores/benchmark-passmark:main",
-    command=f"bash -c \"nice -n -20 /usr/local/bin/pt_linux -r {passmark_suite} 1>&2; cat results*.yml\"",
+    command=None,
 )
