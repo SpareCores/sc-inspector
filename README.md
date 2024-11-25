@@ -10,4 +10,4 @@ into the published database.
 1. **Monitoring**: SC Inspector continuously listens for updates via the [`sparecores-data`](https://pypi.org/project/sparecores-data/) package.
 2. **Inspection**: When a new instance type is detected, the service initiates an inspection process to collect hardware data.
 3. **Benchmarking**: Various benchmarks are executed to assess performance metrics.
-4. **Data Publishing**: All collected information is stored in a structured format in the `sc-inspector-data` repository.
+4. **Data Publishing**: All collected information is stored in a structured format in the [`sc-inspector-data`](https://github.com/SpareCores/sc-inspector-data) repository.
