@@ -558,13 +558,21 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         SHUTDOWN_MINS=timeout_mins + 30,  # give enough time to set up the machine
     )
     b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
-    if vendor in ("aws", "gcp", "hcloud"):
+    if vendor in ("aws", "gcp", "hcloud", "upcloud"):
         # get the copy (so we don't modify the original) of the default instance opts for the vendor and add ours
         instance_opts = copy.deepcopy(default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts"))
-    if vendor == "hcloud":
-        resource_opts = dict(instance=server)
-        # allows only one key with the same fingerprint, so we need to use the already existing one
-        instance_opts |= dict(ssh_keys=["info@sparecores.com"])
+    if vendor in ["hcloud", "upcloud"]:
+        if vendor == "hcloud":
+            resource_opts = dict(instance=server)
+            # allows only one key with the same fingerprint, so we need to use the already existing one
+            instance_opts |= dict(ssh_keys=["info@sparecores.com"])
+        if vendor == "upcloud":
+            # explicitly set SSH key from envvar
+            resource_opts = dict(
+                public_key=os.environ.get("SSH_PUBLIC_KEY"),
+                instance=server,
+                disk_size=VOLUME_SIZE,
+            )
         for region in regions:
             logging.info(f"Trying {region}")
             resource_opts["region"] = region
