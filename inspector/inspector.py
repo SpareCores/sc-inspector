@@ -41,6 +41,7 @@ EXCLUDE_INSTANCES: list[tuple[str, str]] = [
     ("aws", "p5e.48xlarge"),
     ("aws", "p5en.48xlarge"),
     ("aws", "trn2.48xlarge"),
+    ("aws", "f2.48xlarge"),
 ]
 
 
