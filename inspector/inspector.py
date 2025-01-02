@@ -36,12 +36,17 @@ logging.basicConfig(
 lib.logging = logging
 # We can't (yet) start these
 EXCLUDE_INSTANCES: list[tuple[str, str]] = [
+    ("aws", "f2.48xlarge"),
     ("aws", "p4de.24xlarge"),
     ("aws", "p5.48xlarge"),
     ("aws", "p5e.48xlarge"),
     ("aws", "p5en.48xlarge"),
     ("aws", "trn2.48xlarge"),
-    ("aws", "f2.48xlarge"),
+    ("aws", "u7i-12tb.224xlarge"),
+    ("aws", "u7i-8tb.112xlarge"),
+    ("aws", "u7in-16tb.224xlarge"),
+    ("aws", "u7in-24tb.224xlarge"),
+    ("aws", "u7in-32tb.224xlarge"),
 ]
 
 
