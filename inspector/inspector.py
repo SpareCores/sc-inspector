@@ -47,6 +47,8 @@ EXCLUDE_INSTANCES: list[tuple[str, str]] = [
     ("aws", "u7in-16tb.224xlarge"),
     ("aws", "u7in-24tb.224xlarge"),
     ("aws", "u7in-32tb.224xlarge"),
+    ("azure", "Standard_A0"),
+    ("azure", "Standard_A1"),
 ]
 
 
