@@ -122,6 +122,7 @@ compression_text = DockerTask(
     parallel=False,
     priority=5,
     minimum_memory=1,
+    timeout=timedelta(hours=6),
     image="ghcr.io/sparecores/benchmark:main",
     command="nice -n -20 python /usr/local/bin/compress.py"
 )
