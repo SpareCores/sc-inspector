@@ -6,6 +6,14 @@ import psutil
 import transform
 
 STRESSNG_TAG = "b7c7a5877501679a3b0a67d877e6274a801d1e4e"  # V0.17.08
+GPU_EXCLUDE = {
+    ("aws", "g3.16xlarge"),
+    ("aws", "g4dn.metal"),
+    ("aws", "p2.8xlarge"),
+    ("aws", "p2.xlarge"),
+    ("aws", "p4d.24xlarge"),
+    ("gcp", "a2-megagpu-16g"),
+}
 
 # get the amount of available memory
 mem_bytes = psutil.virtual_memory().available
@@ -123,6 +131,7 @@ compression_text = DockerTask(
     priority=5,
     minimum_memory=1,
     image="ghcr.io/sparecores/benchmark:main",
+    timeout=timedelta(hours=6),
     command="nice -n -20 python /usr/local/bin/compress.py"
 )
 
@@ -154,6 +163,7 @@ nvbandwidth = DockerTask(
     priority=9,
     image="ghcr.io/sparecores/nvbandwidth:main",
     gpu=True,
+    servers_exclude=GPU_EXCLUDE,
     version_command="bash -c \"nvbandwidth --help | head -1 | egrep -o 'v[0-9.]+'\"",
     command="nvbandwidth -j",
     precheck_command="lshw -C display -json | jq -r '.[].vendor'",

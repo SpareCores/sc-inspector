@@ -31,8 +31,8 @@ TASK_HASH_KEYS = {"command", "transform_output", "image"}
 # don't start task if it has already been started less than 2 hours ago
 WAIT_SINCE_LAST_START = timedelta(hours=2)
 # fail if a job has already started, but didn't produce output
-FAIL_IF_NO_OUTPUT = timedelta(days=365)
-FAIL_ON_ERROR = timedelta(days=365)
+FAIL_IF_NO_OUTPUT = timedelta(days=3)
+FAIL_ON_ERROR = timedelta(days=3)
 # destroy the instance 15 mins after the last task has timed out
 DESTROY_AFTER = timedelta(minutes=15)
 DOCKER_OPTS = dict(detach=True, privileged=True, network_mode="host")
@@ -116,6 +116,7 @@ class Meta(BaseModel):
 class Task(BaseModel):
     vendors_only: set = set()  # run for these vendors only, empty means all
     servers_only: set[tuple] = set()  # run for these vendor/server pairs only, empty means all
+    servers_exclude: set[tuple] = set()  # exclude these servers
     parallel: bool = False  # should we run this task concurrently with other tasks in the same priority group?
     priority: int | float = math.inf  # lower priority runs earlier, missing means last
     version_command: str | list | None = None  # command to run to get the version
@@ -204,6 +205,9 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
     if task.servers_only and (srv.vendor_id, srv.api_reference) not in task.servers_only:
         logging.info(f"Skipping task {task.name} because it is not enabled for {srv.vendor_id}/{srv.api_reference}")
         return False
+    if task.servers_exclude and (srv.vendor_id, srv.api_reference) in task.servers_exclude:
+        logging.info(f"Skipping task {task.name} because it is not enabled for {srv.vendor_id}/{srv.api_reference}")
+        return False
 
     if meta.start:
         if (datetime.now() - meta.start) >= FAIL_IF_NO_OUTPUT and (meta.end is None or meta.exit_code is None):
@@ -254,6 +258,9 @@ def should_run(task: Task, data_dir: str | os.PathLike, vendor: str, instance: s
         # skip tasks which require GPUs on a server which doesn't have one
         return False
     if task.servers_only and (vendor, instance) not in task.servers_only:
+        logging.info(f"Skipping task {task.name} because it is not enabled for {vendor}/{instance}")
+        return False
+    if task.servers_exclude and (vendor, instance) in task.servers_exclude:
         logging.info(f"Skipping task {task.name} because it is not enabled for {vendor}/{instance}")
         return False
     if meta.end and task.rerun and (datetime.now() - meta.end) >= task.rerun and meta.exit_code == 0:
@@ -443,7 +450,9 @@ def get_last_start(data_dir, vendor, server):
     if not tasks:
         # if there are no tasks, return a low value which can be used as a sort key
         return datetime.min
-    tasks = [task for task in tasks if not (task.servers_only and (vendor, server) not in task.servers_only)]
+    tasks = [task for task in tasks
+             if not (task.servers_only and (vendor, server) not in task.servers_only) and
+             not (task.servers_exclude and (vendor, server) in task.servers_exclude)]
     data_dir = os.path.join(data_dir, vendor, server)
     meta_starts = [load_task_meta(task, data_dir=data_dir).start for task in tasks]
     meta_starts = [start for start in meta_starts if start]
