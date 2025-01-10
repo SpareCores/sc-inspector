@@ -703,7 +703,8 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                                   automatic_restart=False if is_preemptible else True,
                                   on_host_maintenance="TERMINATE"),
                               )
-        instance_opts |= dict(metadata_startup_script=user_data)
+        # enable nested virtualization
+        instance_opts |= dict(metadata_startup_script=user_data, advanced_machine_features=dict(enable_nested_virtualization=True))
 
         for zone in zones:
             logging.info(f"Trying {zone}")
