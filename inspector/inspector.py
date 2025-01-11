@@ -388,7 +388,7 @@ def start(ctx, exclude, start_only):
         f = executor.submit(lib.start_inspect, executor, lock, data_dir, vendor, server, tasks, srv_data, regions, zones)
         futures[f] = (vendor, server)
         count += 1
-        if count == 32:
+        if count == 16:
             break
     for f in concurrent.futures.as_completed(futures):
         vendor, server = futures[f]
