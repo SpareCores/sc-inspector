@@ -358,7 +358,7 @@ def start(ctx, exclude, start_only):
     threading.current_thread().name = "main"
 
     futures = {}
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=256)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1024)
     count = 0
     lock = threading.Lock()
     exception = None
