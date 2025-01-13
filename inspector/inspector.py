@@ -363,6 +363,9 @@ def start(ctx, exclude, start_only):
     lock = threading.Lock()
     exception = None
     for (vendor, server), (srv_data, regions, zones) in available_servers().items():
+        # temporary, until we get credits
+        if vendor == "azure":
+            continue
         if vendor not in supported_vendors:
             # sc-runner can't yet handle this vendor
             continue
