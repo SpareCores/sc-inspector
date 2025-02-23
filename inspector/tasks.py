@@ -185,3 +185,13 @@ passmark = DockerTask(
     image="ghcr.io/sparecores/benchmark-passmark:main",
     command=None,
 )
+
+llm = DockerTask(
+    parallel=False,
+    # might be slow when testing large models
+    timeout=timedelta(hours=1),
+    priority=11,
+    rollout=0.05,  # ~100 servers
+    image="ghcr.io/sparecores/benchmark-llm:main",
+    command=None,
+)

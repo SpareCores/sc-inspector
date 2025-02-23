@@ -22,7 +22,7 @@ import sys
 import threading
 import time
 import transform
-
+from zlib import crc32
 
 META_NAME = "meta.json"
 # add options to the task hash, whose function is to signal any
@@ -119,6 +119,7 @@ class Task(BaseModel):
     servers_exclude: set[tuple] = set()  # exclude these servers
     parallel: bool = False  # should we run this task concurrently with other tasks in the same priority group?
     priority: int | float = math.inf  # lower priority runs earlier, missing means last
+    rollout: float = 1.0  # rollout percentage (between 0.0 and 1.0)
     version_command: str | list | None = None  # command to run to get the version
     command: str | list | None # command to run
     transform_output: list[Callable] = [transform.raw]  # functions to transform the output on the inspected node, write as raw if missing
@@ -208,6 +209,13 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
     if task.servers_exclude and (srv.vendor_id, srv.api_reference) in task.servers_exclude:
         logging.info(f"Skipping task {task.name} because it is not enabled for {srv.vendor_id}/{srv.api_reference}")
         return False
+    # normalize api_reference-based hash to [0-1] and check if it's above the rollout threshold
+    if (crc32(srv.api_reference.encode("utf-8")) / 0xFFFFFFFF) > task.rollout:
+        logging.info(
+            f"Skipping task {task.name} because not selected for rolling out yet ({task.rollout * 100}%)"
+        )
+        return False
+
 
     if meta.start:
         if (datetime.now() - meta.start) >= FAIL_IF_NO_OUTPUT and (meta.end is None or meta.exit_code is None):
