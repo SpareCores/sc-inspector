@@ -1,9 +1,10 @@
-from datetime import timedelta
-from lib import DockerTask, DOCKER_OPTS
 import os
+from datetime import timedelta
+
 import parse
 import psutil
 import transform
+from lib import DOCKER_OPTS, DockerTask
 
 STRESSNG_TAG = "b7c7a5877501679a3b0a67d877e6274a801d1e4e"  # V0.17.08
 GPU_EXCLUDE = {
@@ -74,7 +75,7 @@ virtualization = DockerTask(
 stressngfull = DockerTask(
     parallel=False,
     priority=1,
-    image=f"ghcr.io/sparecores/stress-ng:main",
+    image="ghcr.io/sparecores/stress-ng:main",
     docker_opts=DOCKER_OPTS | dict(entrypoint="sh"),
     version_docker_opts=dict(entrypoint="sh"),
     version_command="-c \"stress-ng --version | awk '{print $3}'\"",
