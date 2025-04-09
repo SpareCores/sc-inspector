@@ -90,8 +90,6 @@ apt-get autoremove -y apport fwupd unattended-upgrades snapd packagekit walinuxa
 # https://github.com/NVIDIA/nvidia-container-toolkit/issues/202
 # on some machines docker initialization times out with a lot of GPUs. Enable persistence mode to overcome that.
 nvidia-smi -pm 1
-# sometimes it takes really long to stop the container, e.g. with huge volume (sc-llm)
-export DOCKER_CLIENT_TIMEOUT=180
 docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/docker.sock \
     -e GITHUB_TOKEN={GITHUB_TOKEN} \
     -e GITHUB_SERVER_URL={GITHUB_SERVER_URL} \
@@ -323,7 +321,7 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike) -> tup
         docker_opts |= DOCKER_OPTS_GPU
         version_docker_opts |= DOCKER_OPTS_GPU
     try:
-        d = docker.from_env()
+        d = docker.from_env(timeout=180)
         d.images.pull(task.image)
         if task.version_command:
             ver = d.containers.run(task.image, task.version_command, **version_docker_opts).strip().decode("utf-8").replace("\n", ", ")
