@@ -321,7 +321,7 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike) -> tup
         docker_opts |= DOCKER_OPTS_GPU
         version_docker_opts |= DOCKER_OPTS_GPU
     try:
-        d = docker.from_env(timeout=180)
+        d = docker.from_env(timeout=1800)
         d.images.pull(task.image)
         if task.version_command:
             ver = d.containers.run(task.image, task.version_command, **version_docker_opts).strip().decode("utf-8").replace("\n", ", ")
