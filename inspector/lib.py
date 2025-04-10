@@ -49,7 +49,7 @@ PULUMI_ERRORS = {
     re.compile(r"error waiting for.*to create"),   # GCP error
 }
 # provision machines with storage (GiB)
-VOLUME_SIZE = 75
+VOLUME_SIZE = 128
 USER_DATA = """#!/bin/sh
 
 # just to be sure, schedule a shutdown early
