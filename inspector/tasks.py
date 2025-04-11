@@ -54,7 +54,7 @@ nvidia_smi = DockerTask(
     version_command="bash -c \"nvidia-smi -h | head -1 | egrep -o 'v[0-9.]+'\"",
     command="nvidia-smi -q -x",
     precheck_command="lshw -C display -json | jq -r '.[].vendor'",
-    precheck_regex="nvidia"
+    precheck_regex="nvidia",
 )
 
 virtualization = DockerTask(
@@ -123,8 +123,13 @@ geekbench = DockerTask(
     priority=4,
     image="ghcr.io/sparecores/benchmark:main",
     version_command="bash -c \"/usr/local/geekbench-$(uname -m)/geekbench6 --version | awk '{print $2}'\"",
-    docker_opts=DOCKER_OPTS | dict(
-        environment={"BENCHMARK_SECRETS_PASSPHRASE": os.environ.get("BENCHMARK_SECRETS_PASSPHRASE")},
+    docker_opts=DOCKER_OPTS
+    | dict(
+        environment={
+            "BENCHMARK_SECRETS_PASSPHRASE": os.environ.get(
+                "BENCHMARK_SECRETS_PASSPHRASE"
+            )
+        },
         mem_limit=int(mem_bytes * 0.85),
         memswap_limit=int(mem_bytes * 0.85),
         mem_swappiness=0,
@@ -140,7 +145,7 @@ compression_text = DockerTask(
     minimum_memory=1,
     timeout=timedelta(hours=1),
     image="ghcr.io/sparecores/benchmark:main",
-    command="nice -n -20 python /usr/local/bin/compress.py"
+    command="nice -n -20 python /usr/local/bin/compress.py",
 )
 
 bw_mem = DockerTask(
@@ -175,7 +180,7 @@ nvbandwidth = DockerTask(
     version_command="bash -c \"nvbandwidth --help | head -1 | egrep -o 'v[0-9.]+'\"",
     command="nvbandwidth -j",
     precheck_command="lshw -C display -json | jq -r '.[].vendor'",
-    precheck_regex="nvidia"
+    precheck_regex="nvidia",
 )
 
 passmark = DockerTask(
@@ -193,7 +198,7 @@ llm = DockerTask(
     timeout=timedelta(hours=1),
     minimum_memory=1,
     priority=11,
-    rollout=0.05,  # ~100 servers
+    rollout=0.2,  # ~400 servers
     image="ghcr.io/sparecores/benchmark-llm:main",
     command=None,
 )
