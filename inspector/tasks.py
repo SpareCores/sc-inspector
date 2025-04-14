@@ -201,4 +201,5 @@ llm = DockerTask(
     rollout=0.2,  # ~400 servers
     image="ghcr.io/sparecores/benchmark-llm:main",
     command=None,
+    version_command="cd /llama_cpp_cpu && ./llama-cli --version 2>&1 | grep 'version:' | egrep -o '\([a-f0-9]+\)'|tr -d '()'",
 )
