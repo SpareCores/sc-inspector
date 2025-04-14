@@ -385,7 +385,10 @@ def start(ctx, exclude, start_only):
         f = executor.submit(lib.start_inspect, executor, lock, data_dir, vendor, server, tasks, srv_data, regions, zones)
         futures[f] = (vendor, server)
         count += 1
-        if count == 1:
+        # number of servers to start at a time: best to leave this at 1 to avoid quota issues,
+        # but can be increased temporarily if needed to run a new benchmark on all servers faster
+        # (although you will have to delete the failed tasks' meta.json and retry with count=1)
+        if count == 4:
             break
     for f in concurrent.futures.as_completed(futures):
         vendor, server = futures[f]
