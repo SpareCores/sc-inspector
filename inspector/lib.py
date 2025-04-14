@@ -312,49 +312,80 @@ def container_remove(c):
         pass
 
 
-def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike) -> tuple[str | None, bytes, bytes]:
+def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, gpu_count: int = 0) -> tuple[str | None, bytes, bytes]:
     ver = None
     stdout = stderr = b""
+    
+    # Define the different docker options to try
+    docker_options = []
+    if gpu_count > 0:
+        # First try with GPU if available
+        docker_opts = copy.deepcopy(task.docker_opts) | DOCKER_OPTS_GPU
+        version_docker_opts = copy.deepcopy(task.version_docker_opts) | DOCKER_OPTS_GPU
+        docker_options.append((docker_opts, version_docker_opts, True))
+    
+    # Then try with original options (with GPU if task.gpu is True)
     docker_opts = copy.deepcopy(task.docker_opts)
     version_docker_opts = copy.deepcopy(task.version_docker_opts)
     if task.gpu:
         docker_opts |= DOCKER_OPTS_GPU
         version_docker_opts |= DOCKER_OPTS_GPU
-    try:
-        d = docker.from_env(timeout=1800)
-        d.images.pull(task.image)
-        if task.version_command:
-            ver = d.containers.run(task.image, task.version_command, **version_docker_opts).strip().decode("utf-8").replace("\n", ", ")
-        c = d.containers.run(task.image, task.command, **docker_opts)
-    except Exception as e:
-        meta.error_msg = str(e)
-        return ver, b"", b""
+    docker_options.append((docker_opts, version_docker_opts, False))
+    
+    for docker_opts, version_docker_opts, is_gpu_attempt in docker_options:
+        try:
+            d = docker.from_env(timeout=1800)
+            d.images.pull(task.image)
+            if task.version_command:
+                ver = d.containers.run(task.image, task.version_command, **version_docker_opts).strip().decode("utf-8").replace("\n", ", ")
+            c = d.containers.run(task.image, task.command, **docker_opts)
+        except Exception as e:
+            if is_gpu_attempt:
+                logging.info(f"GPU run failed, retrying without GPU: {str(e)}")
+                container_remove(c)
+                continue
+            meta.error_msg = str(e)
+            return ver, b"", b""
 
-    ts = time.time() + task.timeout.total_seconds()
-    while time.time() < ts:
-        time.sleep(0.1)
-        c.reload()
-        if c.status == "exited":
-            break
-    else:
-        # timed out, stop container, set error message
-        c.stop()
-        meta.error_msg = f"Execution timed out after {task.timeout.total_seconds()}s"
-    meta.end = datetime.now()
-    try:
-        # wait for container exit/get output with 60s of docker timeout
-        res = c.wait(timeout=60)
-    except Exception as e:
-        meta.error_msg = str(e)
-        return ver, b"", b""
+        ts = time.time() + task.timeout.total_seconds()
+        while time.time() < ts:
+            time.sleep(0.1)
+            c.reload()
+            if c.status == "exited":
+                break
+        else:
+            # timed out, stop container, set error message
+            c.stop()
+            meta.error_msg = f"Execution timed out after {task.timeout.total_seconds()}s"
+            if is_gpu_attempt:
+                logging.info(f"GPU run timed out, retrying without GPU")
+                container_remove(c)
+                continue
+            return ver, b"", b""
+            
+        meta.end = datetime.now()
+        try:
+            # wait for container exit/get output with 60s of docker timeout
+            res = c.wait(timeout=60)
+        except Exception as e:
+            if is_gpu_attempt:
+                logging.info(f"GPU run failed during wait, retrying without GPU: {str(e)}")
+                container_remove(c)
+                continue
+            meta.error_msg = str(e)
+            return ver, b"", b""
 
-    meta.exit_code = res["StatusCode"]
-    stdout = c.logs(stdout=True, stderr=False)
-    stderr = c.logs(stdout=False, stderr=True)
-    meta.stdout_bytes = len(stdout)
-    meta.stderr_bytes = len(stderr)
-    container_remove(c)
-    return ver, stdout, stderr
+        meta.exit_code = res["StatusCode"]
+        stdout = c.logs(stdout=True, stderr=False)
+        stderr = c.logs(stdout=False, stderr=True)
+        meta.stdout_bytes = len(stdout)
+        meta.stderr_bytes = len(stderr)
+        container_remove(c)
+        return ver, stdout, stderr
+    
+    # If we get here, all attempts failed
+    meta.error_msg = "All docker run attempts failed"
+    return ver, b"", b""
 
 
 def write_meta(meta: Meta, file: str | os.PathLike) -> None:
@@ -364,7 +395,7 @@ def write_meta(meta: Meta, file: str | os.PathLike) -> None:
         f.write(meta.model_dump_json())
 
 
-def run_task(q: Queue, data_dir: str | os.PathLike) -> None:
+def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: int = 0) -> None:
     while True:
         try:
             task = q.get()
@@ -374,7 +405,7 @@ def run_task(q: Queue, data_dir: str | os.PathLike) -> None:
             failed = False
             try:
                 if isinstance(task, DockerTask):
-                    ver, stdout, stderr = run_docker(meta, task, os.path.join(data_dir, task.name))
+                    ver, stdout, stderr = run_docker(meta, task, os.path.join(data_dir, task.name), gpu_count)
                 else:
                     ver, stdout, stderr = run_native(meta, task, os.path.join(data_dir, task.name))
                 meta.version = ver
@@ -403,7 +434,7 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: int
     q: Queue = Queue(maxsize=nthreads)
     threads = []
     for _ in range(nthreads):
-        threads.append(threading.Thread(target=run_task, args=(q, data_dir), daemon=True))
+        threads.append(threading.Thread(target=run_task, args=(q, data_dir, gpu_count), daemon=True))
         threads[-1].start()
 
     # iterate over tasks, sorted by task key (running parallel tasks in a group first, then
