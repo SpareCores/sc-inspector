@@ -198,7 +198,6 @@ llm = DockerTask(
     timeout=timedelta(hours=1),
     minimum_memory=1,
     priority=11,
-    rollout=0.2,  # ~400 servers
     image="ghcr.io/sparecores/benchmark-llm:main",
     command=None,
     version_command="--version",
