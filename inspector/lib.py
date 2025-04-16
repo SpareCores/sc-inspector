@@ -333,6 +333,7 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, gpu_co
     docker_options.append((docker_opts, version_docker_opts, False))
     
     for docker_opts, version_docker_opts, is_gpu_attempt in docker_options:
+        c = None
         try:
             d = docker.from_env(timeout=1800)
             d.images.pull(task.image)
@@ -342,7 +343,8 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, gpu_co
         except Exception as e:
             if is_gpu_attempt:
                 logging.info(f"GPU run failed, retrying without GPU: {str(e)}")
-                container_remove(c)
+                if c is not None:
+                    container_remove(c)
                 continue
             meta.error_msg = str(e)
             return ver, b"", b""
