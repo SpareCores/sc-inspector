@@ -404,9 +404,21 @@ def start(ctx, exclude, start_only):
     if os.environ.get("GITHUB_TOKEN"):
         repo.push_path(os.path.join(ctx.parent.params["repo_path"], "data"), f"Start finished {repo.gha_url()}")
         logging.info("Git push successful")
+
     if exception:
         # fail if an exception was raised in should_start
         raise exception
+
+    # Debug: Print all active threads and their stack traces
+    import threading
+    import traceback
+    logging.info("Debug: Active threads after git push:")
+    for thread in threading.enumerate():
+        logging.info(f"Thread {thread.name} (daemon={thread.daemon})")
+        stack = traceback.format_stack(sys._current_frames()[thread.ident])
+        for line in stack:
+            logging.info(f"  {line.strip()}")
+
 
 
 def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
