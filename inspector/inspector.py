@@ -351,6 +351,7 @@ def start(ctx, exclude, start_only):
     from sc_runner.resources import supported_vendors
     import concurrent.futures
     import threading
+    import traceback
 
     threading.current_thread().name = "main"
 
@@ -404,6 +405,28 @@ def start(ctx, exclude, start_only):
     if os.environ.get("GITHUB_TOKEN"):
         repo.push_path(os.path.join(ctx.parent.params["repo_path"], "data"), f"Start finished {repo.gha_url()}")
         logging.info("Git push successful")
+
+    # Print all active non-daemon threads and their stack traces
+    non_daemon_threads = []
+    for thread in threading.enumerate():
+        if thread == threading.current_thread() or thread.daemon:
+            # skip main thread and daemon threads
+            continue
+        logging.info(f"Thread {thread.name} (daemon={thread.daemon})")
+        stack = traceback.format_stack(sys._current_frames()[thread.ident])
+        for line in stack:
+            logging.info(f"  {line.strip()}")
+        non_daemon_threads.append(thread)
+
+    if non_daemon_threads:
+        # possibly running into this: https://github.com/pulumi/pulumi/issues/16095, do a forceful exit
+        # without waiting for non-daemon threads to finish
+        logging.info(f"Force exiting due to {len(non_daemon_threads)} non-daemon threads still running")
+        if exception:
+            os._exit(1)
+        else:
+            os._exit(0)
+
     if exception:
         # fail if an exception was raised in should_start
         raise exception
