@@ -559,12 +559,16 @@ def cleanup(ctx, threads, force, all_regions, lookback_mins):
                 # others use regions
                 futures.append([vendor, server, executor.submit(cleanup_task, vendor, server, data_dir, regions=regions, force=force)])
 
-    for vendor, server, f in futures:
-        try:
-            f.result()
-        except Exception:
-            logging.exception(f"Error in processing {vendor}/{server}")
-            raise
+        error_occurred = False
+        for vendor, server, f in futures:
+            try:
+                f.result()
+            except Exception:
+                logging.exception(f"Error in processing {vendor}/{server}")
+                error_occurred = True
+
+        if error_occurred:
+            raise Exception("Errors occurred during cleanup")
 
 
 @cli.command()
