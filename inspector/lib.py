@@ -47,6 +47,7 @@ PULUMI_ERRORS = {
     re.compile(r"creating .* error"),  # Azure errors
     re.compile(r"creating failed"),  # Azure errors
     re.compile(r"error waiting for.*to create"),   # GCP error
+    re.compile(r"Unable to create server"),  # Upcloud error
 }
 # provision machines with storage (GiB)
 VOLUME_SIZE = 128
@@ -525,7 +526,6 @@ def custom_sort(lst, key):
 
 def pulumi_output_filter(message, error_msgs, output):
     # print output to the console with logger, so we have the dates
-    logging.info(message)
     output.append(message)
     if any([regex.search(message) for regex in PULUMI_ERRORS]):
         error_msgs.append(message)
@@ -535,6 +535,7 @@ def pulumi_event_filter(event, error_msgs):
     try:
         if event.diagnostic_event.severity == "error" and any([regex.search(event.diagnostic_event.message) for regex in PULUMI_ERRORS]):
             error_msgs.append(event.diagnostic_event.message)
+            print("ZZZZ", error_msgs)
     except Exception:
         pass
 
