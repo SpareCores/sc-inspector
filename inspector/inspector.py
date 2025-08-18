@@ -38,6 +38,7 @@ lib.logging = logging
 EXCLUDE_INSTANCES: list[tuple[str, str]] = [
     ("aws", "f2.48xlarge"),
     ("aws", "p4de.24xlarge"),
+    ("aws", "p5.4xlarge"),
     ("aws", "p5.48xlarge"),
     ("aws", "p5e.48xlarge"),
     ("aws", "p5en.48xlarge"),
