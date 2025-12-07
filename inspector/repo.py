@@ -36,7 +36,7 @@ def add_token_auth(url: str, token: str) -> str:
     parsed = urlparse(url)
     # works no matter if the original url had a user/pass or not
     domain = parsed.netloc.split("@")[-1]
-    domain = f"{token}@{domain}"
+    domain = f"user:{token}@{domain}"
     unparsed = (parsed[0], domain, parsed[2], parsed[3], parsed[4], parsed[5])
     return urlunparse(unparsed)
 

@@ -195,7 +195,7 @@ passmark = DockerTask(
 llm = DockerTask(
     parallel=False,
     # might be slow when testing large models
-    timeout=timedelta(hours=1),
+    timeout=timedelta(hours=1.5),
     minimum_memory=1,
     priority=11,
     image="ghcr.io/sparecores/benchmark-llm:main",
