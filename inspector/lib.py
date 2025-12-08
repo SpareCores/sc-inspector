@@ -612,7 +612,6 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
     if vendor in ("aws", "gcp", "hcloud", "upcloud", "ovh"):
         # get the copy (so we don't modify the original) of the default instance opts for the vendor and add ours
         instance_opts = copy.deepcopy(default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts"))
-    if vendor in ["hcloud", "upcloud"]:
     if vendor in ["hcloud", "upcloud", "ovh"]:
         resource_opts = dict(instance=server)
         if vendor == "hcloud":
