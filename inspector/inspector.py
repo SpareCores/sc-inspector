@@ -535,7 +535,8 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
 @click.option("--force/--no-force", type=bool, default=False, help="Do a cleanup even if there's no meta for the server")
 @click.option("--all-regions/--no-all-regions", type=bool, default=False, help="Clean up in all regions, not just in those which list the server as available")
 @click.option("--lookback-mins", type=int, show_default=True, help="Only clean up those instances that started at most this many minutes ago")
-def cleanup(ctx, threads, force, all_regions, lookback_mins):
+@click.option("--vendor", type=str, default=None, help="Only clean up resources for the specified vendor")
+def cleanup(ctx, threads, force, all_regions, lookback_mins, vendor):
     from sc_runner.resources import supported_vendors
     from datetime import datetime, timedelta
     import concurrent.futures
@@ -545,7 +546,7 @@ def cleanup(ctx, threads, force, all_regions, lookback_mins):
         max_start = datetime.now() - timedelta(minutes=lookback_mins)
     futures = []
     servers = lib.sort_available_servers(
-        available_servers(),
+        available_servers(vendor=vendor),
         data_dir=os.path.join(ctx.parent.params["repo_path"], "data"),
         max_start=max_start,
     )
