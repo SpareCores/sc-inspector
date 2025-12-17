@@ -467,7 +467,9 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
         meta = lib.load_task_meta(task, data_dir=data_dir)
         if not meta.start:
             continue
-        start_times.append(meta.start)
+        # only consider start times of tasks that are not finished yet
+        if not meta.end:
+            start_times.append(meta.start)
         if meta.end:
             end_times.append(meta.end)
             # the task has already finished
