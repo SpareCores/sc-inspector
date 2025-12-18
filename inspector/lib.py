@@ -84,13 +84,11 @@ apt-get update -y >> /tmp/output 2>&1
 apt-get install -y $NVIDIA_PKGS docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin openssh-client >> /tmp/output 2>&1
 systemctl restart docker
 # set up SSH for git operations
-mkdir -p ~/.ssh
-chmod 700 ~/.ssh
-if [ -n "{SSH_DEPLOY_KEY_B64}" ]; then
-    echo "{SSH_DEPLOY_KEY_B64}" | base64 -d > ~/.ssh/id_rsa
-    chmod 600 ~/.ssh/id_rsa
-    ssh-keyscan github.com >> ~/.ssh/known_hosts 2>>/tmp/output
-fi
+mkdir -p /root/.ssh
+chmod 700 /root/.ssh
+echo "{SSH_DEPLOY_KEY_B64}" | base64 -d > /root/.ssh/id_rsa
+chmod 600 /root/.ssh/id_rsa
+ssh-keyscan github.com >> /root/.ssh/known_hosts 2>>/tmp/output
 # stop some services to preserve memory
 snap stop amazon-ssm-agent >> /tmp/output 2>&1
 systemctl stop chrony acpid fwupd cron multipathd snapd systemd-timedated google-osconfig-agent google-guest-agent networkd-dispatcher unattended-upgrades polkit packagekit systemd-udevd hv-kvp-daemon.service >> /tmp/output 2>&1
@@ -99,14 +97,13 @@ apt-get autoremove -y apport fwupd unattended-upgrades snapd packagekit walinuxa
 # https://github.com/NVIDIA/nvidia-container-toolkit/issues/202
 # on some machines docker initialization times out with a lot of GPUs. Enable persistence mode to overcome that.
 nvidia-smi -pm 1
-docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/docker.sock -v ~/.ssh:/root/.ssh \
+docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/docker.sock -v /root/.ssh:/root/.ssh \
     -e REPO_URL={REPO_URL} \
     -e GITHUB_SERVER_URL={GITHUB_SERVER_URL} \
     -e GITHUB_REPOSITORY={GITHUB_REPOSITORY} \
     -e GITHUB_RUN_ID={GITHUB_RUN_ID} \
     -e BENCHMARK_SECRETS_PASSPHRASE={BENCHMARK_SECRETS_PASSPHRASE} \
     ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT} >> /tmp/output 2>&1
-#poweroff
 """
 
 
@@ -624,6 +621,8 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         GPU_COUNT=srv_data.gpu_count,
         SHUTDOWN_MINS=timeout_mins + 30,  # give enough time to set up the machine
     )
+    logging.info(f"User data: {user_data}")
+
     b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
     if vendor in ("aws", "gcp", "hcloud", "upcloud", "ovh"):
         # get the copy (so we don't modify the original) of the default instance opts for the vendor and add ours
