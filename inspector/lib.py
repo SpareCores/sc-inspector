@@ -81,8 +81,16 @@ if [ {GPU_COUNT} -ne 0 ]; then
     NVIDIA_PKGS="nvidia-driver-525 nvidia-container-toolkit"
 fi
 apt-get update -y >> /tmp/output 2>&1
-apt-get install -y $NVIDIA_PKGS docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >> /tmp/output 2>&1
+apt-get install -y $NVIDIA_PKGS docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin openssh-client >> /tmp/output 2>&1
 systemctl restart docker
+# set up SSH for git operations
+mkdir -p ~/.ssh
+chmod 700 ~/.ssh
+if [ -n "{SSH_DEPLOY_KEY}" ]; then
+    printf '%s\n' "{SSH_DEPLOY_KEY}" > ~/.ssh/id_rsa
+    chmod 600 ~/.ssh/id_rsa
+    ssh-keyscan github.com >> ~/.ssh/known_hosts 2>>/tmp/output
+fi
 # stop some services to preserve memory
 snap stop amazon-ssm-agent >> /tmp/output 2>&1
 systemctl stop chrony acpid fwupd cron multipathd snapd systemd-timedated google-osconfig-agent google-guest-agent networkd-dispatcher unattended-upgrades polkit packagekit systemd-udevd hv-kvp-daemon.service >> /tmp/output 2>&1
@@ -91,8 +99,9 @@ apt-get autoremove -y apport fwupd unattended-upgrades snapd packagekit walinuxa
 # https://github.com/NVIDIA/nvidia-container-toolkit/issues/202
 # on some machines docker initialization times out with a lot of GPUs. Enable persistence mode to overcome that.
 nvidia-smi -pm 1
-docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/docker.sock \
-    -e GITHUB_TOKEN={GITHUB_TOKEN} \
+docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/docker.sock -v ~/.ssh:/root/.ssh \
+    -e SSH_DEPLOY_KEY={SSH_DEPLOY_KEY} \
+    -e REPO_URL={REPO_URL} \
     -e GITHUB_SERVER_URL={GITHUB_SERVER_URL} \
     -e GITHUB_REPOSITORY={GITHUB_REPOSITORY} \
     -e GITHUB_RUN_ID={GITHUB_RUN_ID} \
@@ -476,13 +485,15 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: int
         # wait at the end of the taskgroup
         q.join()
         # do a push at the end of each round if we made changes
-        if os.environ.get("GITHUB_TOKEN") and meta_changed:
+        if meta_changed:
             for i in range(3):
                 try:
                     repo.push_path(data_dir, f"Inspecting server from {repo.gha_url()}")
+                    break  # Success, exit retry loop
                 except Exception:
                     logging.exception("push failed")
-                    time.sleep(random.randint(1, 10))
+                    if i < 2:  # Don't sleep on last attempt
+                        time.sleep(random.randint(1, 10))
     q.join()
 
 
@@ -592,17 +603,20 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             meta = Meta(start=datetime.now(), task_hash=task_hash(task))
             write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
             sum_timeout += task.timeout
-        if os.environ.get("GITHUB_TOKEN"):
-            repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
+        repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
     timeout_mins = int(sum_timeout.total_seconds()/60)
     logging.info(f"Starting {vendor}/{server} with {timeout_mins}m timeout")
+    # Construct SSH repo URL from GitHub Actions context, or use fallback
+    github_repo = os.environ.get("GITHUB_REPOSITORY", "SpareCores/sc-inspector-data")
+    repo_url_ssh = f"git@github.com:{github_repo}.git"
     # start instance
     user_data = USER_DATA.format(
-        GITHUB_TOKEN=os.environ.get("GITHUB_TOKEN"),
-        GITHUB_SERVER_URL=os.environ.get("GITHUB_SERVER_URL"),
-        GITHUB_REPOSITORY=os.environ.get("GITHUB_REPOSITORY"),
-        GITHUB_RUN_ID=os.environ.get("GITHUB_RUN_ID"),
-        BENCHMARK_SECRETS_PASSPHRASE=os.environ.get("BENCHMARK_SECRETS_PASSPHRASE"),
+        SSH_DEPLOY_KEY=os.environ.get("SSH_DEPLOY_KEY", ""),
+        REPO_URL=repo_url_ssh,
+        GITHUB_SERVER_URL=os.environ.get("GITHUB_SERVER_URL", ""),
+        GITHUB_REPOSITORY=os.environ.get("GITHUB_REPOSITORY", ""),
+        GITHUB_RUN_ID=os.environ.get("GITHUB_RUN_ID", ""),
+        BENCHMARK_SECRETS_PASSPHRASE=os.environ.get("BENCHMARK_SECRETS_PASSPHRASE", ""),
         VENDOR=vendor,
         INSTANCE=server,
         GPU_COUNT=srv_data.gpu_count,
@@ -766,7 +780,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 # on failure, try the next one
                 logging.exception("Couldn't start instance")
 
-    if error_msgs and os.environ.get("GITHUB_TOKEN"):
+    if error_msgs:
         # upload error message if we couldn't start the instance
         now = datetime.now()
         logging.info("Failed to start instance, uploading error messages")

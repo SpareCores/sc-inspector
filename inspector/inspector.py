@@ -405,9 +405,8 @@ def start(ctx, exclude, start_only):
     executor.shutdown(wait=False)
     logging.info("Waiting for executors to finish")
     lib.thread_monitor(executor)
-    if os.environ.get("GITHUB_TOKEN"):
-        repo.push_path(os.path.join(ctx.parent.params["repo_path"], "data"), f"Start finished {repo.gha_url()}")
-        logging.info("Git push successful")
+    repo.push_path(os.path.join(ctx.parent.params["repo_path"], "data"), f"Start finished {repo.gha_url()}")
+    logging.info("Git push successful")
 
     # Print all active non-daemon threads and their stack traces
     non_daemon_threads = []
@@ -581,9 +580,8 @@ def cleanup(ctx, threads, force, all_regions, lookback_mins, vendor):
 @click.pass_context
 def parse(ctx):
     """Parse already written outputs from the repo and write them back."""
-    if os.environ.get("GITHUB_TOKEN"):
-        # we must clone the repo before writing anything to it
-        repo.get_repo()
+    # we must clone the repo before writing anything to it
+    repo.get_repo()
     for srv in servers():
         vendor = srv.vendor_id
         server = srv.api_reference
@@ -597,7 +595,7 @@ def parse(ctx):
                 continue
             for parse_func in task.parse_output:
                 parse_func(meta, task, os.path.join(data_dir, task.name))
-        if os.path.exists(data_dir) and os.environ.get("GITHUB_TOKEN"):
+        if os.path.exists(data_dir):
             repo.push_path(data_dir, f"Parsed outputs in {repo.gha_url()}")
 
 
@@ -614,10 +612,9 @@ def inspect(ctx, vendor, instance, gpu_count, threads):
     with open(f"/proc/{pid}/oom_adj", mode="w+") as f:
         f.write("-17")
 
-    if os.environ.get("GITHUB_TOKEN"):
-        logging.info("Updating the git repo")
-        # we must clone the repo before writing anything to it
-        repo.get_repo()
+    logging.info("Updating the git repo")
+    # we must clone the repo before writing anything to it
+    repo.get_repo()
     data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, instance)
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
