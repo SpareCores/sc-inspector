@@ -86,8 +86,8 @@ systemctl restart docker
 # set up SSH for git operations
 mkdir -p ~/.ssh
 chmod 700 ~/.ssh
-if [ -n "{SSH_DEPLOY_KEY}" ]; then
-    printf '%s\n' "{SSH_DEPLOY_KEY}" > ~/.ssh/id_rsa
+if [ -n "{SSH_DEPLOY_KEY_B64}" ]; then
+    echo "{SSH_DEPLOY_KEY_B64}" | base64 -d > ~/.ssh/id_rsa
     chmod 600 ~/.ssh/id_rsa
     ssh-keyscan github.com >> ~/.ssh/known_hosts 2>>/tmp/output
 fi
@@ -100,14 +100,13 @@ apt-get autoremove -y apport fwupd unattended-upgrades snapd packagekit walinuxa
 # on some machines docker initialization times out with a lot of GPUs. Enable persistence mode to overcome that.
 nvidia-smi -pm 1
 docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/docker.sock -v ~/.ssh:/root/.ssh \
-    -e SSH_DEPLOY_KEY={SSH_DEPLOY_KEY} \
     -e REPO_URL={REPO_URL} \
     -e GITHUB_SERVER_URL={GITHUB_SERVER_URL} \
     -e GITHUB_REPOSITORY={GITHUB_REPOSITORY} \
     -e GITHUB_RUN_ID={GITHUB_RUN_ID} \
     -e BENCHMARK_SECRETS_PASSPHRASE={BENCHMARK_SECRETS_PASSPHRASE} \
     ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT} >> /tmp/output 2>&1
-poweroff
+#poweroff
 """
 
 
@@ -609,9 +608,12 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
     # Construct SSH repo URL from GitHub Actions context, or use fallback
     github_repo = os.environ.get("GITHUB_REPOSITORY", "SpareCores/sc-inspector-data")
     repo_url_ssh = f"git@github.com:{github_repo}.git"
+    # Base64 encode SSH key to avoid shell interpretation issues
+    ssh_deploy_key = os.environ.get("SSH_DEPLOY_KEY", "")
+    ssh_deploy_key_b64 = base64.b64encode(ssh_deploy_key.encode("utf-8")).decode("ascii") if ssh_deploy_key else ""
     # start instance
     user_data = USER_DATA.format(
-        SSH_DEPLOY_KEY=os.environ.get("SSH_DEPLOY_KEY", ""),
+        SSH_DEPLOY_KEY_B64=ssh_deploy_key_b64,
         REPO_URL=repo_url_ssh,
         GITHUB_SERVER_URL=os.environ.get("GITHUB_SERVER_URL", ""),
         GITHUB_REPOSITORY=os.environ.get("GITHUB_REPOSITORY", ""),
