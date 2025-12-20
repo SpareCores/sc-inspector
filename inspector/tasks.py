@@ -201,6 +201,4 @@ llm = DockerTask(
     image="ghcr.io/sparecores/benchmark-llm:main",
     command=None,
     version_command="--version",
-    # exclude servers with less than 75 GiB of storage
-    servers_exclude={("hcloud", "cax11")},
 )
