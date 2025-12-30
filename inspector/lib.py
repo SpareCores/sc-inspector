@@ -412,7 +412,7 @@ def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: int = 0) -> None:
             task = q.get()
             if not task:
                 break
-            meta = Meta(start=datetime.now(), task_hash=task_hash(task))
+            meta = Meta(start=datetime.now(), task_hash=task_hash(task), kernel_version=platform.release())
             failed = False
             try:
                 if isinstance(task, DockerTask):
@@ -599,7 +599,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
     with lock:
         repo.pull()
         for task in tasks:
-            meta = Meta(start=datetime.now(), task_hash=task_hash(task), kernel_version=platform.release())
+            meta = Meta(start=datetime.now(), task_hash=task_hash(task))
             write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
             sum_timeout += task.timeout
         repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
@@ -792,7 +792,6 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 end=now,
                 exit_code=-1,
                 error_msg=remove_matches(FILTER_ERROR_MSG, error_msgs[-1]),
-                kernel_version=platform.release(),
                 task_hash=task_hash(task),
             )
             write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
