@@ -14,6 +14,7 @@ import json
 import logging
 import math
 import os
+import platform
 import random
 import re
 import repo
@@ -115,6 +116,7 @@ class Meta(BaseModel):
     error_msg: str | None = None
     task_hash: str | None = None
     version: str | None = None
+    kernel_version: str | None = None
     stdout_bytes: int | None = None
     stderr_bytes: int | None = None
     outputs: list[str] = []
@@ -597,7 +599,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
     with lock:
         repo.pull()
         for task in tasks:
-            meta = Meta(start=datetime.now(), task_hash=task_hash(task))
+            meta = Meta(start=datetime.now(), task_hash=task_hash(task), kernel_version=platform.release())
             write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
             sum_timeout += task.timeout
         repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
@@ -790,6 +792,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 end=now,
                 exit_code=-1,
                 error_msg=remove_matches(FILTER_ERROR_MSG, error_msgs[-1]),
+                kernel_version=platform.release(),
                 task_hash=task_hash(task),
             )
             write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
