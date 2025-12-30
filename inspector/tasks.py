@@ -154,6 +154,11 @@ bw_mem = DockerTask(
     timeout=timedelta(hours=1),
     image="ghcr.io/sparecores/benchmark:main",
     command="bw_mem.sh",
+    # These machines either crash or hang when running this benchmark
+    servers_exclude={
+        ("ovh", "a10-180"),
+        ("ovh", "l4-360"),
+    },
 )
 
 static_web = DockerTask(
