@@ -231,6 +231,6 @@ membench = DockerTask(
     parallel=False,
     priority=12,
     image="ghcr.io/sparecores/membench:main",
-    command="membench -v",
+    command="nice -n -20 membench -v",
     servers_only=RUN_NEW_TASKS_ON_SERVERS,
 )
