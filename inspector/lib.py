@@ -59,7 +59,7 @@ shutdown --no-wall +{SHUTDOWN_MINS}
 
 export DEBIAN_FRONTEND=noninteractive
 . /etc/os-release
-apt-get update -y
+ update -y
 # Add the required repositories to Apt sources:
 apt-get install -y ca-certificates curl
 install -m 0755 -d /etc/apt/keyrings
@@ -92,7 +92,9 @@ chmod 600 /root/.ssh/id_rsa
 ssh-keyscan github.com >> /root/.ssh/known_hosts 2>>/tmp/output
 # stop some services to preserve memory
 snap stop amazon-ssm-agent >> /tmp/output 2>&1
-systemctl stop chrony acpid fwupd cron multipathd snapd systemd-timedated google-osconfig-agent google-guest-agent networkd-dispatcher unattended-upgrades polkit packagekit systemd-udevd hv-kvp-daemon.service >> /tmp/output 2>&1
+systemctl stop chrony acpid fwupd cron multipathd snapd systemd-timedated google-osconfig-agent google-guest-agent \
+    networkd-dispatcher unattended-upgrades polkit packagekit systemd-udevd hv-kvp-daemon.service \
+    cloud-init cloud-config cloud-final cloud-init-local >> /tmp/output 2>&1
 # remove unwanted packages
 apt-get autoremove -y apport fwupd unattended-upgrades snapd packagekit walinuxagent google-osconfig-agent >> /tmp/output 2>&1
 # https://github.com/NVIDIA/nvidia-container-toolkit/issues/202
