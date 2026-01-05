@@ -23,8 +23,6 @@ RUN_NEW_TASKS_ON_SERVERS = {
     ("azure", "M416s_9_v2"),
     ("gcp", "c3d-highcpu-360"),
     ("ovh", "a10-180"),
-    ("ovh", "c3-256"),
-    ("ovh", "l4-360"),
 }
 
 # get the amount of available memory
