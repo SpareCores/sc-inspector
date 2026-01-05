@@ -94,7 +94,7 @@ ssh-keyscan github.com >> /root/.ssh/known_hosts 2>>/tmp/output
 snap stop amazon-ssm-agent >> /tmp/output 2>&1
 systemctl stop chrony acpid fwupd cron multipathd snapd systemd-timedated google-osconfig-agent google-guest-agent \
     networkd-dispatcher unattended-upgrades polkit packagekit systemd-udevd hv-kvp-daemon.service \
-    cloud-init cloud-config cloud-final cloud-init-local >> /tmp/output 2>&1
+    cloud-init cloud-config cloud-final cloud-init-local rsyslog >> /tmp/output 2>&1
 # remove unwanted packages
 apt-get autoremove -y apport fwupd unattended-upgrades snapd packagekit walinuxagent google-osconfig-agent >> /tmp/output 2>&1
 # https://github.com/NVIDIA/nvidia-container-toolkit/issues/202
