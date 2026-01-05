@@ -15,6 +15,9 @@ GPU_EXCLUDE = {
     ("aws", "p4d.24xlarge"),
     ("gcp", "a2-megagpu-16g"),
 }
+RUN_NEW_TASKS_ON_SERVERS = {
+    ("aws", "r8a.4xlarge"),
+}
 
 # get the amount of available memory
 mem_bytes = psutil.virtual_memory().available
@@ -44,6 +47,16 @@ lscpu = DockerTask(
     version_command="bash -c \"lscpu --version | awk '{print $4}'\"",
     # pretty print JSON output
     command="bash -c 'lscpu -JB | jq'",
+)
+
+lstopo = DockerTask(
+    parallel=True,
+    priority=0,
+    image="ghcr.io/sparecores/membench:main",
+    version_command="lstopo --version",
+    command="lstopo --of xml",
+    parse_output=[parse.lstopo],
+    servers_only=RUN_NEW_TASKS_ON_SERVERS,
 )
 
 nvidia_smi = DockerTask(
@@ -207,4 +220,12 @@ llm = DockerTask(
     image="ghcr.io/sparecores/benchmark-llm:main",
     command=None,
     version_command="--version",
+)
+
+membench = DockerTask(
+    parallel=False,
+    priority=12,
+    image="ghcr.io/sparecores/membench:main",
+    command="membench -v",
+    servers_only=RUN_NEW_TASKS_ON_SERVERS,
 )
