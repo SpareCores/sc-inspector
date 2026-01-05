@@ -16,7 +16,7 @@ RUN --mount=type=tmpfs,target=/tmp,rw \
     --mount=id=var_lib_apt,type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update --error-on=any && \
     apt-get update && \
-    apt-get install -y lshw jq
+    apt-get install -y lshw jq git-restore-mtime hwloc-nox
 
 FROM base AS build
 ADD requirements.txt /tmp/requirements.txt
