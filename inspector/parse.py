@@ -6,6 +6,7 @@ import fastnumbers
 import json
 import os
 import re
+import subprocess
 
 
 def si_prefixes(binary=False):
@@ -203,3 +204,37 @@ def stressnglongrun(meta, task, task_dir) -> None:
             value = chunk.extract("bogo-ops-per-second-real-time")
             duration = chunk.extract("wall-clock-time")
             csvfile.writerow([date + "T" + time, duration, value])
+
+
+def lstopo(meta, task, task_dir) -> None:
+    """
+    Convert lstopo XML output to SVG format.
+    Reads XML from stdout, converts using lstopo, and writes SVG to task_dir.
+    Only regenerates SVG if it's missing or older than the stdout file.
+    """
+    stdout_path = os.path.join(task_dir, "stdout")
+    svg_output_path = os.path.join(task_dir, "lstopo.svg")
+    
+    # Check if we need to regenerate the SVG
+    need_regenerate = False
+    if not os.path.exists(svg_output_path):
+        need_regenerate = True
+    elif os.path.exists(stdout_path):
+        # Regenerate if SVG is older than stdout
+        if os.path.getmtime(svg_output_path) < os.path.getmtime(stdout_path):
+            need_regenerate = True
+    
+    if not need_regenerate:
+        return
+    
+    # Convert XML to SVG using lstopo, reading directly from stdout file
+    result = subprocess.run(
+        ["lstopo", "-i", stdout_path, "--if", "xml", "--of", "svg", "--no-legend"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    
+    # Write SVG output to task_dir
+    with open(svg_output_path, "w") as f:
+        f.write(result.stdout)
