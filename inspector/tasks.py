@@ -22,7 +22,6 @@ RUN_NEW_TASKS_ON_SERVERS = {
     ("aws", "t3a.nano"),
     ("azure", "M416s_9_v2"),
     ("gcp", "c3d-highcpu-360"),
-    ("ovh", "a10-180"),
 }
 
 # get the amount of available memory
