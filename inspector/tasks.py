@@ -232,6 +232,7 @@ llm = DockerTask(
 membench = DockerTask(
     parallel=False,
     priority=12,
+    timeout=timedelta(hours=1),
     image="ghcr.io/sparecores/membench:main",
     command="nice -n -20 membench -v",
     servers_only=RUN_NEW_TASKS_ON_SERVERS,
