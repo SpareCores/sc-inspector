@@ -17,6 +17,7 @@ GPU_EXCLUDE = {
 }
 RUN_NEW_TASKS_ON_SERVERS = {
     ("aws", "r8a.48xlarge"),
+    ("aws", "r8g.48xlarge"),
     ("aws", "r8a.4xlarge"),
     ("aws", "t3.nano"),
     ("aws", "t3a.nano"),
