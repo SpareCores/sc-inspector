@@ -20,6 +20,8 @@ RUN_NEW_TASKS_ON_SERVERS = {
     ("aws", "r8a.4xlarge"),
     ("aws", "t3.nano"),
     ("aws", "t3a.nano"),
+    ("aws", "i7ie.48xlarge"),
+    ("aws", "i7ie.metal-48xl"),
     ("azure", "M416s_9_v2"),
     ("gcp", "c3d-highcpu-360"),
 }
