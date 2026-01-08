@@ -36,6 +36,7 @@ logging.basicConfig(
 lib.logging = logging
 # We can't (yet) start these
 EXCLUDE_INSTANCES: list[tuple[str, str]] = [
+    ("aws", "t3.nano"),  # the currently used software stack doesn't fit onto this instance
     ("aws", "f2.48xlarge"),
     ("aws", "p4de.24xlarge"),
     ("aws", "p5.4xlarge"),
