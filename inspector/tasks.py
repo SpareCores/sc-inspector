@@ -38,6 +38,7 @@ dmidecode = DockerTask(
     parse_output=[parse.dmidecode],
     version_command="dmidecode --version",
     command="dmidecode",
+    timeout=timedelta(minutes=5),
 )
 
 lshw = DockerTask(
@@ -46,6 +47,7 @@ lshw = DockerTask(
     image="ghcr.io/sparecores/hwinfo:main",
     version_command="lshw -version",
     command="lshw -json",
+    timeout=timedelta(minutes=5),
 )
 
 lscpu = DockerTask(
@@ -55,6 +57,7 @@ lscpu = DockerTask(
     version_command="bash -c \"lscpu --version | awk '{print $4}'\"",
     # pretty print JSON output
     command="bash -c 'lscpu -JB | jq'",
+    timeout=timedelta(minutes=5),
 )
 
 lstopo = DockerTask(
@@ -65,6 +68,7 @@ lstopo = DockerTask(
     command="lstopo --of xml",
     parse_output=[parse.lstopo],
     servers_only=RUN_NEW_TASKS_ON_SERVERS,
+    timeout=timedelta(seconds=30),
 )
 
 nvidia_smi = DockerTask(
@@ -76,6 +80,7 @@ nvidia_smi = DockerTask(
     command="nvidia-smi -q -x",
     precheck_command="lshw -C display -json | jq -r '.[].vendor'",
     precheck_regex="nvidia",
+    timeout=timedelta(minutes=10),
 )
 
 virtualization = DockerTask(
@@ -83,6 +88,7 @@ virtualization = DockerTask(
     priority=0,
     image="ghcr.io/sparecores/virtualization:main",
     command="/usr/local/bin/check_virt.sh",
+    timeout=timedelta(minutes=5),
 )
 
 # We use this benchmark to determine the "SCore" of a given instance. This should represent the relative
@@ -101,6 +107,7 @@ stressngfull = DockerTask(
     version_docker_opts=dict(entrypoint="sh"),
     version_command="-c \"stress-ng --version | awk '{print $3}'\"",
     command=r"""-c 'for ncpu in $(awk -f /usr/local/bin/count.awk $(nproc)); do echo -n "$ncpu,"; nice -n -20 stress-ng --metrics --cpu $ncpu --cpu-method div16 -t 10 | egrep "metrc.*cpu" | awk "{print \$9}"; done'""",
+    timeout=timedelta(minutes=30),
 )
 
 # An extended version of the multicore StressNg task: running
@@ -137,6 +144,7 @@ openssl = DockerTask(
     parse_output=[parse.openssl],
     version_command="bash -c \"openssl version | awk '{print $2}'\"",
     command="openssl.sh",
+    timeout=timedelta(hours=1),
 )
 
 geekbench = DockerTask(
@@ -158,6 +166,7 @@ geekbench = DockerTask(
     minimum_memory=1.1,
     transform_output=[transform.raw, transform.fetch_geekbench_results],
     command="nice -n -20 geekbench.sh",
+    timeout=timedelta(hours=1),
 )
 
 compression_text = DockerTask(
@@ -188,6 +197,7 @@ static_web = DockerTask(
     image="ghcr.io/sparecores/benchmark-web:main",
     version_command="bash -c \"(binserve --version; wrk -v) | egrep -o '(binserve|wrk) [0-9.]+'\"",
     command="nice -n -20 python /usr/local/bin/benchmark.py",
+    timeout=timedelta(minutes=30),
 )
 
 redis = DockerTask(
@@ -196,6 +206,7 @@ redis = DockerTask(
     image="ghcr.io/sparecores/benchmark-redis:main",
     version_command="redis-server -v",
     command="nice -n -20 python /usr/local/bin/benchmark.py",
+    timeout=timedelta(minutes=10),
 )
 
 nvbandwidth = DockerTask(
@@ -208,6 +219,7 @@ nvbandwidth = DockerTask(
     command="nvbandwidth -j",
     precheck_command="lshw -C display -json | jq -r '.[].vendor'",
     precheck_regex="nvidia",
+    timeout=timedelta(minutes=15),
 )
 
 passmark = DockerTask(
