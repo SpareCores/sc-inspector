@@ -248,8 +248,8 @@ membench = DockerTask(
     timeout=timedelta(minutes=40),
     image="ghcr.io/sparecores/membench:main",
     # run for 30 minutes max
-    command="nice -n -20 membench -Hv -t 1800",
+    command="-Hv -t 1800",
     servers_only=RUN_NEW_TASKS_ON_SERVERS,
-    version_command="membench -V",
+    version_command="-V",
     minimum_memory=0.9,
 )
