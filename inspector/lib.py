@@ -49,6 +49,7 @@ PULUMI_ERRORS = {
     re.compile(r"creating failed"),  # Azure errors
     re.compile(r"error waiting for.*to create"),   # GCP error
     re.compile(r"Unable to create server"),  # Upcloud error
+    re.compile(r"The instanceType of the specified instance does not support this disk category"),  # Alicloud error
 }
 # provision machines with storage (GiB)
 VOLUME_SIZE = 128
@@ -106,7 +107,7 @@ pkill -9 -f assist_daemon >> /tmp/output 2>&1
 sed -i 's/ENABLED=1/ENABLED=0/' /etc/default/motd-news 2>/dev/null
 chmod -x /etc/update-motd.d/* 2>/dev/null
 # remove unwanted packages
-apt-get autoremove -y $(dpkg-query -W -f='${Package}\\n' \\
+apt-get autoremove -y $(dpkg-query -W -f='${{Package}}\\n' \\
     apport fwupd unattended-upgrades snapd packagekit \\
     walinuxagent google-osconfig-agent 2>/dev/null) >> /tmp/output 2>&1
 # https://github.com/NVIDIA/nvidia-container-toolkit/issues/202
@@ -639,7 +640,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         SHUTDOWN_MINS=timeout_mins + 30,  # give enough time to set up the machine
     )
     b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
-    if vendor in ("aws", "gcp", "hcloud", "upcloud", "ovh"):
+    if vendor in ("aws", "gcp", "hcloud", "upcloud", "ovh", "alicloud"):
         # get the copy (so we don't modify the original) of the default instance opts for the vendor and add ours
         instance_opts = copy.deepcopy(default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts"))
     if vendor in ["hcloud", "upcloud", "ovh"]:
@@ -697,6 +698,48 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             except Exception:
                 # on failure, try the next one
                 logging.exception("Couldn't start instance")
+
+    if vendor == "alicloud":
+        # we use the key_name in instance_opts instead of creating a new key
+        resource_opts = dict(public_key="", instance=server, disk_size=VOLUME_SIZE)
+        instance_opts |= dict(
+            key_name="spare-cores",
+        )
+        done = False
+        # for region in custom_sort(regions, "eu-central-1"):
+        for region in ["eu-west-1"]:
+            logging.info(f"Trying {region}")
+            resource_opts["region"] = region
+
+            # before starting, destroy everything to make sure the user-data will run (this is the first boot)
+            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=logging.info))
+            error_msgs = []
+            stack_opts = dict(on_output=logging.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
+            # try with cloud_auto first, then retry without system_disk_category if needed
+            current_instance_opts = copy.deepcopy(instance_opts)
+            # Ensure first attempt has cloud_auto
+            current_instance_opts["system_disk_category"] = "cloud_auto"
+            for attempt in range(2):
+                logging.info(f"Attempt {attempt + 1} for {region} with instance_opts: {current_instance_opts}")
+                try:
+                    retry_locked(runner.create, vendor, {},
+                                 resource_opts | dict(instance_opts=current_instance_opts, user_data=b64_user_data),
+                                 stack_opts=stack_opts)
+                    # empty it if create succeeded, just in case
+                    error_msgs = []
+                    break
+                except Exception as e:
+                    # Check if the error is about disk category not being supported
+                    error_text = str(e) + " " + " ".join(error_msgs)
+                    if "specified instance does not support this disk category" in error_text:
+                        logging.exception(f"Disk category error, retrying without system_disk_category for {region}")
+                        # Remove system_disk_category for second attempt
+                        current_instance_opts.pop("system_disk_category", None)
+                        # clear error_msgs before retry
+                        error_msgs = []
+                        continue
+                    # on failure, try the next region
+                    logging.exception(f"Couldn't start instance in {region}")
 
     if vendor == "azure":
         # explicitly set SSH key from envvar
