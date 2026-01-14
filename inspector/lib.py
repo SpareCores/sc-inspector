@@ -700,6 +700,10 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 logging.exception("Couldn't start instance")
 
     if vendor == "alicloud":
+        # Only allow ecs.t5-lc1m1.small for now
+        if server != "ecs.t5-lc1m1.small":
+            logging.info(f"Skipping {vendor}/{server}, only ecs.t5-lc1m1.small is allowed")
+            return
         # we use the key_name in instance_opts instead of creating a new key
         resource_opts = dict(public_key="", instance=server, disk_size=VOLUME_SIZE)
         instance_opts |= dict(
