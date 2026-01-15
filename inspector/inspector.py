@@ -376,6 +376,10 @@ def start(ctx, exclude, start_only):
         if start_only and (vendor, server) not in start_only:
             logging.info(f"Excluding {vendor}/{server} as --start-only {start_only} is given")
             continue
+        # Only allow ecs.t5-lc1m1.small for alicloud for now
+        if vendor == "alicloud" and server != "ecs.t5-lc1m1.small":
+            logging.info(f"Excluding {vendor}/{server}, only ecs.t5-lc1m1.small is allowed for alicloud")
+            continue
         data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
         try:
             tasks = list(filter(lambda task: lib.should_start(task, data_dir, srv_data), lib.get_tasks(vendor)))
