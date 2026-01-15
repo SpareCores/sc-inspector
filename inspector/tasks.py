@@ -95,6 +95,36 @@ lshw = DockerTask(
     timeout=timedelta(minutes=5),
 )
 
+lsblk = DockerTask(
+    parallel=True,
+    priority=0,
+    image="ghcr.io/sparecores/hwinfo:main",
+    version_command="lsblk -V",
+    command="lsblk -Jd",
+    timeout=timedelta(minutes=1),
+    servers_only=RUN_NEW_TASKS_ON_SERVERS,
+)
+
+lsblk_discard = DockerTask(
+    parallel=True,
+    priority=0,
+    image="ghcr.io/sparecores/hwinfo:main",
+    version_command="lsblk -V",
+    command="lsblk -DJd",
+    timeout=timedelta(minutes=1),
+    servers_only=RUN_NEW_TASKS_ON_SERVERS,
+)
+
+lsblk_topo = DockerTask(
+    parallel=True,
+    priority=0,
+    image="ghcr.io/sparecores/hwinfo:main",
+    version_command="lsblk -V",
+    command="lsblk -tJd",
+    timeout=timedelta(minutes=1),
+    servers_only=RUN_NEW_TASKS_ON_SERVERS,
+)
+
 lscpu = DockerTask(
     parallel=True,
     priority=0,
