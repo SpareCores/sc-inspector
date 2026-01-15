@@ -706,8 +706,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             key_name="spare-cores",
         )
         done = False
-        # for region in custom_sort(regions, "eu-central-1"):
-        for region in ["eu-west-1"]:
+        for region in custom_sort(regions, "cn-beijing"):
             logging.info(f"Trying {region}")
             resource_opts["region"] = region
 
