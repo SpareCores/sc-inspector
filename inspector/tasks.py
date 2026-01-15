@@ -100,7 +100,7 @@ lsblk = DockerTask(
     priority=0,
     image="ghcr.io/sparecores/hwinfo:main",
     version_command="lsblk -V",
-    command="lsblk -Jd",
+    command="lsblk -Jdb",
     timeout=timedelta(minutes=1),
     servers_only=RUN_NEW_TASKS_ON_SERVERS,
 )
@@ -110,7 +110,7 @@ lsblk_discard = DockerTask(
     priority=0,
     image="ghcr.io/sparecores/hwinfo:main",
     version_command="lsblk -V",
-    command="lsblk -DJd",
+    command="lsblk -DJdb",
     timeout=timedelta(minutes=1),
     servers_only=RUN_NEW_TASKS_ON_SERVERS,
 )
@@ -120,7 +120,7 @@ lsblk_topo = DockerTask(
     priority=0,
     image="ghcr.io/sparecores/hwinfo:main",
     version_command="lsblk -V",
-    command="lsblk -tJd",
+    command="lsblk -tJdb",
     timeout=timedelta(minutes=1),
     servers_only=RUN_NEW_TASKS_ON_SERVERS,
 )
