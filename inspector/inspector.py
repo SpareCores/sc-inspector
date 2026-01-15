@@ -365,6 +365,13 @@ def start(ctx, exclude, start_only):
     lock = threading.Lock()
     exception = None
     for (vendor, server), (srv_data, regions, zones) in available_servers().items():
+        alicloud_servers = {
+            "ecs.t5-lc1m1.small",
+            "ecs.c6a.2xlarge",
+        }
+        if vendor == "alicloud" and server not in alicloud_servers:
+            logging.info(f"Excluding {vendor}/{server}")
+            continue
         if vendor not in supported_vendors:
             # sc-runner can't yet handle this vendor
             continue
@@ -375,10 +382,6 @@ def start(ctx, exclude, start_only):
             continue
         if start_only and (vendor, server) not in start_only:
             logging.info(f"Excluding {vendor}/{server} as --start-only {start_only} is given")
-            continue
-        # Only allow ecs.t5-lc1m1.small for alicloud for now
-        if vendor == "alicloud" and server != "ecs.t5-lc1m1.small":
-            logging.info(f"Excluding {vendor}/{server}, only ecs.t5-lc1m1.small is allowed for alicloud")
             continue
         data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
         try:
