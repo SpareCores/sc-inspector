@@ -15,17 +15,62 @@ GPU_EXCLUDE = {
     ("aws", "p4d.24xlarge"),
     ("gcp", "a2-megagpu-16g"),
 }
-RUN_NEW_TASKS_ON_SERVERS = {
-    # ("aws", "r8a.48xlarge"),
-    # ("aws", "r8g.48xlarge"),
-    ("aws", "r8a.4xlarge"),
-    # ("aws", "t3.nano"),
-    # ("aws", "t3a.nano"),
-    # ("aws", "i7ie.48xlarge"),
-    # ("aws", "i7ie.metal-48xl"),
-    # ("azure", "M416s_9_v2"),
-    # ("gcp", "c3d-highcpu-360"),
-}
+class DynamicServerSet:
+    """
+    A set-like object that allows dynamic inclusion of all instances for a specific vendor
+    while maintaining a static list for other vendors.
+    
+    Compatible with tuple-based lookups: (vendor, instance_type) in set
+    """
+    def __init__(self, static_servers, enable_vendors=None):
+        """
+        :param static_servers: Set of (vendor, instance_type) tuples for static inclusion
+        :param enable_vendors: Set of vendor names that should match all instances
+        """
+        self.static_servers = static_servers
+        self.enable_vendors = enable_vendors or set()
+    
+    def __contains__(self, item):
+        """
+        Check if (vendor, instance_type) is in the set.
+        Returns True for all instances of enabled vendors, or if in static_servers.
+        """
+        if not isinstance(item, tuple) or len(item) != 2:
+            return False
+        vendor, instance = item
+        # If vendor is in enable_vendors, allow all instances
+        if vendor in self.enable_vendors:
+            return True
+        # Otherwise, check static list
+        return item in self.static_servers
+    
+    def __bool__(self):
+        """Return True if there are any static servers or enabled vendors"""
+        return bool(self.static_servers) or bool(self.enable_vendors)
+    
+    def __iter__(self):
+        """Iterate over static servers"""
+        return iter(self.static_servers)
+    
+    def __len__(self):
+        """Return length of static servers (for compatibility)"""
+        return len(self.static_servers)
+
+
+RUN_NEW_TASKS_ON_SERVERS = DynamicServerSet(
+    static_servers={
+        # ("aws", "r8a.48xlarge"),
+        # ("aws", "r8g.48xlarge"),
+        ("aws", "r8a.4xlarge"),
+        # ("aws", "t3.nano"),
+        # ("aws", "t3a.nano"),
+        # ("aws", "i7ie.48xlarge"),
+        # ("aws", "i7ie.metal-48xl"),
+        # ("azure", "M416s_9_v2"),
+        # ("gcp", "c3d-highcpu-360"),
+    },
+    enable_vendors={"alicloud"},
+)
 
 # get the amount of available memory
 mem_bytes = psutil.virtual_memory().available
