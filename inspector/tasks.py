@@ -297,6 +297,7 @@ bw_mem = DockerTask(
     servers_exclude={
         ("ovh", "a10-180"),
         ("ovh", "l4-360"),
+        ("alicloud", "ecs.c6a.2xlarge"),
     },
 )
 
