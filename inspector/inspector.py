@@ -336,8 +336,10 @@ def available_servers(vendor: str | None = None, region: str | None = None):
                 servers[(vendor, server.api_reference)][1].append(region)
             if zone not in servers[(vendor, server.api_reference)][2]:
                 servers[(vendor, server.api_reference)][2].append(zone)
+            # Store zone-to-region mapping
+            servers[(vendor, server.api_reference)][3][zone] = region
         else:
-            servers[(vendor, server.api_reference)] = [server, [region], [zone]]
+            servers[(vendor, server.api_reference)] = [server, [region], [zone], {zone: region}]
     return servers
 
 
@@ -364,7 +366,7 @@ def start(ctx, exclude, start_only):
     count = 0
     lock = threading.Lock()
     exception = None
-    for (vendor, server), (srv_data, regions, zones) in available_servers().items():
+    for (vendor, server), (srv_data, regions, zones, zone_to_region) in available_servers().items():
         alicloud_servers = {
             "ecs.t5-lc1m1.small",
             "ecs.c6a.2xlarge",
@@ -397,7 +399,7 @@ def start(ctx, exclude, start_only):
         if not tasks:
             logging.info(f"No tasks for {vendor}/{server}")
             continue
-        f = executor.submit(lib.start_inspect, executor, lock, data_dir, vendor, server, tasks, srv_data, regions, zones)
+        f = executor.submit(lib.start_inspect, executor, lock, data_dir, vendor, server, tasks, srv_data, regions, zones, zone_to_region)
         futures[f] = (vendor, server)
         count += 1
         # number of servers to start at a time: best to leave this at 1 to avoid quota issues,
@@ -560,7 +562,7 @@ def cleanup(ctx, threads, force, all_regions, lookback_mins, vendor):
         max_start=max_start,
     )
     with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
-        for (vendor, server), (_, regions, zones) in servers:
+        for (vendor, server), (_, regions, zones, _zone_to_region) in servers:
             if all_regions:
                 regions = get_regions(vendor)
             if vendor not in supported_vendors:

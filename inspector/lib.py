@@ -603,7 +603,7 @@ def retry_locked(func, *args, **kwargs):
             raise
 
 
-def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, regions, zones):
+def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, regions, zones, zone_to_region=None):
     from sc_runner.resources import default
     from sc_runner import runner
     import sc_runner.resources
@@ -710,10 +710,9 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         )
         done = False
         # Alicloud instance availability differs by zone, not just region
-        # Loop through zones and extract region from zone name (e.g., "cn-beijing-i" -> "cn-beijing")
         # Sort zones: prefer eu, then us, then others, cn- zones as last resort
         def zone_priority(z):
-            region = z.rsplit('-', 1)[0]
+            region = zone_to_region.get(z, "")
             if region.startswith("eu-"):
                 return (0, z)  # eu zones first
             elif region.startswith("us-"):
@@ -724,8 +723,11 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 return (3, z)  # cn- zones last (fallback)
         sorted_zones = sorted(zones, key=zone_priority)
         for zone in sorted_zones:
-            # Extract region from zone (remove the last hyphen and suffix)
-            region = zone.rsplit('-', 1)[0]
+            # Get region from the zone_to_region mapping (from database)
+            region = zone_to_region.get(zone)
+            if not region:
+                logging.warning(f"Unknown region for zone {zone}, skipping")
+                continue
             if region.startswith("cn-"):
                 # Chinese regions have weak network connectivity, warn but try as fallback
                 logging.warning(f"Trying cn- zone {zone} as fallback (slow network expected)")
