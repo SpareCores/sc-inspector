@@ -711,14 +711,24 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         done = False
         # Alicloud instance availability differs by zone, not just region
         # Loop through zones and extract region from zone name (e.g., "cn-beijing-i" -> "cn-beijing")
-        # Sort zones to prefer eu-central-1 zones first
-        sorted_zones = sorted(zones, key=lambda z: (0 if z.startswith("eu-central-1") else 1, z))
+        # Sort zones: prefer eu, then us, then others, cn- zones as last resort
+        def zone_priority(z):
+            region = z.rsplit('-', 1)[0]
+            if region.startswith("eu-"):
+                return (0, z)  # eu zones first
+            elif region.startswith("us-"):
+                return (1, z)  # us zones second
+            elif not region.startswith("cn-"):
+                return (2, z)  # other non-cn zones third
+            else:
+                return (3, z)  # cn- zones last (fallback)
+        sorted_zones = sorted(zones, key=zone_priority)
         for zone in sorted_zones:
             # Extract region from zone (remove the last hyphen and suffix)
             region = zone.rsplit('-', 1)[0]
             if region.startswith("cn-"):
-                # Chinese regions have very weak network connectivity, so getting container images is very slow
-                continue
+                # Chinese regions have weak network connectivity, warn but try as fallback
+                logging.warning(f"Trying cn- zone {zone} as fallback (slow network expected)")
             logging.info(f"Trying zone {zone} (region {region})")
             resource_opts["region"] = region
             resource_opts["availability_zone"] = zone
