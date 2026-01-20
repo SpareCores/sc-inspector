@@ -709,12 +709,19 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             key_name="spare-cores",
         )
         done = False
-        for region in custom_sort(regions, "eu-central-1"):
+        # Alicloud instance availability differs by zone, not just region
+        # Loop through zones and extract region from zone name (e.g., "cn-beijing-i" -> "cn-beijing")
+        # Sort zones to prefer eu-central-1 zones first
+        sorted_zones = sorted(zones, key=lambda z: (0 if z.startswith("eu-central-1") else 1, z))
+        for zone in sorted_zones:
+            # Extract region from zone (remove the last hyphen and suffix)
+            region = zone.rsplit('-', 1)[0]
             if region.startswith("cn-"):
                 # Chinese regions have very weak network connectivity, so getting container images is very slow
                 continue
-            logging.info(f"Trying {region}")
+            logging.info(f"Trying zone {zone} (region {region})")
             resource_opts["region"] = region
+            resource_opts["availability_zone"] = zone
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
             runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=logging.info))
@@ -727,7 +734,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             # Ensure first attempt has cloud_auto
             current_instance_opts["system_disk_category"] = "cloud_auto"
             for attempt in range(2):
-                logging.info(f"Attempt {attempt + 1} for {region} with instance_opts: {current_instance_opts}")
+                logging.info(f"Attempt {attempt + 1} for zone {zone} with instance_opts: {current_instance_opts}")
                 try:
                     retry_locked(runner.create, vendor, {},
                                  resource_opts | dict(instance_opts=current_instance_opts, user_data=b64_user_data),
@@ -740,15 +747,15 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                     # Check if the error is about disk category not being supported
                     error_text = str(e) + " " + " ".join(error_msgs) + " " + " ".join(output)
                     if "specified instance does not support this disk category" in error_text:
-                        logging.exception(f"Disk category error, retrying without system_disk_category for {region}")
+                        logging.exception(f"Disk category error, retrying without system_disk_category for zone {zone}")
                         # Remove system_disk_category for second attempt
                         current_instance_opts.pop("system_disk_category", None)
                         # clear error_msgs before retry
                         error_msgs = []
                         output = []
                         continue
-                    # on failure, destroy in background and try the next region
-                    logging.exception(f"Couldn't start instance in {region}")
+                    # on failure, destroy in background and try the next zone
+                    logging.exception(f"Couldn't start instance in zone {zone}")
                     executor.submit(delayed_destroy, vendor, server, copy.deepcopy(resource_opts))
                     break
             if done:
