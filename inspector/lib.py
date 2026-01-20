@@ -747,8 +747,10 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                         error_msgs = []
                         output = []
                         continue
-                    # on failure, try the next region
+                    # on failure, destroy in background and try the next region
                     logging.exception(f"Couldn't start instance in {region}")
+                    executor.submit(delayed_destroy, vendor, server, copy.deepcopy(resource_opts))
+                    break
             if done:
                 break
 
