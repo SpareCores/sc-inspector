@@ -49,7 +49,10 @@ PULUMI_ERRORS = {
     re.compile(r"creating failed"),  # Azure errors
     re.compile(r"error waiting for.*to create"),   # GCP error
     re.compile(r"Unable to create server"),  # Upcloud error
-    re.compile(r"The instanceType of the specified instance does not support this disk category"),  # Alicloud error
+    # Alicloud errors
+    re.compile(r"The instanceType of the specified instance does not support this disk category"),
+    re.compile(r"InvalidInstanceType"),  # instance type not available/not supported
+    re.compile(r"beyond the permitted range"),  # instance type not permitted
 }
 # provision machines with storage (GiB)
 VOLUME_SIZE = 128
@@ -716,7 +719,9 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
             runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=logging.info))
             error_msgs = []
-            stack_opts = dict(on_output=logging.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
+            output = []
+            # Alicloud (like Azure) doesn't give sensible error events, use its output
+            stack_opts = dict(on_output=lambda message: pulumi_output_filter(message, error_msgs, output))
             # try with cloud_auto first, then retry without system_disk_category if needed
             current_instance_opts = copy.deepcopy(instance_opts)
             # Ensure first attempt has cloud_auto
@@ -729,19 +734,23 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                                  stack_opts=stack_opts)
                     # empty it if create succeeded, just in case
                     error_msgs = []
+                    done = True
                     break
                 except Exception as e:
                     # Check if the error is about disk category not being supported
-                    error_text = str(e) + " " + " ".join(error_msgs)
+                    error_text = str(e) + " " + " ".join(error_msgs) + " " + " ".join(output)
                     if "specified instance does not support this disk category" in error_text:
                         logging.exception(f"Disk category error, retrying without system_disk_category for {region}")
                         # Remove system_disk_category for second attempt
                         current_instance_opts.pop("system_disk_category", None)
                         # clear error_msgs before retry
                         error_msgs = []
+                        output = []
                         continue
                     # on failure, try the next region
                     logging.exception(f"Couldn't start instance in {region}")
+            if done:
+                break
 
     if vendor == "azure":
         # explicitly set SSH key from envvar
