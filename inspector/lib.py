@@ -707,6 +707,9 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         )
         done = False
         for region in custom_sort(regions, "eu-central-1"):
+            if region.startswith("cn-"):
+                # Chinese regions have very weak network connectivity, so getting container images is very slow
+                continue
             logging.info(f"Trying {region}")
             resource_opts["region"] = region
 
