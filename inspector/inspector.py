@@ -370,6 +370,7 @@ def start(ctx, exclude, start_only):
             "ecs.c6a.2xlarge",
             "ecs.c6r.large",
             "ecs.c6r.xlarge",
+            "ecs.c7a.large",
         }
         if vendor == "alicloud" and server not in alicloud_servers:
             logging.info(f"Excluding {vendor}/{server}")
