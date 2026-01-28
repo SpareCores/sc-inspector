@@ -63,7 +63,7 @@ shutdown --no-wall +{SHUTDOWN_MINS}
 
 export DEBIAN_FRONTEND=noninteractive
 . /etc/os-release
- update -y
+apt-get update -y
 # Add the required repositories to Apt sources:
 apt-get install -y ca-certificates curl
 install -m 0755 -d /etc/apt/keyrings
