@@ -369,7 +369,6 @@ def start(ctx, exclude, start_only):
     for (vendor, server), (srv_data, regions, zones, zone_to_region) in available_servers().items():
         alicloud_servers = {
             "ecs.t5-lc1m1.small",
-            "ecs.c6a.2xlarge",
             "ecs.c6r.large",
             "ecs.c6r.xlarge",
             "ecs.c7a.large",
