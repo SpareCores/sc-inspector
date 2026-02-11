@@ -17,6 +17,7 @@ GPU_EXCLUDE = {
     ("aws", "g6f.4xlarge"),
     ("aws", "g6f.large"),
     ("aws", "g6f.xlarge"),
+    ("aws", "gr6f.4xlarge"),
     ("gcp", "a2-megagpu-16g"),
 }
 
