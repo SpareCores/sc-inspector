@@ -276,7 +276,7 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
     return False
 
 
-def should_run(task: Task, data_dir: str | os.PathLike, vendor: str, instance: str, gpu_count: int) -> bool:
+def should_run(task: Task, data_dir: str | os.PathLike, vendor: str, instance: str, gpu_count: float) -> bool:
     """Return True if we should run a task."""
     import psutil  # lazy load
 
@@ -339,7 +339,7 @@ def container_remove(c):
         pass
 
 
-def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, gpu_count: int = 0) -> tuple[str | None, bytes, bytes]:
+def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> tuple[str | None, bytes, bytes]:
     ver = None
     stdout = stderr = b""
     
@@ -424,7 +424,7 @@ def write_meta(meta: Meta, file: str | os.PathLike) -> None:
         f.write(meta.model_dump_json())
 
 
-def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: int = 0) -> None:
+def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> None:
     while True:
         try:
             task = q.get()
@@ -456,7 +456,7 @@ def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: int = 0) -> None:
             q.task_done()
 
 
-def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: int = 0, nthreads: int = 8):
+def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: float = 0.0, nthreads: int = 8):
     taskgroups = get_taskgroups(vendor)
 
     # initialize thread pool
