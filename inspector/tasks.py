@@ -13,8 +13,13 @@ GPU_EXCLUDE = {
     ("aws", "p2.8xlarge"),
     ("aws", "p2.xlarge"),
     ("aws", "p4d.24xlarge"),
+    ("aws", "g6f.2xlarge"),
+    ("aws", "g6f.4xlarge"),
+    ("aws", "g6f.large"),
+    ("aws", "g6f.xlarge"),
     ("gcp", "a2-megagpu-16g"),
 }
+
 class DynamicServerSet:
     """
     A set-like object that allows dynamic inclusion of all instances for a specific vendor
@@ -251,6 +256,7 @@ nvidia_smi = DockerTask(
     priority=0,
     image="nvidia/cuda:12.4.1-base-ubuntu22.04",
     gpu=True,
+    servers_exclude=GPU_EXCLUDE,
     version_command="bash -c \"nvidia-smi -h | head -1 | egrep -o 'v[0-9.]+'\"",
     command="nvidia-smi -q -x",
     precheck_command="lshw -C display -json | jq -r '.[].vendor'",
