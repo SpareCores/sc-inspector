@@ -99,29 +99,25 @@ EOF
                 esac
                 ;;
             alicloud)
-                # Alibaba Cloud fractional GPUs: handled by acs-plugin-manager below
-                # Fall through to standard Alibaba handling
+                # Alibaba Cloud fractional GPUs: use acs-plugin-manager for eligible instance types
+                if command -v acs-plugin-manager >/dev/null 2>&1; then
+                    case "{INSTANCE}" in
+                        *sgn7i-vws*) PLUGIN="grid_driver_install" ;;
+                        *sgn8ia*)    PLUGIN="gpu_grid_driver_install" ;;
+                        *)           PLUGIN="" ;;
+                    esac
+                    if [ -n "$PLUGIN" ] && acs-plugin-manager --list 2>/dev/null | grep -q "$PLUGIN"; then
+                        ALIYUN_DRIVER_PLUGIN="$PLUGIN"
+                        FRACTIONAL_GPU_DRIVER="alicloud-acs"
+                        NVIDIA_PKGS="nvidia-container-toolkit"
+                    fi
+                fi
                 ;;
             *)
                 # Other vendors: use standard driver detection
                 # Fall through to standard detection logic
                 ;;
         esac
-    fi
-    
-    # driver: use Alibaba acs-plugin-manager for eligible instance types, else nvidia PPA
-    if [ -z "$FRACTIONAL_GPU_DRIVER" ] && [ "{VENDOR}" = "alicloud" ] && command -v acs-plugin-manager >/dev/null 2>&1; then
-        case "{INSTANCE}" in
-            *sgn7i-vws*) PLUGIN="grid_driver_install" ;;
-            *sgn8ia*)    PLUGIN="gpu_grid_driver_install" ;;
-            *)           PLUGIN="" ;;
-        esac
-        if [ -n "$PLUGIN" ] && acs-plugin-manager --list 2>/dev/null | grep -q "$PLUGIN"; then
-            if ! (command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1); then
-                ALIYUN_DRIVER_PLUGIN="$PLUGIN"
-            fi
-            NVIDIA_PKGS="nvidia-container-toolkit"
-        fi
     fi
     
     # Detect GPU architecture and select appropriate driver (only if not using fractional GPU driver)
