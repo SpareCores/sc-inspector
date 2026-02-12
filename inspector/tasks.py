@@ -254,8 +254,7 @@ lstopo = DockerTask(
 nvidia_smi = DockerTask(
     parallel=True,
     priority=0,
-    # we need to keep this on the lowest CUDA version supported by any installed drivers
-    image="nvidia/cuda:11.4.3-base-ubuntu20.04",
+    image="nvidia/cuda:12.4.1-base-ubuntu22.04",
     gpu=True,
     servers_exclude=GPU_EXCLUDE,
     version_command="bash -c \"nvidia-smi -h | head -1 | egrep -o 'v[0-9.]+'\"",
