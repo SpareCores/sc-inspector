@@ -115,7 +115,7 @@ if [ "{GPU_COUNT}" != "0" ] && [ "{GPU_COUNT}" != "0.0" ]; then
             
             # Check for older architectures that need proprietary server driver
             # Volta (GV1xx, V100, V100S), Pascal (GP1xx, P100, P40, P4), Maxwell (GM1xx, M60, M40), Kepler (GK1xx, K80, K40)
-            if echo "$GPU_INFO" | grep -qiE 'GV1[0-9]{2}|V100S?|GP1[0-9]{2}|P[146]0|GM1[0-9]{2}|M[46]0|GK1[0-9]{2}|K[248]0'; then
+            if echo "$GPU_INFO" | grep -qiE 'GV1[0-9]{{2}}|V100S?|GP1[0-9]{{2}}|P[146]0|GM1[0-9]{{2}}|M[46]0|GK1[0-9]{{2}}|K[248]0'; then
                 DRIVER_VARIANT="server"
             fi
         fi
