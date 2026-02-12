@@ -13,10 +13,6 @@ GPU_EXCLUDE = {
     ("aws", "p2.8xlarge"),
     ("aws", "p2.xlarge"),
     ("aws", "p4d.24xlarge"),
-    ("aws", "g6f.2xlarge"),
-    ("aws", "g6f.4xlarge"),
-    ("aws", "g6f.xlarge"),
-    ("aws", "gr6f.4xlarge"),
     ("gcp", "a2-megagpu-16g"),
 }
 
@@ -254,9 +250,10 @@ lstopo = DockerTask(
 nvidia_smi = DockerTask(
     parallel=True,
     priority=0,
-    image="nvidia/cuda:12.4.1-base-ubuntu22.04",
+    # we have to adapt to the oldest supported CUDA version
+    image="nvidia/cuda:11.4.3-base-ubuntu20.04",
     gpu=True,
-    servers_exclude=GPU_EXCLUDE,
+    # servers_exclude=GPU_EXCLUDE,
     version_command="bash -c \"nvidia-smi -h | head -1 | egrep -o 'v[0-9.]+'\"",
     command="nvidia-smi -q -x",
     precheck_command="lshw -C display -json | jq -r '.[].vendor'",
@@ -395,7 +392,7 @@ nvbandwidth = DockerTask(
     priority=9,
     image="ghcr.io/sparecores/nvbandwidth:main",
     gpu=True,
-    servers_exclude=GPU_EXCLUDE,
+    # servers_exclude=GPU_EXCLUDE,
     version_command="bash -c \"nvbandwidth --help | head -1 | egrep -o 'v[0-9.]+'\"",
     command="nvbandwidth -j",
     precheck_command="lshw -C display -json | jq -r '.[].vendor'",
