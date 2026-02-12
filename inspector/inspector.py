@@ -624,9 +624,13 @@ def parse(ctx):
 def inspect(ctx, vendor, instance, gpu_count, threads):
     """Run inspection on this machine."""
     # Disable OOM killer for this task as Linux tends to kill this instead of benchmarks, like bw_mem
-    pid=os.getpid()
-    with open(f"/proc/{pid}/oom_adj", mode="w+") as f:
-        f.write("-17")
+    pid = os.getpid()
+    try:
+        with open(f"/proc/{pid}/oom_score_adj", mode="w") as f:
+            f.write("-1000")
+    except Exception:
+        # If it fails, log but continue (not critical)
+        logging.warning("Could not disable OOM killer for inspector process")
 
     logging.info("Updating the git repo")
     # we must clone the repo before writing anything to it
