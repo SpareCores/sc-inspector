@@ -353,7 +353,8 @@ def cli(repo_path):
 @click.pass_context
 @click.option("--exclude", type=(str, str), default=EXCLUDE_INSTANCES, multiple=True, help="Exclude $vendor $instance")
 @click.option("--start-only", type=(str, str), multiple=True, help="Start only $vendor $instance")
-def start(ctx, exclude, start_only):
+@click.option("--vendor", type=str, default=None, help="Only start instances for the specified vendor")
+def start(ctx, exclude, start_only, vendor):
     from sc_runner.resources import supported_vendors
     import concurrent.futures
     import threading
@@ -366,7 +367,7 @@ def start(ctx, exclude, start_only):
     count = 0
     lock = threading.Lock()
     exception = None
-    for (vendor, server), (srv_data, regions, zones, zone_to_region) in available_servers().items():
+    for (vnd, server), (srv_data, regions, zones, zone_to_region) in available_servers(vendor=vendor).items():
         alicloud_servers = {
             "ecs.t5-lc1m1.small",
             "ecs.c6r.large",
@@ -374,36 +375,36 @@ def start(ctx, exclude, start_only):
             "ecs.c7a.large",
             # "ecs.sgn7i-vws-m2s.xlarge",
         }
-        if vendor == "alicloud" and server not in alicloud_servers:
-            logging.info(f"Excluding {vendor}/{server}")
+        if vnd == "alicloud" and server not in alicloud_servers:
+            logging.info(f"Excluding {vnd}/{server}")
             continue
-        if vendor == "azure":
+        if vnd == "azure":
             # skip them for now, many new instances, no quota
             continue
-        if vendor not in supported_vendors:
+        if vnd not in supported_vendors:
             # sc-runner can't yet handle this vendor
             continue
         gpu_count = srv_data.gpu_count
-        logging.info(f"Evaluating {vendor}/{server} with {gpu_count} GPUs")
-        if (vendor, server) in exclude:
-            logging.info(f"Excluding {vendor}/{server}")
+        logging.info(f"Evaluating {vnd}/{server} with {gpu_count} GPUs")
+        if (vnd, server) in exclude:
+            logging.info(f"Excluding {vnd}/{server}")
             continue
-        if start_only and (vendor, server) not in start_only:
-            logging.info(f"Excluding {vendor}/{server} as --start-only {start_only} is given")
+        if start_only and (vnd, server) not in start_only:
+            logging.info(f"Excluding {vnd}/{server} as --start-only {start_only} is given")
             continue
-        data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
+        data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vnd, server)
         try:
-            tasks = list(filter(lambda task: lib.should_start(task, data_dir, srv_data), lib.get_tasks(vendor)))
+            tasks = list(filter(lambda task: lib.should_start(task, data_dir, srv_data), lib.get_tasks(vnd)))
         except Exception as e:
             # stop if an exception occurred
             exception = e
-            logging.exception(f"{vendor}/{server} failed")
+            logging.exception(f"{vnd}/{server} failed")
             break
         if not tasks:
-            logging.info(f"No tasks for {vendor}/{server}")
+            logging.info(f"No tasks for {vnd}/{server}")
             continue
-        f = executor.submit(lib.start_inspect, executor, lock, data_dir, vendor, server, tasks, srv_data, regions, zones, zone_to_region)
-        futures[f] = (vendor, server)
+        f = executor.submit(lib.start_inspect, executor, lock, data_dir, vnd, server, tasks, srv_data, regions, zones, zone_to_region)
+        futures[f] = (vnd, server)
         count += 1
         # number of servers to start at a time: best to leave this at 1 to avoid quota issues,
         # but can be increased temporarily if needed to run a new benchmark on all servers faster
