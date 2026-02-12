@@ -619,7 +619,7 @@ def parse(ctx):
 @click.pass_context
 @click.option("--vendor", required=True, help="Vendor ID for this machine")
 @click.option("--instance", required=True, help="Instance ID for this machine")
-@click.option("--gpu-count", default=0, help="Number of GPUs")
+@click.option("--gpu-count", default=0.0, type=float, help="Number of GPUs")
 @click.option("--threads", default=8, show_default=True, help="Parallelism in a given task group")
 def inspect(ctx, vendor, instance, gpu_count, threads):
     """Run inspection on this machine."""
