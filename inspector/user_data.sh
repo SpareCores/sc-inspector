@@ -56,19 +56,6 @@ if [ "{GPU_COUNT}" != "0" ] && [ "{GPU_COUNT}" != "0.0" ]; then
                 FRACTIONAL_GPU_DRIVER="aws-s3"
                 NVIDIA_PKGS="nvidia-container-toolkit"
                 ;;
-            gcp)
-                # GCP fractional GPUs: use NVIDIA drivers from GCS or NVIDIA GRID drivers
-                # GCP provides pre-installed drivers for some instances, check if already present
-                if ! (command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1); then
-                    # Install NVIDIA GRID drivers for virtual workstation instances
-                    # GCP provides these via their own repositories
-                    curl -fsSL https://nvidia.github.io/nvidia-docker/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-docker-keyring.gpg
-                    # Use standard PPA as fallback for GCP
-                    add-apt-repository ppa:graphics-drivers/ppa -y
-                    NVIDIA_PKGS="nvidia-driver-550-server nvidia-container-toolkit"
-                fi
-                FRACTIONAL_GPU_DRIVER="gcp-grid"
-                ;;
             azure)
                 # Azure fractional GPUs: use NVIDIA GRID drivers for NVv4 and NVadsA10_v5 series
                 # Azure provides NVIDIA drivers via extensions, but we install manually for consistency
