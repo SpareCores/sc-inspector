@@ -74,19 +74,62 @@ echo \
   "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$ID \
   $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
   tee /etc/apt/sources.list.d/docker.list > /dev/null
-# nvidia drivers/toolkit in GPU_COUNT != 0
+# nvidia drivers/toolkit when GPU_COUNT != 0
 NVIDIA_PKGS=""
-if [ {GPU_COUNT} -ne 0 ]; then
-    add-apt-repository ppa:graphics-drivers/ppa -y
-    # nvidia container toolkit
-    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
-      && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
-        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+ALIYUN_DRIVER_PLUGIN=""
+if [ "{GPU_COUNT}" != "0" ] && [ "{GPU_COUNT}" != "0.0" ]; then
+    # nvidia container toolkit (always for GPU instances)
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \\
+      && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \\
+        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \\
         sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
-    NVIDIA_PKGS="nvidia-driver-525 nvidia-container-toolkit"
+    
+    # driver: use Alibaba acs-plugin-manager for eligible instance types, else nvidia PPA
+    if [ "{VENDOR}" = "alicloud" ] && command -v acs-plugin-manager >/dev/null 2>&1; then
+        case "{INSTANCE}" in
+            *sgn7i-vws*) PLUGIN="grid_driver_install" ;;
+            *sgn8ia*)    PLUGIN="gpu_grid_driver_install" ;;
+            *)           PLUGIN="" ;;
+        esac
+        if [ -n "$PLUGIN" ] && acs-plugin-manager --list 2>/dev/null | grep -q "$PLUGIN"; then
+            if ! (command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1); then
+                ALIYUN_DRIVER_PLUGIN="$PLUGIN"
+            fi
+            NVIDIA_PKGS="nvidia-container-toolkit"
+        fi
+    fi
+    
+    # Detect GPU architecture and select appropriate driver
+    if [ -z "$NVIDIA_PKGS" ]; then
+        add-apt-repository ppa:graphics-drivers/ppa -y
+        
+        # Detect GPU using lshw (more reliable than lspci for product names)
+        # Default to open driver for modern GPUs (Turing+, Ada, Hopper, Blackwell)
+        # Open driver is required for Blackwell/Grace Hopper and recommended for Ada/Hopper/Ampere/Turing
+        DRIVER_VARIANT="open"
+        
+        # Check if lshw and jq are available and get GPU info
+        if command -v lshw >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+            # Get NVIDIA GPU product names from lshw JSON output using jq
+            GPU_INFO=$(lshw -c display -json 2>/dev/null | jq -r '.. | objects | select(.vendor? == "NVIDIA Corporation") | .product' 2>/dev/null || echo "")
+            
+            # Check for older architectures that need proprietary server driver
+            # Volta (GV1xx, V100, V100S), Pascal (GP1xx, P100, P40, P4), Maxwell (GM1xx, M60, M40), Kepler (GK1xx, K80, K40)
+            if echo "$GPU_INFO" | grep -qiE 'GV1[0-9]{2}|V100S?|GP1[0-9]{2}|P[146]0|GM1[0-9]{2}|M[46]0|GK1[0-9]{2}|K[248]0'; then
+                DRIVER_VARIANT="server"
+            fi
+        fi
+        
+        NVIDIA_PKGS="nvidia-driver-590-$DRIVER_VARIANT nvidia-container-toolkit"
+    fi
 fi
 apt-get update -y >> /tmp/output 2>&1
 apt-get install -y $NVIDIA_PKGS docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin openssh-client >> /tmp/output 2>&1
+# install Alibaba GPU driver via acs-plugin-manager when applicable (never fail the script)
+if [ -n "$ALIYUN_DRIVER_PLUGIN" ]; then
+    acs-plugin-manager --remove --plugin "$ALIYUN_DRIVER_PLUGIN" >/dev/null 2>&1 || true
+    acs-plugin-manager --exec --plugin "$ALIYUN_DRIVER_PLUGIN" >/dev/null 2>&1 || true
+fi
 systemctl restart docker
 # set up SSH for git operations
 mkdir -p /root/.ssh
