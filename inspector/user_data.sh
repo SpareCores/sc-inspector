@@ -19,6 +19,8 @@ echo \
 # nvidia drivers/toolkit when GPU_COUNT != 0
 NVIDIA_PKGS=""
 ALIYUN_DRIVER_PLUGIN=""
+FRACTIONAL_GPU_DRIVER=""
+
 if [ "{GPU_COUNT}" != "0" ] && [ "{GPU_COUNT}" != "0.0" ]; then
     # nvidia container toolkit (always for GPU instances)
     curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
@@ -26,8 +28,67 @@ if [ "{GPU_COUNT}" != "0" ] && [ "{GPU_COUNT}" != "0.0" ]; then
         sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
         sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
     
+    # Check if this is a fractional GPU instance (GPU_COUNT is not a whole number)
+    # Use awk to check if the number has a non-zero fractional part
+    IS_FRACTIONAL=$(echo "{GPU_COUNT}" | awk '{{if ($1 != int($1)) print "true"; else print "false"}}')
+    if [ "$IS_FRACTIONAL" = "true" ]; then
+        IS_FRACTIONAL_GPU=true
+    else
+        IS_FRACTIONAL_GPU=false
+    fi
+    
+    # Handle fractional GPU driver installation per vendor
+    if [ "$IS_FRACTIONAL_GPU" = "true" ]; then
+        case "{VENDOR}" in
+            aws)
+                # AWS fractional GPUs: use NVIDIA drivers from S3
+                # Install aws-cli before snap is removed
+                snap install aws-cli --classic
+                # Install build tools required for NVIDIA driver compilation
+                apt-get install -y build-essential
+                # Download and install NVIDIA driver from AWS S3
+                aws s3 cp --recursive s3://ec2-linux-nvidia-drivers/latest/ /tmp/ --no-sign-request
+                chmod +x /tmp/NVIDIA-Linux-x86_64*.run
+                /tmp/NVIDIA-Linux-x86_64*.run -s --no-drm
+                FRACTIONAL_GPU_DRIVER="aws-s3"
+                NVIDIA_PKGS="nvidia-container-toolkit"
+                ;;
+            gcp)
+                # GCP fractional GPUs: use NVIDIA drivers from GCS or NVIDIA GRID drivers
+                # GCP provides pre-installed drivers for some instances, check if already present
+                if ! (command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1); then
+                    # Install NVIDIA GRID drivers for virtual workstation instances
+                    # GCP provides these via their own repositories
+                    curl -fsSL https://nvidia.github.io/nvidia-docker/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-docker-keyring.gpg
+                    # Use standard PPA as fallback for GCP
+                    add-apt-repository ppa:graphics-drivers/ppa -y
+                    NVIDIA_PKGS="nvidia-driver-550-server nvidia-container-toolkit"
+                fi
+                FRACTIONAL_GPU_DRIVER="gcp-grid"
+                ;;
+            azure)
+                # Azure fractional GPUs: use NVIDIA GRID drivers for NVv4 and NVadsA10_v5 series
+                # Azure provides NVIDIA drivers via extensions, but we install manually for consistency
+                if ! (command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1); then
+                    add-apt-repository ppa:graphics-drivers/ppa -y
+                    # Azure NVadsA10_v5 uses A10 GPUs, use open driver
+                    NVIDIA_PKGS="nvidia-driver-550-open nvidia-container-toolkit"
+                fi
+                FRACTIONAL_GPU_DRIVER="azure-grid"
+                ;;
+            alicloud)
+                # Alibaba Cloud fractional GPUs: handled by acs-plugin-manager below
+                # Fall through to standard Alibaba handling
+                ;;
+            *)
+                # Other vendors: use standard driver detection
+                # Fall through to standard detection logic
+                ;;
+        esac
+    fi
+    
     # driver: use Alibaba acs-plugin-manager for eligible instance types, else nvidia PPA
-    if [ "{VENDOR}" = "alicloud" ] && command -v acs-plugin-manager >/dev/null 2>&1; then
+    if [ -z "$FRACTIONAL_GPU_DRIVER" ] && [ "{VENDOR}" = "alicloud" ] && command -v acs-plugin-manager >/dev/null 2>&1; then
         case "{INSTANCE}" in
             *sgn7i-vws*) PLUGIN="grid_driver_install" ;;
             *sgn8ia*)    PLUGIN="gpu_grid_driver_install" ;;
@@ -41,28 +102,31 @@ if [ "{GPU_COUNT}" != "0" ] && [ "{GPU_COUNT}" != "0.0" ]; then
         fi
     fi
     
-    # Detect GPU architecture and select appropriate driver
-    if [ -z "$NVIDIA_PKGS" ]; then
-        add-apt-repository ppa:graphics-drivers/ppa -y
-        
-        # Detect GPU using lshw (more reliable than lspci for product names)
-        # Default to open driver for modern GPUs (Turing+, Ada, Hopper, Blackwell)
-        # Open driver is required for Blackwell/Grace Hopper and recommended for Ada/Hopper/Ampere/Turing
-        DRIVER_VARIANT="open"
-        
-        # Check if lshw and jq are available and get GPU info
-        if command -v lshw >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-            # Get NVIDIA GPU product names from lshw JSON output using jq
-            GPU_INFO=$(lshw -c display -json 2>/dev/null | jq -r '.. | objects | select(.vendor? == "NVIDIA Corporation") | .product' 2>/dev/null || echo "")
+    # Detect GPU architecture and select appropriate driver (only if not using fractional GPU driver)
+    if [ -z "$FRACTIONAL_GPU_DRIVER" ]; then
+        # Only proceed if NVIDIA_PKGS hasn't been set by Alibaba plugin or other means
+        if [ -z "$NVIDIA_PKGS" ]; then
+            add-apt-repository ppa:graphics-drivers/ppa -y
             
-            # Check for older architectures that need proprietary server driver
-            # Volta (GV1xx, V100, V100S), Pascal (GP1xx, P100, P40, P4), Maxwell (GM1xx, M60, M40), Kepler (GK1xx, K80, K40)
-            if echo "$GPU_INFO" | grep -qiE 'GV1[0-9]{{2}}|V100S?|GP1[0-9]{{2}}|P[146]0|GM1[0-9]{{2}}|M[46]0|GK1[0-9]{{2}}|K[248]0'; then
-                DRIVER_VARIANT="server"
+            # Detect GPU using lshw (more reliable than lspci for product names)
+            # Default to open driver for modern GPUs (Turing+, Ada, Hopper, Blackwell)
+            # Open driver is required for Blackwell/Grace Hopper and recommended for Ada/Hopper/Ampere/Turing
+            DRIVER_VARIANT="open"
+            
+            # Check if lshw and jq are available and get GPU info
+            if command -v lshw >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+                # Get NVIDIA GPU product names from lshw JSON output using jq
+                GPU_INFO=$(lshw -c display -json 2>/dev/null | jq -r '.. | objects | select(.vendor? == "NVIDIA Corporation") | .product' 2>/dev/null || echo "")
+                
+                # Check for older architectures that need proprietary server driver
+                # Volta (GV1xx, V100, V100S), Pascal (GP1xx, P100, P40, P4), Maxwell (GM1xx, M60, M40), Kepler (GK1xx, K80, K40)
+                if echo "$GPU_INFO" | grep -qiE 'GV1[0-9]{{2}}|V100S?|GP1[0-9]{{2}}|P[146]0|GM1[0-9]{{2}}|M[46]0|GK1[0-9]{{2}}|K[248]0'; then
+                    DRIVER_VARIANT="server"
+                fi
             fi
+            
+            NVIDIA_PKGS="nvidia-driver-590-$DRIVER_VARIANT nvidia-container-toolkit"
         fi
-        
-        NVIDIA_PKGS="nvidia-driver-590-$DRIVER_VARIANT nvidia-container-toolkit"
     fi
 fi
 apt-get update -y >> /tmp/output 2>&1
