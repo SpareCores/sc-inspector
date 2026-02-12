@@ -1,5 +1,8 @@
 #!/bin/sh
 
+# Redirect all output to /tmp/output for debugging
+exec >> /tmp/output 2>&1
+
 # just to be sure, schedule a shutdown early
 shutdown --no-wall +{SHUTDOWN_MINS}
 
@@ -129,8 +132,8 @@ if [ "{GPU_COUNT}" != "0" ] && [ "{GPU_COUNT}" != "0.0" ]; then
         fi
     fi
 fi
-apt-get update -y >> /tmp/output 2>&1
-apt-get install -y $NVIDIA_PKGS docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin openssh-client >> /tmp/output 2>&1
+apt-get update -y
+apt-get install -y $NVIDIA_PKGS docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin openssh-client
 # install Alibaba GPU driver via acs-plugin-manager when applicable (never fail the script)
 if [ -n "$ALIYUN_DRIVER_PLUGIN" ]; then
     acs-plugin-manager --remove --plugin "$ALIYUN_DRIVER_PLUGIN" >/dev/null 2>&1 || true
@@ -142,26 +145,26 @@ mkdir -p /root/.ssh
 chmod 700 /root/.ssh
 echo "{SSH_DEPLOY_KEY_B64}" | base64 -d > /root/.ssh/id_rsa
 chmod 600 /root/.ssh/id_rsa
-ssh-keyscan github.com >> /root/.ssh/known_hosts 2>>/tmp/output
+ssh-keyscan github.com >> /root/.ssh/known_hosts
 # stop some services to preserve memory and reduce interference with benchmarks
-snap stop amazon-ssm-agent >> /tmp/output 2>&1
+snap stop amazon-ssm-agent
 systemctl stop chrony acpid fwupd cron multipathd snapd systemd-timedated google-osconfig-agent google-guest-agent \
     networkd-dispatcher unattended-upgrades polkit packagekit systemd-udevd hv-kvp-daemon.service \
     cloud-init cloud-config cloud-final cloud-init-local \
-    aegis aliyun AssistDaemon tuned rsyslog >> /tmp/output 2>&1
-systemctl disable aegis aliyun AssistDaemon tuned rsyslog >> /tmp/output 2>&1
+    aegis aliyun AssistDaemon tuned rsyslog
+systemctl disable aegis aliyun AssistDaemon tuned rsyslog
 # stop Alicloud aegis security agent processes directly (they may respawn)
-pkill -9 -f AliYunDun >> /tmp/output 2>&1
-pkill -9 -f aegis >> /tmp/output 2>&1
-pkill -9 -f aliyun-service >> /tmp/output 2>&1
-pkill -9 -f assist_daemon >> /tmp/output 2>&1
+pkill -9 -f AliYunDun
+pkill -9 -f aegis
+pkill -9 -f aliyun-service
+pkill -9 -f assist_daemon
 # disable motd-news (makes network calls on login)
 sed -i 's/ENABLED=1/ENABLED=0/' /etc/default/motd-news 2>/dev/null
 chmod -x /etc/update-motd.d/* 2>/dev/null
 # remove unwanted packages
 apt-get autoremove -y $(dpkg-query -W -f='${{Package}}\n' \
     apport fwupd unattended-upgrades snapd packagekit \
-    walinuxagent google-osconfig-agent 2>/dev/null) >> /tmp/output 2>&1
+    walinuxagent google-osconfig-agent 2>/dev/null)
 # https://github.com/NVIDIA/nvidia-container-toolkit/issues/202
 # on some machines docker initialization times out with a lot of GPUs. Enable persistence mode to overcome that.
 nvidia-smi -pm 1
@@ -171,5 +174,5 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e GITHUB_REPOSITORY={GITHUB_REPOSITORY} \
     -e GITHUB_RUN_ID={GITHUB_RUN_ID} \
     -e BENCHMARK_SECRETS_PASSPHRASE={BENCHMARK_SECRETS_PASSPHRASE} \
-    ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT} >> /tmp/output 2>&1
+    ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT}
 poweroff
