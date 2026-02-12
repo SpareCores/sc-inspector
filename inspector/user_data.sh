@@ -57,14 +57,46 @@ if [ "{GPU_COUNT}" != "0" ] && [ "{GPU_COUNT}" != "0.0" ]; then
                 NVIDIA_PKGS="nvidia-container-toolkit"
                 ;;
             azure)
-                # Azure fractional GPUs: use NVIDIA GRID drivers for NVv4 and NVadsA10_v5 series
-                # Azure provides NVIDIA drivers via extensions, but we install manually for consistency
-                if ! (command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1); then
-                    add-apt-repository ppa:graphics-drivers/ppa -y
-                    # Azure NVadsA10_v5 uses A10 GPUs, use open driver
-                    NVIDIA_PKGS="nvidia-driver-550-open nvidia-container-toolkit"
-                fi
-                FRACTIONAL_GPU_DRIVER="azure-grid"
+                # Azure fractional GPUs: use NVIDIA GRID drivers for NV-series instances
+                # Reference: https://learn.microsoft.com/en-us/azure/virtual-machines/linux/n-series-driver-setup
+                # Fractional GPU instances: NV4as_v4, NV8as_v4, NV16as_v4, NV6s_v2, NV4ads_V710_v5, NV8ads_V710_v5, 
+                # NV12ads_V710_v5, NV6ads_A10_v5, NV12ads_A10_v5, NV18ads_A10_v5
+                case "{INSTANCE}" in
+                    *NV*as_v4|*NV*s_v2|*NV*ads_V710_v5|*NV*ads_A10_v5)
+                        # Install GRID driver for NV-series fractional GPU instances
+                        # Install build essentials and kernel headers
+                        apt-get install -y build-essential linux-azure
+                        
+                        # Disable nouveau driver (incompatible with NVIDIA)
+                        cat > /etc/modprobe.d/nouveau.conf <<EOF
+blacklist nouveau
+blacklist lbm-nouveau
+EOF
+                        # Download and install GRID driver from Microsoft
+                        wget -O /tmp/NVIDIA-Linux-x86_64-grid.run https://go.microsoft.com/fwlink/?linkid=874272
+                        chmod +x /tmp/NVIDIA-Linux-x86_64-grid.run
+                        /tmp/NVIDIA-Linux-x86_64-grid.run -s --no-drm
+                        
+                        # Configure GRID licensing
+                        if [ -f /etc/nvidia/gridd.conf.template ]; then
+                            cp /etc/nvidia/gridd.conf.template /etc/nvidia/gridd.conf
+                            # Add required configuration
+                            if ! grep -q "IgnoreSP=FALSE" /etc/nvidia/gridd.conf; then
+                                echo "IgnoreSP=FALSE" >> /etc/nvidia/gridd.conf
+                            fi
+                            if ! grep -q "EnableUI=FALSE" /etc/nvidia/gridd.conf; then
+                                echo "EnableUI=FALSE" >> /etc/nvidia/gridd.conf
+                            fi
+                            # Remove FeatureType if present
+                            sed -i '/^FeatureType=0/d' /etc/nvidia/gridd.conf
+                        fi
+                        FRACTIONAL_GPU_DRIVER="azure-grid"
+                        NVIDIA_PKGS="nvidia-container-toolkit"
+                        ;;
+                    *)
+                        # Non-GRID instances: use standard driver detection
+                        ;;
+                esac
                 ;;
             alicloud)
                 # Alibaba Cloud fractional GPUs: handled by acs-plugin-manager below
