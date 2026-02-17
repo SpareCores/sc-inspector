@@ -13,6 +13,7 @@ GPU_EXCLUDE = {
     ("aws", "p2.8xlarge"),
     ("aws", "p2.xlarge"),
     ("aws", "p4d.24xlarge"),
+    ("aws", "g3s.xlarge"),
     ("gcp", "a2-megagpu-16g"),
 }
 
@@ -253,7 +254,7 @@ nvidia_smi = DockerTask(
     # we have to adapt to the oldest supported CUDA version
     image="nvidia/cuda:11.4.3-base-ubuntu20.04",
     gpu=True,
-    # servers_exclude=GPU_EXCLUDE,
+    servers_exclude=GPU_EXCLUDE,
     version_command="bash -c \"nvidia-smi -h | head -1 | egrep -o 'v[0-9.]+'\"",
     command="nvidia-smi -q -x",
     precheck_command="lshw -C display -json | jq -r '.[].vendor'",
