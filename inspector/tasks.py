@@ -4,7 +4,7 @@ from datetime import timedelta
 import parse
 import psutil
 import transform
-from lib import DOCKER_OPTS, DockerTask
+from lib import DOCKER_OPTS, DockerTask, META_NAME
 
 STRESSNG_TAG = "b7c7a5877501679a3b0a67d877e6274a801d1e4e"  # V0.17.08
 GPU_EXCLUDE = {
@@ -23,39 +23,57 @@ class DynamicServerSet:
     """
     A set-like object that allows dynamic inclusion of all instances for a specific vendor
     while maintaining a static list for other vendors.
-    
-    Compatible with tuple-based lookups: (vendor, instance_type) in set
+
+    When include_fresh_servers=True, also includes servers that don't yet have
+    dmidecode/meta.json in the repo (newly introduced instance types under evaluation).
+    Use contains(vendor, instance, data_dir) with data_dir for fresh-server detection.
     """
-    def __init__(self, static_servers, enable_vendors=None):
+    def __init__(self, static_servers, enable_vendors=None, include_fresh_servers=False):
         """
         :param static_servers: Set of (vendor, instance_type) tuples for static inclusion
         :param enable_vendors: Set of vendor names that should match all instances
+        :param include_fresh_servers: If True, include servers without dmidecode/meta.json
         """
         self.static_servers = static_servers
         self.enable_vendors = enable_vendors or set()
-    
+        self.include_fresh_servers = include_fresh_servers
+
+    def contains(self, vendor, instance, data_dir=None):
+        """
+        Check if (vendor, instance) is in the set.
+        When include_fresh_servers=True and data_dir is provided, also returns True
+        for servers that don't have dmidecode/meta.json yet (fresh/newly introduced).
+        """
+        if (vendor, instance) in self.static_servers:
+            return True
+        if vendor in self.enable_vendors:
+            return True
+        if self.include_fresh_servers and data_dir:
+            dmidecode_meta = os.path.join(data_dir, "dmidecode", META_NAME)
+            if not os.path.exists(dmidecode_meta):
+                return True  # fresh server, no dmidecode output yet
+        return False
+
     def __contains__(self, item):
         """
         Check if (vendor, instance_type) is in the set.
-        Returns True for all instances of enabled vendors, or if in static_servers.
+        For fresh-server detection, use contains(vendor, instance, data_dir).
         """
         if not isinstance(item, tuple) or len(item) != 2:
             return False
         vendor, instance = item
-        # If vendor is in enable_vendors, allow all instances
         if vendor in self.enable_vendors:
             return True
-        # Otherwise, check static list
         return item in self.static_servers
-    
+
     def __bool__(self):
         """Return True if there are any static servers or enabled vendors"""
         return bool(self.static_servers) or bool(self.enable_vendors)
-    
+
     def __iter__(self):
         """Iterate over static servers"""
         return iter(self.static_servers)
-    
+
     def __len__(self):
         """Return length of static servers (for compatibility)"""
         return len(self.static_servers)
@@ -174,6 +192,7 @@ RUN_NEW_TASKS_ON_SERVERS = DynamicServerSet(
         ("aws", "p6-b300.48xlarge"),
     },
     enable_vendors={"alicloud"},
+    include_fresh_servers=True,  # also include servers without dmidecode/meta.json (newly introduced)
 )
 
 # get the amount of available memory

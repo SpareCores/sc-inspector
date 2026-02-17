@@ -151,6 +151,13 @@ def get_tasks(vendor: str) -> list[Task]:
     return list(chain(*taskgroups.values()))
 
 
+def _server_in_servers_only(servers_only, vendor, instance, data_dir=None):
+    """Check if (vendor, instance) is in servers_only. For DynamicServerSet with include_fresh, pass data_dir."""
+    if hasattr(servers_only, "contains"):
+        return servers_only.contains(vendor, instance, data_dir)
+    return (vendor, instance) in servers_only
+
+
 def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
     """Return True if we should start a server for this task."""
     meta = load_task_meta(task, data_dir)
@@ -167,7 +174,7 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
         mem_gib = srv.memory_amount / 1024
         logging.info(f"Skipping task {task.name} because it requires {task.minimum_memory} GiB RAM, but this machine has only {mem_gib:.03}")
         return False
-    if task.servers_only and (srv.vendor_id, srv.api_reference) not in task.servers_only:
+    if task.servers_only and not _server_in_servers_only(task.servers_only, srv.vendor_id, srv.api_reference, data_dir):
         logging.info(f"Skipping task {task.name} because it is not enabled for {srv.vendor_id}/{srv.api_reference}")
         return False
     if task.servers_exclude and (srv.vendor_id, srv.api_reference) in task.servers_exclude:
@@ -229,7 +236,7 @@ def should_run(task: Task, data_dir: str | os.PathLike, vendor: str, instance: s
         logging.info(f"Skipping task {task.name} because it requires GPU, but gpu_count is {gpu_count}")
         # skip tasks which require GPUs on a server which doesn't have one
         return False
-    if task.servers_only and (vendor, instance) not in task.servers_only:
+    if task.servers_only and not _server_in_servers_only(task.servers_only, vendor, instance, data_dir):
         logging.info(f"Skipping task {task.name} because it is not enabled for {vendor}/{instance}")
         return False
     if task.servers_exclude and (vendor, instance) in task.servers_exclude:
@@ -457,11 +464,11 @@ def get_last_start(data_dir, vendor, server):
     if not tasks:
         # if there are no tasks, return a low value which can be used as a sort key
         return datetime.min
+    server_data_dir = os.path.join(data_dir, vendor, server)
     tasks = [task for task in tasks
-             if not (task.servers_only and (vendor, server) not in task.servers_only) and
+             if not (task.servers_only and not _server_in_servers_only(task.servers_only, vendor, server, server_data_dir)) and
              not (task.servers_exclude and (vendor, server) in task.servers_exclude)]
-    data_dir = os.path.join(data_dir, vendor, server)
-    meta_starts = [load_task_meta(task, data_dir=data_dir).start for task in tasks]
+    meta_starts = [load_task_meta(task, data_dir=server_data_dir).start for task in tasks]
     meta_starts = [start for start in meta_starts if start]
     if not meta_starts:
         # put it to the back
