@@ -1,7 +1,7 @@
 #!/bin/sh -x
 
-# Redirect all output to /tmp/output for debugging
-exec >> /tmp/output 2>&1
+# Redirect all output to /var/log/user_data.log for debugging
+exec >> /var/log/user_data.log 2>&1
 
 # just to be sure, schedule a shutdown early
 shutdown --no-wall +{SHUTDOWN_MINS}
