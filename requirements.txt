@@ -9,6 +9,6 @@ psutil
 requests
 sparecores-crawler
 sparecores-data
-sparecores-runner>=0.0.38
+sparecores-runner>=0.0.40
 sqlmodel
 wrapt
