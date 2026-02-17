@@ -8,6 +8,8 @@ from lib import DOCKER_OPTS, DockerTask
 
 STRESSNG_TAG = "b7c7a5877501679a3b0a67d877e6274a801d1e4e"  # V0.17.08
 GPU_EXCLUDE = {
+    ("aws", "g3.4xlarge"),
+    ("aws", "g3.8xlarge"),
     ("aws", "g3.16xlarge"),
     ("aws", "g4dn.metal"),
     ("aws", "p2.8xlarge"),
