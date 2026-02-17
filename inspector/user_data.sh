@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -x
 
 # Redirect all output to /tmp/output for debugging
 exec >> /tmp/output 2>&1
