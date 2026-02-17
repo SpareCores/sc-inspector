@@ -130,6 +130,7 @@ EOF
             # Default to open driver for modern GPUs (Turing+, Ada, Hopper, Blackwell)
             # Open driver is required for Blackwell/Grace Hopper and recommended for Ada/Hopper/Ampere/Turing
             DRIVER_VARIANT="open"
+            DRIVER_VERSION="590"
             
             # Check if lshw and jq are available and get GPU info
             if command -v lshw >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
@@ -140,10 +141,11 @@ EOF
                 # Volta (GV1xx, V100, V100S), Pascal (GP1xx, P100, P40, P4), Maxwell (GM1xx, M60, M40), Kepler (GK1xx, K80, K40)
                 if echo "$GPU_INFO" | grep -qiE 'GV1[0-9]{{2}}|V100S?|GP1[0-9]{{2}}|P[146]0|GM1[0-9]{{2}}|M[46]0|GK1[0-9]{{2}}|K[248]0'; then
                     DRIVER_VARIANT="server"
+                    DRIVER_VERSION="580"
                 fi
             fi
             
-            NVIDIA_PKGS="nvidia-driver-590-$DRIVER_VARIANT nvidia-container-toolkit"
+            NVIDIA_PKGS="nvidia-driver-$DRIVER_VERSION-$DRIVER_VARIANT nvidia-container-toolkit"
         fi
     fi
 fi
