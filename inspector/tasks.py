@@ -419,7 +419,7 @@ nvbandwidth = DockerTask(
     command="nvbandwidth -j",
     precheck_command="lshw -C display -json | jq -r '.[].vendor'",
     precheck_regex="nvidia",
-    timeout=timedelta(minutes=15),
+    timeout=timedelta(minutes=30),
 )
 
 passmark = DockerTask(
