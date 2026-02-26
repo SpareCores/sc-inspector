@@ -4,7 +4,7 @@ from functools import cache
 from itertools import chain
 from pydantic import BaseModel
 from queue import Queue
-from typing import Callable
+from typing import Any, Callable
 import base64
 import copy
 import docker
@@ -79,7 +79,8 @@ class Meta(BaseModel):
 
 class Task(BaseModel):
     vendors_only: set = set()  # run for these vendors only, empty means all
-    servers_only: set[tuple] = set()  # run for these vendor/server pairs only, empty means all
+    # Any first so DynamicServerSet is kept as-is (Pydantic would coerce it to set via __iter__, losing enable_vendors)
+    servers_only: Any | set[tuple] = set()  # run for these vendor/server pairs only, empty means all
     servers_exclude: set[tuple] = set()  # exclude these servers
     parallel: bool = False  # should we run this task concurrently with other tasks in the same priority group?
     priority: int | float = math.inf  # lower priority runs earlier, missing means last
