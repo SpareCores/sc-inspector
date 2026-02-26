@@ -363,7 +363,8 @@ geekbench = DockerTask(
         memswap_limit=int(mem_bytes * 0.85),
         mem_swappiness=0,
     ),
-    minimum_memory=1.1,
+    # geekbench struggles and give truncated results with less than 2GB of memory
+    minimum_memory=2.1,
     transform_output=[transform.raw, transform.fetch_geekbench_results],
     command="nice -n -20 geekbench.sh",
     timeout=timedelta(hours=1),
