@@ -468,4 +468,7 @@ membench = DockerTask(
     servers_only=RUN_NEW_TASKS_ON_SERVERS,
     version_command="-V",
     minimum_memory=0.9,
+    exclude_servers={
+        ("ovh", "r3-128"),
+    },
 )
