@@ -34,9 +34,11 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S"
 )
 lib.logging = logging
-# We can't (yet) start these
 EXCLUDE_INSTANCES: list[tuple[str, str]] = [
-    ("aws", "t3.nano"),  # the currently used software stack doesn't fit onto this instance
+    # too small memory instances
+    ("aws", "t3.nano"),
+    ("gcp", "f1-micro"),
+    # we can't (yet) start these
     ("aws", "f2.48xlarge"),
     ("aws", "p4de.24xlarge"),
     ("aws", "p5.4xlarge"),
