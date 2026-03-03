@@ -7,6 +7,7 @@ import transform
 from lib import DOCKER_OPTS, DockerTask, META_NAME
 
 STRESSNG_TAG = "b7c7a5877501679a3b0a67d877e6274a801d1e4e"  # V0.17.08
+
 GPU_EXCLUDE = {
     ("aws", "g3.4xlarge"),
     ("aws", "g3.8xlarge"),
@@ -308,6 +309,20 @@ stressngfull = DockerTask(
     version_command="-c \"stress-ng --version | awk '{print $3}'\"",
     command=r"""-c 'for ncpu in $(awk -f /usr/local/bin/count.awk $(nproc)); do echo -n "$ncpu,"; nice -n -20 stress-ng --metrics --cpu $ncpu --cpu-method div16 -t 10 | egrep "metrc.*cpu" | awk "{print \$9}"; done'""",
     timeout=timedelta(minutes=30),
+)
+
+# Self-contained stress-ng benchmarks (no network, no disk writes). JSON output.
+# Runner runs each stressor with --metrics, parses bogo ops/s, emits one JSON; failed stressors → None.
+stressng_benchmarks = DockerTask(
+    parallel=False,
+    priority=2,
+    image="ghcr.io/sparecores/stress-ng:main",
+    docker_opts=DOCKER_OPTS | dict(entrypoint="sh"),
+    version_docker_opts=dict(entrypoint="sh"),
+    version_command="-c \"stress-ng --version | awk '{print $3}'\"",
+    command="-c 'nice -n -20 python3 /usr/local/bin/run_stressng_benchmarks.py'",
+    timeout=timedelta(minutes=20),
+    servers_only=RUN_NEW_TASKS_ON_SERVERS,
 )
 
 # An extended version of the multicore StressNg task: running
