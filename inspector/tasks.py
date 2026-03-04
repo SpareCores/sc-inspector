@@ -89,6 +89,7 @@ RUN_NEW_TASKS_ON_SERVERS = DynamicServerSet(
         ("gcp", "c2d-highmem-32"),
         ("hcloud", "ccx53"),
         ("ovh", "r3-256"),
+        ("alicloud", "ecs.r8ae.8xlarge"),
         # ("aws", "t3.nano"),
         # ("aws", "t3a.nano"),
         # ("aws", "i7ie.48xlarge"),
