@@ -381,9 +381,6 @@ def start(ctx, exclude, start_only, vendor):
         if vnd == "alicloud" and server not in alicloud_servers:
             logging.info(f"Excluding {vnd}/{server}")
             continue
-        if vnd == "azure" and server != "Standard_L32aos_v4":
-            logging.info(f"Excluding {vnd}/{server}")
-            continue
         if vnd not in supported_vendors:
             # sc-runner can't yet handle this vendor
             continue
