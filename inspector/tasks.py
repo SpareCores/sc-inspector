@@ -231,7 +231,7 @@ lshw = DockerTask(
 )
 
 lsblk = DockerTask(
-    parallel=True,
+    parallel=False,
     priority=0,
     image="ghcr.io/sparecores/hwinfo:main",
     version_command="lsblk -V",
@@ -241,7 +241,7 @@ lsblk = DockerTask(
 )
 
 lsblk_discard = DockerTask(
-    parallel=True,
+    parallel=False,
     priority=0,
     image="ghcr.io/sparecores/hwinfo:main",
     version_command="lsblk -V",
@@ -251,7 +251,7 @@ lsblk_discard = DockerTask(
 )
 
 lsblk_topo = DockerTask(
-    parallel=True,
+    parallel=False,
     priority=0,
     image="ghcr.io/sparecores/hwinfo:main",
     version_command="lsblk -V",
