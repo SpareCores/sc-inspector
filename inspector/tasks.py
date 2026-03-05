@@ -197,8 +197,7 @@ RUN_NEW_TASKS_ON_SERVERS = DynamicServerSet(
         # ("aws", "p6-b200.48xlarge"),
         # ("aws", "p6-b300.48xlarge"),
     },
-    # enable_vendors={"alicloud", "gcp", "hcloud", "ovh", "upcloud"},
-    enable_vendors={},
+    enable_vendors={"alicloud", "gcp", "hcloud", "ovh", "upcloud"},
     include_fresh_servers=True,  # also include servers without dmidecode/meta.json (newly introduced)
 )
 
