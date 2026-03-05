@@ -407,7 +407,7 @@ def start(ctx, exclude, start_only, vendor):
         futures[f] = (vnd, server)
         count += 1
         # upcloud: run more loops; other vendors: run 1 (avoid quota issues)
-        limit = 8 if vnd == "upcloud" else 1
+        limit = 2 if vnd == "upcloud" else 1
         if count == limit:
             break
     for f in concurrent.futures.as_completed(futures):
