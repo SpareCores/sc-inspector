@@ -4,6 +4,7 @@ import logging
 import os
 import psutil
 import subprocess
+import time
 from urllib.parse import urlparse, urlunparse
 from wrapt import synchronized
 
@@ -144,11 +145,30 @@ def push_path(path: str | os.PathLike, msg: str):
             run_git_command(['add', path], cwd=repo_path)
             logging.info("Committing changes...")
             run_git_command(['commit', '-m', msg], cwd=repo_path)
-            logging.info("Pulling with rebase...")
-            run_git_command(['pull', '--rebase', 'origin'], cwd=repo_path)
-            logging.info("Pushing to origin...")
-            run_git_command(['push', 'origin'], cwd=repo_path)
-            logging.info(f"Successfully pushed changes to git: {msg}")
+            # Retry push with exponential backoff (remote ref may have moved; pull --rebase and retry)
+            deadline = time.monotonic() + 10 * 60  # 10 minutes total
+            wait_sec = 5  # initial backoff in seconds
+            max_wait_per_round = 2 * 60  # cap 2 minutes per round
+            attempt = 0
+            while True:
+                try:
+                    if attempt > 0:
+                        sleep_sec = min(wait_sec, max_wait_per_round)
+                        logging.info(f"Retry attempt {attempt}: waiting {sleep_sec}s then pull --rebase and push")
+                        time.sleep(sleep_sec)
+                        wait_sec = min(wait_sec * 2, max_wait_per_round)
+                    logging.info("Pulling with rebase...")
+                    run_git_command(['pull', '--rebase', 'origin'], cwd=repo_path)
+                    logging.info("Pushing to origin...")
+                    run_git_command(['push', 'origin'], cwd=repo_path)
+                    logging.info(f"Successfully pushed changes to git: {msg}")
+                    break
+                except subprocess.CalledProcessError as e:
+                    attempt += 1
+                    if time.monotonic() >= deadline:
+                        logging.error("Push failed after retries (10 min deadline)")
+                        raise
+                    logging.warning(f"Push failed (attempt {attempt}), will retry with backoff: {e}")
         else:
             logging.info("No changes detected, skipping git operations")
     except Exception as e:
