@@ -409,7 +409,7 @@ def start(ctx, exclude, start_only, vendor):
         # number of servers to start at a time: best to leave this at 1 to avoid quota issues,
         # but can be increased temporarily if needed to run a new benchmark on all servers faster
         # (although you will have to delete the failed tasks' meta.json and retry with count=1)
-        if count == 1:
+        if vnd not in {"upcloud"} and count == 1:
             break
     for f in concurrent.futures.as_completed(futures):
         vendor, server = futures[f]
