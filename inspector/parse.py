@@ -220,7 +220,7 @@ def style_lstopo_svg_file(svg_content):
         "secondary": {"fill": "#0c4a6e", "text": "#ffffff"},
         "inverse": {"fill": "#ffffff", "text": "#082f49"},
     }
-    THEME = {
+    THEMES = {
         "Machine": "primary",
         "Package": "primary",
         "NUMANode": "secondary",
@@ -238,6 +238,32 @@ def style_lstopo_svg_file(svg_content):
         "Block": "primary",
         "Misc": "primary",
     }
+    # tag/class mapping for descriptions
+    DESCRIPTIONS = {
+        "HostBridge": {
+            "rect": "Host bridge",
+            "text": "Host bridge speed",
+        },
+        "PCIBridge": {
+            "rect": "PCI bridge",
+            "text": "PCI bridge speed",
+        },
+        "L1i": {
+            "rect": "CPU Level 1 (L1) instruction cache",
+        },
+        "L1d": {
+            "rect": "CPU Level 1 (L1) data cache",
+        },
+        "L2": {
+            "rect": "CPU Level 2 (L2) cache",
+        },
+        "L3": {
+            "rect": "CPU Level 3 (L3) cache",
+        },
+        "PU": {
+            "rect": "Processing unit",
+        },
+    }
     for elem in root.iter():
         tag = elem.tag
         # drop namespace prefix if present
@@ -250,13 +276,17 @@ def style_lstopo_svg_file(svg_content):
         if tag == "text":
             elem.set("font-family", FONT_STACK)
         # apply theme colors if applicable
-        theme = THEME.get(elem.get("class", ""))
+        theme = THEMES.get(elem.get("class", ""))
         if theme:
             palette = PALETTES[theme]
             if tag == "rect":
                 elem.set("fill", palette["fill"])
             elif tag == "text":
                 elem.set("fill", palette["text"])
+        # apply description if applicable
+        description = DESCRIPTIONS.get(elem.get("class", ""), {}).get(tag, "")
+        if description:
+            elem.set("data-description", description)
 
     # extra stylesheet injection on the top for hover effects
     style = ET.Element("style")
