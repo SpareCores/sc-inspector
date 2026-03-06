@@ -206,6 +206,70 @@ def stressnglongrun(meta, task, task_dir) -> None:
             csvfile.writerow([date + "T" + time, duration, value])
 
 
+def style_lstopo_svg_file(svg_content):
+    """Apply Spare Cores color scheme to the lstopo SVG file."""
+    import xml.etree.ElementTree as ET
+
+    ET.register_namespace("", "http://www.w3.org/2000/svg")
+    root = ET.fromstring(svg_content)
+
+    THEME = {
+        "Machine": {"fill": "#082f49", "text": "#ffffff"},
+        "Package": {"fill": "#082f49", "text": "#ffffff"},
+        "NUMANode": {"fill": "#0c4a6e", "text": "#ffffff"},
+        "Die": {"fill": "#0c4a6e", "text": "#ffffff"},
+        "Core": {"fill": "#082f49", "text": "#ffffff"},
+        "PU": {"fill": "#ffffff", "text": "#082f49"},
+        "L1d": {"fill": "#082f49", "text": "#ffffff"},
+        "L1i": {"fill": "#082f49", "text": "#ffffff"},
+        "L2": {"fill": "#082f49", "text": "#ffffff"},
+        "L3": {"fill": "#082f49", "text": "#ffffff"},
+        "PCIBridge": {"fill": "#082f49", "text": "#ffffff"},
+        "HostBridge": {"fill": "#082f49", "text": "#ffffff"},
+        "PCI": {"fill": "#0c4a6e", "text": "#ffffff"},
+        "Net": {"fill": "#082f49", "text": "#ffffff"},
+        "Block": {"fill": "#082f49", "text": "#ffffff"},
+        "Misc": {"fill": "#082f49", "text": "#ffffff"},
+    }
+    STROKE_COLOR = "#34d399"
+    FONT_STACK = "ui-monospace, monospace"
+
+    for elem in root.iter():
+        tag = elem.tag
+        # drop namespace prefix if present
+        if isinstance(tag, str) and "}" in tag:
+            tag = tag.split("}", 1)[1]
+        cls = elem.get("class", "")
+
+        if tag in ["rect", "line"]:
+            elem.set("stroke", STROKE_COLOR)
+        target_style = None
+        if cls in THEME:
+            target_style = THEME[cls]
+        if target_style:
+            if tag == "rect":
+                elem.set("fill", target_style["fill"])
+            elif tag == "text":
+                elem.set("fill", target_style["text"])
+        if tag == "text":
+            elem.set("font-family", FONT_STACK)
+
+    # extra stylesheet injection on the top for hover effects
+    style = ET.Element("style")
+    style.text = f"""
+        text {{ pointer-events: none; font-family: {FONT_STACK}; }}
+        rect {{ transition: stroke-width 0.15s ease, filter 0.15s ease; }}
+        rect:hover {{
+            stroke: #a7f3d0;
+            stroke-width: 2;
+            filter: brightness(1.2);
+            cursor: pointer;
+        }}
+    """
+    root.insert(0, style)
+    return ET.tostring(root, encoding="unicode")
+
+
 def lstopo(meta, task, task_dir) -> None:
     """
     Convert lstopo XML output to SVG format.
@@ -236,5 +300,6 @@ def lstopo(meta, task, task_dir) -> None:
     )
     
     # Write SVG output to task_dir
+    svg_content = style_lstopo_svg_file(result.stdout)
     with open(svg_output_path, "w") as f:
-        f.write(result.stdout)
+        f.write(svg_content)
