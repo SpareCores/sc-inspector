@@ -213,46 +213,50 @@ def style_lstopo_svg_file(svg_content):
     ET.register_namespace("", "http://www.w3.org/2000/svg")
     root = ET.fromstring(svg_content)
 
-    THEME = {
-        "Machine": {"fill": "#082f49", "text": "#ffffff"},
-        "Package": {"fill": "#082f49", "text": "#ffffff"},
-        "NUMANode": {"fill": "#0c4a6e", "text": "#ffffff"},
-        "Die": {"fill": "#0c4a6e", "text": "#ffffff"},
-        "Core": {"fill": "#082f49", "text": "#ffffff"},
-        "PU": {"fill": "#ffffff", "text": "#082f49"},
-        "L1d": {"fill": "#082f49", "text": "#ffffff"},
-        "L1i": {"fill": "#082f49", "text": "#ffffff"},
-        "L2": {"fill": "#082f49", "text": "#ffffff"},
-        "L3": {"fill": "#082f49", "text": "#ffffff"},
-        "PCIBridge": {"fill": "#082f49", "text": "#ffffff"},
-        "HostBridge": {"fill": "#082f49", "text": "#ffffff"},
-        "PCI": {"fill": "#0c4a6e", "text": "#ffffff"},
-        "Net": {"fill": "#082f49", "text": "#ffffff"},
-        "Block": {"fill": "#082f49", "text": "#ffffff"},
-        "Misc": {"fill": "#082f49", "text": "#ffffff"},
-    }
     STROKE_COLOR = "#34d399"
     FONT_STACK = "ui-monospace, monospace"
-
+    PALETTES = {
+        "primary": {"fill": "#082f49", "text": "#ffffff"},
+        "secondary": {"fill": "#0c4a6e", "text": "#ffffff"},
+        "inverse": {"fill": "#ffffff", "text": "#082f49"},
+    }
+    THEME = {
+        "Machine": "primary",
+        "Package": "primary",
+        "NUMANode": "secondary",
+        "Die": "secondary",
+        "Core": "primary",
+        "PU": "inverse",
+        "L1d": "primary",
+        "L1i": "primary",
+        "L2": "primary",
+        "L3": "primary",
+        "PCIBridge": "primary",
+        "HostBridge": "primary",
+        "PCI": "secondary",
+        "Net": "primary",
+        "Block": "primary",
+        "Misc": "primary",
+    }
     for elem in root.iter():
         tag = elem.tag
         # drop namespace prefix if present
         if isinstance(tag, str) and "}" in tag:
             tag = tag.split("}", 1)[1]
-        cls = elem.get("class", "")
-
+        # always apply stroke color
         if tag in ["rect", "line"]:
             elem.set("stroke", STROKE_COLOR)
-        target_style = None
-        if cls in THEME:
-            target_style = THEME[cls]
-        if target_style:
-            if tag == "rect":
-                elem.set("fill", target_style["fill"])
-            elif tag == "text":
-                elem.set("fill", target_style["text"])
+        # always apply font family to text elements
         if tag == "text":
             elem.set("font-family", FONT_STACK)
+        # apply theme colors if applicable
+        theme = THEME.get(elem.get("class", ""))
+        if theme:
+            palette = PALETTES[theme]
+            if tag == "rect":
+                elem.set("fill", palette["fill"])
+            elif tag == "text":
+                elem.set("fill", palette["text"])
 
     # extra stylesheet injection on the top for hover effects
     style = ET.Element("style")
