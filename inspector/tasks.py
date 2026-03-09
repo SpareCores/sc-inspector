@@ -229,7 +229,7 @@ lsblk = DockerTask(
     priority=0,
     image="ghcr.io/sparecores/hwinfo:main",
     version_command="lsblk -V",
-    command="lsblk -Jdb",
+    command="lsblk -O -Jdb",
     timeout=timedelta(minutes=1),
     servers_only=RUN_NEW_TASKS_ON_SERVERS,
 )
