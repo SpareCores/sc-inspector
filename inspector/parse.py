@@ -206,6 +206,104 @@ def stressnglongrun(meta, task, task_dir) -> None:
             csvfile.writerow([date + "T" + time, duration, value])
 
 
+def style_lstopo_svg_file(svg_content):
+    """Apply Spare Cores color scheme to the lstopo SVG file."""
+    import xml.etree.ElementTree as ET
+
+    ET.register_namespace("", "http://www.w3.org/2000/svg")
+    root = ET.fromstring(svg_content)
+
+    STROKE_COLOR = "#34d399"
+    FONT_STACK = "ui-monospace, monospace"
+    PALETTES = {
+        "primary": {"fill": "#082f49", "text": "#ffffff"},
+        "secondary": {"fill": "#0c4a6e", "text": "#ffffff"},
+        "inverse": {"fill": "#ffffff", "text": "#082f49"},
+    }
+    THEMES = {
+        "Machine": "primary",
+        "Package": "primary",
+        "NUMANode": "secondary",
+        "Die": "secondary",
+        "Core": "primary",
+        "PU": "inverse",
+        "L1d": "primary",
+        "L1i": "primary",
+        "L2": "primary",
+        "L3": "primary",
+        "PCIBridge": "primary",
+        "HostBridge": "primary",
+        "PCI": "secondary",
+        "Net": "primary",
+        "Block": "primary",
+        "Misc": "primary",
+    }
+    # tag/class mapping for descriptions
+    DESCRIPTIONS = {
+        "HostBridge": {
+            "rect": "Host bridge",
+            "text": "Host bridge speed",
+        },
+        "PCIBridge": {
+            "rect": "PCI bridge",
+            "text": "PCI bridge speed",
+        },
+        "L1i": {
+            "rect": "CPU Level 1 (L1) instruction cache",
+        },
+        "L1d": {
+            "rect": "CPU Level 1 (L1) data cache",
+        },
+        "L2": {
+            "rect": "CPU Level 2 (L2) cache",
+        },
+        "L3": {
+            "rect": "CPU Level 3 (L3) cache",
+        },
+        "PU": {
+            "rect": "Processing unit",
+        },
+    }
+    for elem in root.iter():
+        tag = elem.tag
+        # drop namespace prefix if present
+        if isinstance(tag, str) and "}" in tag:
+            tag = tag.split("}", 1)[1]
+        # always apply stroke color
+        if tag in ["rect", "line"]:
+            elem.set("stroke", STROKE_COLOR)
+        # always apply font family to text elements
+        if tag == "text":
+            elem.set("font-family", FONT_STACK)
+        # apply theme colors if applicable
+        theme = THEMES.get(elem.get("class", ""))
+        if theme:
+            palette = PALETTES[theme]
+            if tag == "rect":
+                elem.set("fill", palette["fill"])
+            elif tag == "text":
+                elem.set("fill", palette["text"])
+        # apply description if applicable
+        description = DESCRIPTIONS.get(elem.get("class", ""), {}).get(tag, "")
+        if description:
+            elem.set("data-description", description)
+
+    # extra stylesheet injection on the top for hover effects
+    style = ET.Element("style")
+    style.text = f"""
+        text {{ pointer-events: none; font-family: {FONT_STACK}; }}
+        rect {{ transition: stroke-width 0.15s ease, filter 0.15s ease; }}
+        rect:hover {{
+            stroke: #a7f3d0;
+            stroke-width: 2;
+            filter: brightness(1.2);
+            cursor: pointer;
+        }}
+    """
+    root.insert(0, style)
+    return ET.tostring(root, encoding="unicode")
+
+
 def lstopo(meta, task, task_dir) -> None:
     """
     Convert lstopo XML output to SVG format.
@@ -236,5 +334,6 @@ def lstopo(meta, task, task_dir) -> None:
     )
     
     # Write SVG output to task_dir
+    svg_content = style_lstopo_svg_file(result.stdout)
     with open(svg_output_path, "w") as f:
-        f.write(result.stdout)
+        f.write(svg_content)
