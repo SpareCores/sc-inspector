@@ -6,6 +6,15 @@ exec >> /var/log/user_data.log 2>&1
 # just to be sure, schedule a shutdown early
 shutdown --no-wall +{SHUTDOWN_MINS}
 
+# Disable GCP workload certificate refresh job (prevents recurring systemd starts).
+# Do this early so it can't run during long package install steps below.
+systemctl stop gce-workload-cert-refresh.service 2>/dev/null || true
+systemctl disable gce-workload-cert-refresh.service 2>/dev/null || true
+systemctl mask gce-workload-cert-refresh.service 2>/dev/null || true
+# Some images schedule this via a timer unit.
+systemctl stop gce-workload-cert-refresh.timer 2>/dev/null || true
+systemctl disable gce-workload-cert-refresh.timer 2>/dev/null || true
+
 export DEBIAN_FRONTEND=noninteractive
 . /etc/os-release
 apt-get update -y
