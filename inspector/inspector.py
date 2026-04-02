@@ -285,6 +285,8 @@ EXCLUDE_INSTANCES: list[tuple[str, str]] = [
 ALICLOUD_INSPECTOR_EXCLUDED_COUNTRIES = frozenset({"CN", "HK"})
 ALICLOUD_INSPECTOR_BUDGET_USD = 1000.0
 ALICLOUD_INSPECTOR_HOURS = 3
+# ``sc_crawler`` stores RAM as MiB; require strictly more than 2 GiB.
+ALICLOUD_INSPECTOR_MIN_RAM_MIB = 2048
 
 
 @cache
@@ -293,12 +295,14 @@ def alicloud_inspector_allowlist() -> frozenset[str]:
 
     Reads the same SQLite database as ``available_servers`` (``sc_data.db.path``): per
     ``server_id``, minimum ACTIVE ONDEMAND hourly ``price`` among regions whose
-    ``country_id`` is not in ``ALICLOUD_INSPECTOR_EXCLUDED_COUNTRIES``; sort instances by
-    that price ascending; greedily include each instance once while the running sum of
-    ``price * ALICLOUD_INSPECTOR_HOURS`` stays at or below ``ALICLOUD_INSPECTOR_BUDGET_USD``.
+    ``country_id`` is not in ``ALICLOUD_INSPECTOR_EXCLUDED_COUNTRIES``; only instances
+    with ``memory_amount`` greater than ``ALICLOUD_INSPECTOR_MIN_RAM_MIB`` (MiB); sort
+    instances by that price ascending; greedily include each instance once while the
+    running sum of ``price * ALICLOUD_INSPECTOR_HOURS`` stays at or below
+    ``ALICLOUD_INSPECTOR_BUDGET_USD``.
     """
     from sqlalchemy import and_, func
-    from sc_crawler.tables import Region, ServerPrice
+    from sc_crawler.tables import Region, Server, ServerPrice
     from sqlmodel import Session, create_engine, select
 
     import sc_data
@@ -316,6 +320,13 @@ def alicloud_inspector_allowlist() -> frozenset[str]:
     stmt = (
         select(ServerPrice.server_id, min_price)
         .join(
+            Server,
+            and_(
+                Server.vendor_id == ServerPrice.vendor_id,
+                Server.server_id == ServerPrice.server_id,
+            ),
+        )
+        .join(
             Region,
             and_(
                 Region.vendor_id == ServerPrice.vendor_id,
@@ -323,6 +334,7 @@ def alicloud_inspector_allowlist() -> frozenset[str]:
             ),
         )
         .where(ServerPrice.vendor_id == "alicloud")
+        .where(Server.memory_amount > ALICLOUD_INSPECTOR_MIN_RAM_MIB)
         .where(ServerPrice.allocation == "ONDEMAND")
         .where(ServerPrice.status == "ACTIVE")
         .where(Region.country_id.not_in(excluded))
