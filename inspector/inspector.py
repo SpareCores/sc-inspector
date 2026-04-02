@@ -281,6 +281,69 @@ EXCLUDE_INSTANCES: list[tuple[str, str]] = [
     ("azure", "Standard_PB6s"),
 ]
 
+# AliCloud `start` allowlist: derived from sc-crawler schema via ``sc_data.db.path`` (see ``alicloud_inspector_allowlist``).
+ALICLOUD_INSPECTOR_EXCLUDED_COUNTRIES = frozenset({"CN", "HK"})
+ALICLOUD_INSPECTOR_BUDGET_USD = 1000.0
+ALICLOUD_INSPECTOR_HOURS = 3
+
+
+@cache
+def alicloud_inspector_allowlist() -> frozenset[str]:
+    """Return allowed AliCloud instance api_reference values for inspection.
+
+    Reads the same SQLite database as ``available_servers`` (``sc_data.db.path``): per
+    ``server_id``, minimum ACTIVE ONDEMAND hourly ``price`` among regions whose
+    ``country_id`` is not in ``ALICLOUD_INSPECTOR_EXCLUDED_COUNTRIES``; sort instances by
+    that price ascending; greedily include each instance once while the running sum of
+    ``price * ALICLOUD_INSPECTOR_HOURS`` stays at or below ``ALICLOUD_INSPECTOR_BUDGET_USD``.
+    """
+    from sqlalchemy import and_, func
+    from sc_crawler.tables import Region, ServerPrice
+    from sqlmodel import Session, create_engine, select
+
+    import sc_data
+
+    path = sc_data.db.path
+    if path is None or not os.path.isfile(path):
+        logging.warning(
+            "AliCloud inspector allowlist: sc_data DB not available (path=%r) — skipping all AliCloud instances",
+            path,
+        )
+        return frozenset()
+
+    excluded = tuple(ALICLOUD_INSPECTOR_EXCLUDED_COUNTRIES)
+    min_price = func.min(ServerPrice.price).label("min_hr")
+    stmt = (
+        select(ServerPrice.server_id, min_price)
+        .join(
+            Region,
+            and_(
+                Region.vendor_id == ServerPrice.vendor_id,
+                Region.region_id == ServerPrice.region_id,
+            ),
+        )
+        .where(ServerPrice.vendor_id == "alicloud")
+        .where(ServerPrice.allocation == "ONDEMAND")
+        .where(ServerPrice.status == "ACTIVE")
+        .where(Region.country_id.not_in(excluded))
+        .group_by(ServerPrice.server_id)
+        .order_by(min_price)
+    )
+    engine = create_engine(f"sqlite:///{path}")
+    with Session(engine) as session:
+        rows = session.exec(stmt).all()
+
+    total = 0.0
+    chosen: list[str] = []
+    budget = ALICLOUD_INSPECTOR_BUDGET_USD
+    hours = ALICLOUD_INSPECTOR_HOURS
+    for server_id, min_hr in rows:
+        cost = min_hr * hours
+        if total + cost <= budget:
+            chosen.append(server_id)
+            total += cost
+    return frozenset(chosen)
+
 
 @cache
 def get_regions(vendor: str):
@@ -370,15 +433,7 @@ def start(ctx, exclude, start_only, vendor):
     lock = threading.Lock()
     exception = None
     for (vnd, server), (srv_data, regions, zones, zone_to_region) in available_servers(vendor=vendor).items():
-        alicloud_servers = {
-            "ecs.t5-lc1m1.small",
-            "ecs.c6r.large",
-            "ecs.c6r.xlarge",
-            "ecs.c7a.large",
-            "ecs.sgn7i-vws-m2s.xlarge",
-            "ecs.r8ae.8xlarge",
-        }
-        if vnd == "alicloud" and server not in alicloud_servers:
+        if vnd == "alicloud" and server not in alicloud_inspector_allowlist():
             logging.info(f"Excluding {vnd}/{server}")
             continue
         if vnd not in supported_vendors:
