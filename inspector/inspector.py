@@ -473,8 +473,7 @@ def start(ctx, exclude, start_only, vendor):
         f = executor.submit(lib.start_inspect, executor, lock, data_dir, vnd, server, tasks, srv_data, regions, zones, zone_to_region)
         futures[f] = (vnd, server)
         count += 1
-        # upcloud: run more loops; other vendors: run 1 (avoid quota issues)
-        limit = 2 if vnd == "upcloud" else 1
+        limit = 8 if vnd == "alicloud" else 1
         if count == limit:
             break
     for f in concurrent.futures.as_completed(futures):
