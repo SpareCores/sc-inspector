@@ -53,6 +53,12 @@ PULUMI_ERRORS = {
     re.compile(r"The instanceType of the specified instance does not support this disk category"),
     re.compile(r"InvalidInstanceType"),  # instance type not available/not supported
     re.compile(r"beyond the permitted range"),  # instance type not permitted
+    re.compile(r"QuotaExceeded\.Vpc"),  # hard quota limit for VPC creation
+    re.compile(r"OperationDenied\.NoStock"),  # no capacity in selected zone
+    re.compile(r"InvalidPeriod\.RegionDiscontinued"),  # region unavailable for ordering
+    re.compile(r"InvalidParameter\.NotMatch"),  # instance/image incompatibility
+    re.compile(r"only supports some specific images"),  # same as above, message form
+    re.compile(r"InvalidInstanceType\.NotSupportDiskCategory"),  # exact provider code form
 }
 # provision machines with storage (GiB)
 VOLUME_SIZE = 128
