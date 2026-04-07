@@ -497,9 +497,9 @@ def custom_sort(lst, key):
     return lst
 
 
-def pulumi_output_filter(message, error_msgs, output):
+def pulumi_output_filter(message, error_msgs, output, logger=logging):
     # print output to the console with logger, so we have the dates
-    logging.info(message)
+    logger.info(message)
     output.append(message)
     if any([regex.search(message) for regex in PULUMI_ERRORS]):
         error_msgs.append(message)
@@ -522,8 +522,9 @@ def delayed_destroy(vendor, server, resource_opts):
     # change the thread name for logging
     current_thread = threading.current_thread()
     current_thread.name = f"{vendor}/{server}"
+    instance_logger = logging.getLogger(f"{vendor}/{server}")
     try:
-        runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=logging.info))
+        runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
     except Exception:
         logging.exception("Failed to destroy")
 
@@ -556,6 +557,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
     # change the thread name for logging
     current_thread = threading.current_thread()
     current_thread.name = f"{vendor}/{server}"
+    instance_logger = logging.getLogger(f"{vendor}/{server}")
 
     error_msgs = []
     sum_timeout = timedelta()
@@ -607,9 +609,9 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             resource_opts["region"] = region
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=logging.info))
+            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
             error_msgs = []
-            stack_opts = dict(on_output=logging.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
+            stack_opts = dict(on_output=instance_logger.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
             try:
                 retry_locked(runner.create,vendor, {},
                              resource_opts | dict(instance_opts=instance_opts, user_data=user_data),
@@ -633,9 +635,9 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             resource_opts["region"] = region
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=logging.info))
+            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
             error_msgs = []
-            stack_opts = dict(on_output=logging.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
+            stack_opts = dict(on_output=instance_logger.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
             try:
                 retry_locked(runner.create,vendor, {},
                              resource_opts | dict(instance_opts=instance_opts, user_data=b64_user_data),
@@ -681,11 +683,11 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             resource_opts["availability_zone"] = zone
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=logging.info))
+            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
             error_msgs = []
             output = []
             # Alicloud (like Azure) doesn't give sensible error events, use its output
-            stack_opts = dict(on_output=lambda message: pulumi_output_filter(message, error_msgs, output))
+            stack_opts = dict(on_output=lambda message: pulumi_output_filter(message, error_msgs, output, instance_logger))
             # try with cloud_auto first, then retry without system_disk_category if needed
             current_instance_opts = copy.deepcopy(instance_opts)
             # Ensure first attempt has cloud_auto
@@ -730,12 +732,12 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             logging.info(f"Trying {region}")
             resource_opts["region"] = region
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=logging.info))
+            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
 
             error_msgs = []
             output = []
             # Azure native doesn't give sensible error events, use its output
-            stack_opts = dict(on_output=lambda message: pulumi_output_filter(message, error_msgs, output))
+            stack_opts = dict(on_output=lambda message: pulumi_output_filter(message, error_msgs, output, instance_logger))
             for _ in range(2):
                 # try normal images first, then gen1 if we get Hypervisor Generation '2' error
                 try:
@@ -801,10 +803,10 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             logging.info(f"Trying {zone}")
             resource_opts["zone"] = zone
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=logging.info))
+            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
 
             error_msgs = []
-            stack_opts = dict(on_output=logging.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
+            stack_opts = dict(on_output=instance_logger.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
             try:
                 retry_locked(runner.create, vendor, {},
                              resource_opts | dict(instance_opts=instance_opts),

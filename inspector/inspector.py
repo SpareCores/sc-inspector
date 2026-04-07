@@ -19,10 +19,19 @@ GREEN = "\033[32m"
 RED = "\033[31m"
 
 
+class ContextAwareFormatter(logging.Formatter):
+    """Prefer logger name; fallback to thread name."""
+
+    def format(self, record):
+        source = record.name if record.name != "root" else record.threadName
+        record.log_source = source
+        return super().format(record)
+
+
 # Create a formatter string with color codes
 formatter_str = (
     f"{YELLOW}%(asctime)s{RESET}/"
-    f"{GREEN}%(levelname)s{RESET}/{RED}%(threadName)s{RESET}: "
+    f"{GREEN}%(levelname)s{RESET}/{RED}%(log_source)s{RESET}: "
     "%(message)s"
 )
 
@@ -33,6 +42,8 @@ logging.basicConfig(
     format=formatter_str,
     datefmt="%Y-%m-%d %H:%M:%S"
 )
+for handler in logging.getLogger().handlers:
+    handler.setFormatter(ContextAwareFormatter(formatter_str, "%Y-%m-%d %H:%M:%S"))
 lib.logging = logging
 EXCLUDE_INSTANCES: list[tuple[str, str]] = [
     # too small memory instances
