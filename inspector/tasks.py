@@ -462,7 +462,8 @@ llm = DockerTask(
     docker_opts=DOCKER_OPTS
     | dict(
         environment={
-            "TRACKER_PROJECT_NAME": "llm",
+            "TRACKER_PROJECT_NAME": "inspector",
+            "TRACKER_JOB_NAME": "llm",
             "TRACKER_EXTERNAL_RUN_ID": os.environ.get("GITHUB_RUN_ID"),
             "SENTINEL_API_TOKEN": os.environ.get("SENTINEL_API_TOKEN"),
         }
