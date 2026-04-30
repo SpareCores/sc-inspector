@@ -590,6 +590,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         GITHUB_REPOSITORY=os.environ.get("GITHUB_REPOSITORY", ""),
         GITHUB_RUN_ID=os.environ.get("GITHUB_RUN_ID", ""),
         BENCHMARK_SECRETS_PASSPHRASE=os.environ.get("BENCHMARK_SECRETS_PASSPHRASE", ""),
+        SENTINEL_API_TOKEN=os.environ.get("SENTINEL_API_TOKEN", ""),
         VENDOR=vendor,
         INSTANCE=server,
         GPU_COUNT=srv_data.gpu_count,

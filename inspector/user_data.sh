@@ -200,5 +200,6 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e GITHUB_REPOSITORY={GITHUB_REPOSITORY} \
     -e GITHUB_RUN_ID={GITHUB_RUN_ID} \
     -e BENCHMARK_SECRETS_PASSPHRASE={BENCHMARK_SECRETS_PASSPHRASE} \
+    -e SENTINEL_API_TOKEN={SENTINEL_API_TOKEN} \
     ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT}
 poweroff

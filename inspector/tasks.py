@@ -459,6 +459,14 @@ llm = DockerTask(
     minimum_memory=1,
     priority=11,
     image="ghcr.io/sparecores/benchmark-llm:main",
+    docker_opts=DOCKER_OPTS
+    | dict(
+        environment={
+            "TRACKER_PROJECT_NAME": "llm",
+            "TRACKER_EXTERNAL_RUN_ID": os.environ.get("GITHUB_RUN_ID"),
+            "SENTINEL_API_TOKEN": os.environ.get("SENTINEL_API_TOKEN"),
+        }
+    ),
     command=None,
     version_command="--version",
 )
