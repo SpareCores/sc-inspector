@@ -314,7 +314,15 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, gpu_co
         c = None
         try:
             d = docker.from_env(timeout=1800)
-            d.images.pull(task.image)
+            image = d.images.pull(task.image)
+            # Prefer immutable image reference (repo@sha256:...) over tags like :main/:latest.
+            image_ref = next(iter(image.attrs.get("RepoDigests") or []), task.image)
+            env = dict(docker_opts.get("environment") or {})
+            env["TRACKER_CONTAINER_IMAGE"] = image_ref
+            docker_opts["environment"] = env
+            version_env = dict(version_docker_opts.get("environment") or {})
+            version_env["TRACKER_CONTAINER_IMAGE"] = image_ref
+            version_docker_opts["environment"] = version_env
             if task.version_command:
                 ver = d.containers.run(task.image, task.version_command, **version_docker_opts).strip().decode("utf-8").replace("\n", ", ")
             c = d.containers.run(task.image, task.command, **docker_opts)
