@@ -459,9 +459,9 @@ def start(ctx, exclude, start_only, vendor):
         if vnd == "alicloud" and server != "ecs.gn6v-c8g1.2xlarge":
             logging.info(f"Excluding {vnd}/{server}")
             continue
-        if vnd == "alicloud" and server not in alicloud_inspector_allowlist():
-            logging.info(f"Excluding {vnd}/{server}")
-            continue
+        # if vnd == "alicloud" and server not in alicloud_inspector_allowlist():
+        #     logging.info(f"Excluding {vnd}/{server}")
+        #     continue
         if vnd not in supported_vendors:
             # sc-runner can't yet handle this vendor
             continue
