@@ -456,7 +456,7 @@ def start(ctx, exclude, start_only, vendor):
     lock = threading.Lock()
     exception = None
     for (vnd, server), (srv_data, regions, zones, zone_to_region) in available_servers(vendor=vendor).items():
-        if vnd == "alicloud" and server != "ecs.gn6v-c8g1.2xlarge":
+        if vnd == "alicloud" and server != "ecs.r7.2xlarge":
             logging.info(f"Excluding {vnd}/{server}")
             continue
         # if vnd == "alicloud" and server not in alicloud_inspector_allowlist():
