@@ -6,7 +6,17 @@ import psutil
 import transform
 from lib import DOCKER_OPTS, DockerTask, META_NAME
 
-STRESSNG_TAG = "b7c7a5877501679a3b0a67d877e6274a801d1e4e"  # V0.17.08
+def tracker_docker_opts(job_name: str, **extra_env: str | None) -> dict:
+    return dict(
+        environment={
+            "TRACKER_PROJECT_NAME": "inspector",
+            "TRACKER_JOB_NAME": job_name,
+            "TRACKER_EXTERNAL_RUN_ID": os.environ.get("GITHUB_RUN_ID"),
+            "SENTINEL_API_TOKEN": os.environ.get("SENTINEL_API_TOKEN"),
+            **extra_env,
+        }
+    )
+
 
 GPU_EXCLUDE = {
     ("aws", "g3.4xlarge"),
@@ -309,8 +319,8 @@ stressngfull = DockerTask(
     parallel=False,
     priority=1,
     image="ghcr.io/sparecores/stress-ng:main",
-    docker_opts=DOCKER_OPTS | dict(entrypoint="sh"),
-    version_docker_opts=dict(entrypoint="sh"),
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("stressngfull"),
+    version_docker_opts={},
     version_command="-c \"stress-ng --version | awk '{print $3}'\"",
     command=r"""-c 'for ncpu in $(awk -f /usr/local/bin/count.awk $(nproc)); do echo -n "$ncpu,"; nice -n -20 stress-ng --metrics --cpu $ncpu --cpu-method div16 -t 10 | egrep "metrc.*cpu" | awk "{print \$9}"; done'""",
     timeout=timedelta(minutes=30),
@@ -322,8 +332,8 @@ stressng_benchmarks = DockerTask(
     parallel=False,
     priority=2,
     image="ghcr.io/sparecores/stress-ng:main",
-    docker_opts=DOCKER_OPTS | dict(entrypoint="sh"),
-    version_docker_opts=dict(entrypoint="sh"),
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("stressng_benchmarks"),
+    version_docker_opts={},
     version_command="-c \"stress-ng --version | awk '{print $3}'\"",
     command="-c 'nice -n -20 python3 /usr/local/bin/run_stressng_benchmarks.py'",
     timeout=timedelta(minutes=20),
@@ -349,9 +359,9 @@ stressnglongrun = DockerTask(
     },
     parallel=False,
     timeout=timedelta(hours=26),
-    image=f"ghcr.io/colinianking/stress-ng:{STRESSNG_TAG}",
-    docker_opts=DOCKER_OPTS | dict(entrypoint="sh"),
-    version_docker_opts=dict(entrypoint="sh"),
+    image="ghcr.io/sparecores/stress-ng-longrun:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("stressnglongrun"),
+    version_docker_opts={},
     version_command="-c \"stress-ng --version | awk '{print $3}'\"",
     command="-c \"nice -n -20 sh -c 'for i in $(seq 1 1440); do SPM=$(($(($i / 60 + 1)) * 5)); SPM=$(( $SPM > 55 ? 55 : $SPM )); stress-ng --metrics --cpu $(nproc) --cpu-method div16 -t $SPM -Y /dev/stderr; sleep $((60 - $(date +%-S) )); done'\"",
     parse_output=[parse.stressnglongrun],
@@ -361,6 +371,7 @@ openssl = DockerTask(
     parallel=False,
     priority=3,
     image="ghcr.io/sparecores/benchmark:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("openssl"),
     parse_output=[parse.openssl],
     version_command="bash -c \"openssl version | awk '{print $2}'\"",
     command="openssl.sh",
@@ -373,12 +384,11 @@ geekbench = DockerTask(
     image="ghcr.io/sparecores/benchmark:main",
     version_command="bash -c \"/usr/local/geekbench-$(uname -m)/geekbench6 --version | awk '{print $2}'\"",
     docker_opts=DOCKER_OPTS
+    | tracker_docker_opts(
+        "geekbench",
+        BENCHMARK_SECRETS_PASSPHRASE=os.environ.get("BENCHMARK_SECRETS_PASSPHRASE"),
+    )
     | dict(
-        environment={
-            "BENCHMARK_SECRETS_PASSPHRASE": os.environ.get(
-                "BENCHMARK_SECRETS_PASSPHRASE"
-            )
-        },
         mem_limit=int(mem_bytes * 0.85),
         memswap_limit=int(mem_bytes * 0.85),
         mem_swappiness=0,
@@ -396,6 +406,7 @@ compression_text = DockerTask(
     minimum_memory=1,
     timeout=timedelta(hours=1),
     image="ghcr.io/sparecores/benchmark:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("compression_text"),
     command="nice -n -20 python /usr/local/bin/compress.py",
 )
 
@@ -404,6 +415,7 @@ bw_mem = DockerTask(
     priority=6,
     timeout=timedelta(hours=1),
     image="ghcr.io/sparecores/benchmark:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("bw_mem"),
     command="bw_mem.sh",
     # These machines either crash or hang when running this benchmark
     servers_exclude={
@@ -416,6 +428,7 @@ static_web = DockerTask(
     parallel=False,
     priority=7,
     image="ghcr.io/sparecores/benchmark-web:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("static_web"),
     version_command="bash -c \"(binserve --version; wrk -v) | egrep -o '(binserve|wrk) [0-9.]+'\"",
     command="nice -n -20 python /usr/local/bin/benchmark.py",
     timeout=timedelta(minutes=30),
@@ -425,7 +438,9 @@ redis = DockerTask(
     parallel=False,
     priority=8,
     image="ghcr.io/sparecores/benchmark-redis:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("redis"),
     version_command="redis-server -v",
+    version_docker_opts=dict(entrypoint=""),
     command="nice -n -20 python /usr/local/bin/benchmark.py",
     timeout=timedelta(minutes=10),
 )
@@ -434,6 +449,7 @@ nvbandwidth = DockerTask(
     parallel=False,
     priority=9,
     image="ghcr.io/sparecores/nvbandwidth:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("nvbandwidth"),
     gpu=True,
     servers_exclude=GPU_EXCLUDE,
     version_command="bash -c \"nvbandwidth --help | head -1 | egrep -o 'v[0-9.]+'\"",
@@ -449,6 +465,7 @@ passmark = DockerTask(
     timeout=timedelta(hours=1),
     priority=10,
     image="ghcr.io/sparecores/benchmark-passmark:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("passmark"),
     command=None,
 )
 
@@ -459,15 +476,7 @@ llm = DockerTask(
     minimum_memory=1,
     priority=11,
     image="ghcr.io/sparecores/benchmark-llm:main",
-    docker_opts=DOCKER_OPTS
-    | dict(
-        environment={
-            "TRACKER_PROJECT_NAME": "inspector",
-            "TRACKER_JOB_NAME": "llm",
-            "TRACKER_EXTERNAL_RUN_ID": os.environ.get("GITHUB_RUN_ID"),
-            "SENTINEL_API_TOKEN": os.environ.get("SENTINEL_API_TOKEN"),
-        }
-    ),
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("llm"),
     command=None,
     version_command="--version",
 )
@@ -477,6 +486,7 @@ membench = DockerTask(
     priority=12,
     timeout=timedelta(minutes=40),
     image="ghcr.io/sparecores/membench:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("membench"),
     # run for 30 minutes max
     command="-Hv -t 1800",
     servers_only=RUN_NEW_TASKS_ON_SERVERS,
