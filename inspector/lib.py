@@ -809,7 +809,8 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                               scheduling_opts=dict(
                                   preemptible=is_preemptible,
                                   automatic_restart=False if is_preemptible else True,
-                                  on_host_maintenance="TERMINATE"),
+                                  # preemptible/spot VMs require TERMINATE; standard VMs (e.g. z3-highmem) require MIGRATE
+                                  on_host_maintenance="TERMINATE" if is_preemptible else "MIGRATE"),
                               )
         # enable nested virtualization
         instance_opts |= dict(metadata_startup_script=user_data, advanced_machine_features=dict(enable_nested_virtualization=True))
