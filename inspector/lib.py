@@ -49,6 +49,7 @@ PULUMI_ERRORS = {
     re.compile(r"creating failed"),  # Azure errors
     re.compile(r"error waiting for.*to create"),   # GCP error
     re.compile(r"Unable to create server"),  # Upcloud error
+    re.compile(r"\*\*creating failed\*\*"),  # Upcloud/Pulumi resource failure marker
     # Alicloud errors
     re.compile(r"The instanceType of the specified instance does not support this disk category"),
     re.compile(r"InvalidInstanceType"),  # instance type not available/not supported
@@ -527,6 +528,38 @@ def pulumi_event_filter(event, error_msgs):
         pass
 
 
+def pulumi_stack_opts(error_msgs, output, logger):
+    """Capture Pulumi errors from both stdout and diagnostic events."""
+    return dict(
+        on_output=lambda message: pulumi_output_filter(message, error_msgs, output, logger),
+        on_event=lambda event: pulumi_event_filter(event, error_msgs),
+    )
+
+
+def record_instance_start_failure(lock, data_dir, tasks, error_msgs, fallback_msg=None):
+    """Write exit_code=-1 to task meta when the cloud instance could not be started."""
+    now = datetime.now()
+    if error_msgs:
+        error_msg = remove_matches(FILTER_ERROR_MSG, error_msgs[-1])
+    elif fallback_msg:
+        error_msg = fallback_msg
+    else:
+        error_msg = "Failed to start instance"
+    logging.info(f"Failed to start instance, uploading error messages: {error_msg}")
+    with lock:
+        repo.pull()
+        for task in tasks:
+            meta = load_task_meta(task, data_dir=data_dir)
+            if not meta.start:
+                meta.start = now
+            meta.end = now
+            meta.exit_code = -1
+            meta.error_msg = error_msg
+            meta.task_hash = task_hash(task)
+            write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
+        repo.push_path(data_dir, f"Failed to start instance from {repo.gha_url()}")
+
+
 def delayed_destroy(vendor, server, resource_opts):
     from sc_runner import runner
 
@@ -574,6 +607,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
     instance_logger = logging.getLogger(f"{vendor}/{server}")
 
     error_msgs = []
+    instance_started = False
     sum_timeout = timedelta()
     with lock:
         repo.pull()
@@ -619,24 +653,27 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         if vendor == "upcloud":
             # explicitly set SSH key from envvar
             resource_opts |= dict(public_key=os.environ.get("SSH_PUBLIC_KEY"))
+        pulumi_output = []
         for region in regions:
             logging.info(f"Trying {region}")
             resource_opts["region"] = region
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
             runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
-            error_msgs = []
-            stack_opts = dict(on_output=instance_logger.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
+            stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger)
             try:
                 retry_locked(runner.create,vendor, {},
                              resource_opts | dict(instance_opts=instance_opts, user_data=user_data),
                              stack_opts=stack_opts)
                 # empty it if create succeeded, just in case
                 error_msgs = []
+                instance_started = True
                 break
-            except Exception:
+            except Exception as e:
                 # on failure, try the next one
                 logging.exception("Couldn't start instance")
+                if not error_msgs:
+                    error_msgs.append(str(e))
 
     if vendor == "aws":
         # we use the key_name in instance_opts instead of creating a new key
@@ -651,18 +688,21 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
             runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
-            error_msgs = []
-            stack_opts = dict(on_output=instance_logger.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
+            pulumi_output = []
+            stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger)
             try:
                 retry_locked(runner.create,vendor, {},
                              resource_opts | dict(instance_opts=instance_opts, user_data=b64_user_data),
                              stack_opts=stack_opts)
                 # empty it if create succeeded, just in case
                 error_msgs = []
+                instance_started = True
                 break
-            except Exception:
+            except Exception as e:
                 # on failure, try the next one
                 logging.exception("Couldn't start instance")
+                if not error_msgs:
+                    error_msgs.append(str(e))
 
     if vendor == "alicloud":
         # we use the key_name in instance_opts instead of creating a new key
@@ -716,6 +756,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                     # empty it if create succeeded, just in case
                     error_msgs = []
                     done = True
+                    instance_started = True
                     break
                 except Exception as e:
                     # Check if the error is about disk category not being supported
@@ -762,6 +803,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                     # empty it if create succeeded, just in case
                     error_msgs = []
                     done = True
+                    instance_started = True
                     break
                 except Exception:
                     if image_sku.endswith("-gen1"):
@@ -821,32 +863,24 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
             runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
 
-            error_msgs = []
-            stack_opts = dict(on_output=instance_logger.info, on_event=lambda event: pulumi_event_filter(event, error_msgs))
+            pulumi_output = []
+            stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger)
             try:
                 retry_locked(runner.create, vendor, {},
                              resource_opts | dict(instance_opts=instance_opts),
                              stack_opts=stack_opts)
                 # empty it if create succeeded, just in case
                 error_msgs = []
+                instance_started = True
                 break
-            except Exception:
+            except Exception as e:
                 # on failure, try the next one
                 logging.exception("Couldn't start instance")
+                if not error_msgs:
+                    error_msgs.append(str(e))
 
-    if error_msgs:
-        # upload error message if we couldn't start the instance
-        now = datetime.now()
-        logging.info("Failed to start instance, uploading error messages")
-        for task in tasks:
-            meta = Meta(
-                start=now,
-                end=now,
-                exit_code=-1,
-                error_msg=remove_matches(FILTER_ERROR_MSG, error_msgs[-1]),
-                task_hash=task_hash(task),
-            )
-            write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
+    if not instance_started:
+        record_instance_start_failure(lock, data_dir, tasks, error_msgs)
 
 
 def thread_monitor(executor, interval=60):
