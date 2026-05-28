@@ -5,7 +5,7 @@ exec >> /var/log/user_data.log 2>&1
 
 TIMING_HOST_DIR="{HOST_TIMING_DIR}"
 mkdir -p "$TIMING_HOST_DIR"
-date -u +%Y-%m-%dT%H:%M:%SZ > "$TIMING_HOST_DIR/user_data_start.utc"
+date -u +%Y-%m-%dT%H:%M:%SZ > "$TIMING_HOST_DIR/user_data_start"
 
 # just to be sure, schedule a shutdown early
 shutdown --no-wall +{SHUTDOWN_MINS}
@@ -198,7 +198,7 @@ apt-get autoremove -y $(dpkg-query -W -f='${{Package}}\n' \
 # https://github.com/NVIDIA/nvidia-container-toolkit/issues/202
 # on some machines docker initialization times out with a lot of GPUs. Enable persistence mode to overcome that.
 nvidia-smi -pm 1
-date -u +%Y-%m-%dT%H:%M:%SZ > "$TIMING_HOST_DIR/user_data_end.utc"
+date -u +%Y-%m-%dT%H:%M:%SZ > "$TIMING_HOST_DIR/user_data_end"
 docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/docker.sock -v /root/.ssh:/root/.ssh \
     -v "$TIMING_HOST_DIR:/host-timing:ro" \
     -e REPO_URL={REPO_URL} \

@@ -28,12 +28,13 @@ from zlib import crc32
 META_NAME = "meta.json"
 TIMING_TASK_NAME = "timing"
 # UTC timestamps for instance startup intelligence (separate from meta.json to avoid git conflicts)
-TIMING_API_START = "api_start.utc"
-TIMING_API_SUCCESS = "api_success.utc"
-TIMING_MACHINE_STARTED = "machine_started.utc"
-TIMING_INSPECTOR_STARTED = "inspector_started.utc"
-TIMING_USER_DATA_START = "user_data_start.utc"
-TIMING_USER_DATA_END = "user_data_end.utc"
+TIMING_API_START = "api_start"
+TIMING_API_END = "api_end"
+TIMING_MACHINE_START = "machine_start"
+TIMING_INSPECTOR_START = "inspector_start"
+TIMING_INSPECTOR_END = "inspector_end"
+TIMING_USER_DATA_START = "user_data_start"
+TIMING_USER_DATA_END = "user_data_end"
 # Host path for user_data timestamps; mounted read-only at HOST_TIMING_MOUNT in inspect container
 HOST_TIMING_BASE = "/var/lib/sparecores-inspector/timing"
 HOST_TIMING_MOUNT = "/host-timing"
@@ -423,18 +424,13 @@ def write_timing_file(
     data_dir: str | os.PathLike,
     filename: str,
     when: datetime | None = None,
-    *,
-    exclusive: bool = False,
-) -> bool:
+) -> None:
     """Write a single UTC timestamp (ISO-8601 Z) into the timing task directory."""
     path = timing_file_path(data_dir, filename)
-    if exclusive and os.path.exists(path):
-        return False
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write(format_timing_utc(when or utc_now()))
         f.write("\n")
-    return True
 
 
 def machine_boot_time_utc() -> datetime:
@@ -443,17 +439,21 @@ def machine_boot_time_utc() -> datetime:
     return utc_now() - timedelta(seconds=uptime_seconds)
 
 
-def record_timing_machine_started(data_dir: str | os.PathLike) -> None:
-    write_timing_file(data_dir, TIMING_MACHINE_STARTED, machine_boot_time_utc(), exclusive=True)
+def record_timing_machine_start(data_dir: str | os.PathLike) -> None:
+    write_timing_file(data_dir, TIMING_MACHINE_START, machine_boot_time_utc())
 
 
-def record_timing_api_success(data_dir: str | os.PathLike, api_start: datetime, api_success: datetime) -> None:
+def record_timing_api(data_dir: str | os.PathLike, api_start: datetime, api_end: datetime) -> None:
     write_timing_file(data_dir, TIMING_API_START, api_start)
-    write_timing_file(data_dir, TIMING_API_SUCCESS, api_success)
+    write_timing_file(data_dir, TIMING_API_END, api_end)
 
 
-def record_timing_inspector_started(data_dir: str | os.PathLike) -> None:
-    write_timing_file(data_dir, TIMING_INSPECTOR_STARTED, exclusive=True)
+def record_timing_inspector_start(data_dir: str | os.PathLike) -> None:
+    write_timing_file(data_dir, TIMING_INSPECTOR_START)
+
+
+def record_timing_inspector_end(data_dir: str | os.PathLike) -> None:
+    write_timing_file(data_dir, TIMING_INSPECTOR_END)
 
 
 def parse_timing_utc(text: str) -> datetime:
@@ -478,12 +478,13 @@ def record_timing_from_host(data_dir: str | os.PathLike, host_dir: str | os.Path
         except ValueError:
             logging.exception(f"Invalid timestamp in {src}: {ts!r}")
             continue
-        write_timing_file(data_dir, filename, when, exclusive=True)
+        write_timing_file(data_dir, filename, when)
 
 
 def record_timing_metrics(data_dir: str | os.PathLike) -> None:
+    """Collect remote timing checkpoints from the host and machine; always overwrites."""
     record_timing_from_host(data_dir)
-    record_timing_machine_started(data_dir)
+    record_timing_machine_start(data_dir)
 
 
 def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> None:
@@ -1007,7 +1008,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
     if instance_started and api_timing:
         with lock:
             repo.pull()
-            record_timing_api_success(data_dir, api_timing[0], api_timing[1])
+            record_timing_api(data_dir, api_timing[0], api_timing[1])
             repo.push_path(data_dir, f"Instance API timing from {repo.gha_url()}")
 
     if not instance_started:

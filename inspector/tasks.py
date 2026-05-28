@@ -215,7 +215,7 @@ RUN_NEW_TASKS_ON_SERVERS = DynamicServerSet(
 mem_bytes = psutil.virtual_memory().available
 
 
-# Records timing/*.utc files: user_data (host mount), machine boot (uptime); inspector_started in inspect().
+# Records timing/* checkpoints (user_data mount, machine boot, inspector); see sc-inspector-data README.
 timing = Task(
     parallel=True,
     priority=0,
