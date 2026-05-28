@@ -115,6 +115,10 @@ class Task(BaseModel):
     minimum_memory: float = 0  # minimum memory in GiBs for this test
     precheck_command: str | list | None = None  # check if we should run this task
     precheck_regex: str | None = None  # regular expression to match the precheck command's stdout
+    # Never start an instance for this task alone; may still be included when another task starts.
+    start_with_instance: bool = False
+    # Always run on inspect when the instance was started for any task; never starts an instance alone.
+    always_run: bool = False
 
 
 class DockerTask(Task):
@@ -180,6 +184,9 @@ def _server_in_servers_only(servers_only, vendor, instance, data_dir=None):
 
 def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
     """Return True if we should start a server for this task."""
+    if task.start_with_instance or task.always_run:
+        logging.info(f"Skipping task {task.name}, does not trigger an instance start on its own")
+        return False
     meta = load_task_meta(task, data_dir)
     if meta.start and (datetime.now() - meta.start) <= WAIT_SINCE_LAST_START:
         logging.info(f"Skipping task {task.name}, last start: {meta.start}")
@@ -240,21 +247,23 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
     return False
 
 
-def should_run(task: Task, data_dir: str | os.PathLike, vendor: str, instance: str, gpu_count: float) -> bool:
-    """Return True if we should run a task."""
-    import psutil  # lazy load
-
-    mem_bytes = psutil.virtual_memory().available
-    meta = load_task_meta(task, data_dir)
-    thash = task_hash(task)
-    # minimum_memory is GiB
+def _task_resource_checks(
+    task: Task,
+    data_dir: str | os.PathLike,
+    vendor: str,
+    instance: str,
+    gpu_count: float,
+    mem_bytes: int,
+) -> bool:
     if mem_bytes < task.minimum_memory * 1024 ** 3:
         mem_gib = mem_bytes / 1024 ** 3
-        logging.info(f"Skipping task {task.name} because it requires {task.minimum_memory} GiB RAM, but this machine has only {mem_gib:.03}")
+        logging.info(
+            f"Skipping task {task.name} because it requires {task.minimum_memory} GiB RAM, "
+            f"but this machine has only {mem_gib:.03}"
+        )
         return False
     if task.gpu and not gpu_count:
         logging.info(f"Skipping task {task.name} because it requires GPU, but gpu_count is {gpu_count}")
-        # skip tasks which require GPUs on a server which doesn't have one
         return False
     if task.servers_only and not _server_in_servers_only(task.servers_only, vendor, instance, data_dir):
         logging.info(f"Skipping task {task.name} because it is not enabled for {vendor}/{instance}")
@@ -262,6 +271,25 @@ def should_run(task: Task, data_dir: str | os.PathLike, vendor: str, instance: s
     if task.servers_exclude and (vendor, instance) in task.servers_exclude:
         logging.info(f"Skipping task {task.name} because it is not enabled for {vendor}/{instance}")
         return False
+    return True
+
+
+def should_run(task: Task, data_dir: str | os.PathLike, vendor: str, instance: str, gpu_count: float) -> bool:
+    """Return True if we should run a task."""
+    import psutil  # lazy load
+
+    mem_bytes = psutil.virtual_memory().available
+    if task.always_run:
+        if not _task_resource_checks(task, data_dir, vendor, instance, gpu_count, mem_bytes):
+            return False
+        logging.info(f"Running {task.name} (always_run)")
+        return True
+
+    if not _task_resource_checks(task, data_dir, vendor, instance, gpu_count, mem_bytes):
+        return False
+
+    meta = load_task_meta(task, data_dir)
+    thash = task_hash(task)
     if meta.end and task.rerun and (datetime.now() - meta.end) >= task.rerun and meta.exit_code == 0:
         return True
     if meta.exit_code != 0 or meta.task_hash != thash:
@@ -408,25 +436,39 @@ def format_timing_utc(dt: datetime) -> str:
     return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
-def host_timing_dir(vendor: str, instance: str) -> str:
-    return os.path.join(HOST_TIMING_BASE, vendor, instance)
+def github_run_id() -> str:
+    run_id = os.environ.get("GITHUB_RUN_ID", "").strip()
+    if not run_id:
+        logging.warning("GITHUB_RUN_ID not set, using 'unknown' for timing paths")
+        return "unknown"
+    return run_id
+
+
+def host_timing_dir(vendor: str, instance: str, run_id: str | None = None) -> str:
+    return os.path.join(HOST_TIMING_BASE, vendor, instance, run_id or github_run_id())
 
 
 def timing_dir(data_dir: str | os.PathLike) -> str:
     return os.path.join(data_dir, TIMING_TASK_NAME)
 
 
-def timing_file_path(data_dir: str | os.PathLike, filename: str) -> str:
-    return os.path.join(timing_dir(data_dir), filename)
+def timing_run_dir(data_dir: str | os.PathLike, run_id: str | None = None) -> str:
+    return os.path.join(timing_dir(data_dir), run_id or github_run_id())
+
+
+def timing_file_path(data_dir: str | os.PathLike, filename: str, run_id: str | None = None) -> str:
+    return os.path.join(timing_run_dir(data_dir, run_id), filename)
 
 
 def write_timing_file(
     data_dir: str | os.PathLike,
     filename: str,
     when: datetime | None = None,
+    *,
+    run_id: str | None = None,
 ) -> None:
-    """Write a single UTC timestamp (ISO-8601 Z) into the timing task directory."""
-    path = timing_file_path(data_dir, filename)
+    """Write a single UTC timestamp (ISO-8601 Z) under timing/<GITHUB_RUN_ID>/."""
+    path = timing_file_path(data_dir, filename, run_id)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
         f.write(format_timing_utc(when or utc_now()))
@@ -439,21 +481,27 @@ def machine_boot_time_utc() -> datetime:
     return utc_now() - timedelta(seconds=uptime_seconds)
 
 
-def record_timing_machine_start(data_dir: str | os.PathLike) -> None:
-    write_timing_file(data_dir, TIMING_MACHINE_START, machine_boot_time_utc())
+def record_timing_machine_start(data_dir: str | os.PathLike, *, run_id: str | None = None) -> None:
+    write_timing_file(data_dir, TIMING_MACHINE_START, machine_boot_time_utc(), run_id=run_id)
 
 
-def record_timing_api(data_dir: str | os.PathLike, api_start: datetime, api_end: datetime) -> None:
-    write_timing_file(data_dir, TIMING_API_START, api_start)
-    write_timing_file(data_dir, TIMING_API_END, api_end)
+def record_timing_api(
+    data_dir: str | os.PathLike,
+    api_start: datetime,
+    api_end: datetime,
+    *,
+    run_id: str | None = None,
+) -> None:
+    write_timing_file(data_dir, TIMING_API_START, api_start, run_id=run_id)
+    write_timing_file(data_dir, TIMING_API_END, api_end, run_id=run_id)
 
 
-def record_timing_inspector_start(data_dir: str | os.PathLike) -> None:
-    write_timing_file(data_dir, TIMING_INSPECTOR_START)
+def record_timing_inspector_start(data_dir: str | os.PathLike, *, run_id: str | None = None) -> None:
+    write_timing_file(data_dir, TIMING_INSPECTOR_START, run_id=run_id)
 
 
-def record_timing_inspector_end(data_dir: str | os.PathLike) -> None:
-    write_timing_file(data_dir, TIMING_INSPECTOR_END)
+def record_timing_inspector_end(data_dir: str | os.PathLike, *, run_id: str | None = None) -> None:
+    write_timing_file(data_dir, TIMING_INSPECTOR_END, run_id=run_id)
 
 
 def parse_timing_utc(text: str) -> datetime:
@@ -463,8 +511,13 @@ def parse_timing_utc(text: str) -> datetime:
     return datetime.fromisoformat(text)
 
 
-def record_timing_from_host(data_dir: str | os.PathLike, host_dir: str | os.PathLike | None = None) -> None:
-    """Copy user_data timestamps from the host mount into the timing task directory."""
+def record_timing_from_host(
+    data_dir: str | os.PathLike,
+    host_dir: str | os.PathLike | None = None,
+    *,
+    run_id: str | None = None,
+) -> None:
+    """Copy user_data timestamps from the host mount into timing/<run_id>/."""
     host_dir = host_dir or HOST_TIMING_MOUNT
     for filename in (TIMING_USER_DATA_START, TIMING_USER_DATA_END):
         src = os.path.join(host_dir, filename)
@@ -478,13 +531,40 @@ def record_timing_from_host(data_dir: str | os.PathLike, host_dir: str | os.Path
         except ValueError:
             logging.exception(f"Invalid timestamp in {src}: {ts!r}")
             continue
-        write_timing_file(data_dir, filename, when)
+        write_timing_file(data_dir, filename, when, run_id=run_id)
 
 
-def record_timing_metrics(data_dir: str | os.PathLike) -> None:
-    """Collect remote timing checkpoints from the host and machine; always overwrites."""
-    record_timing_from_host(data_dir)
-    record_timing_machine_start(data_dir)
+def record_timing_metrics(data_dir: str | os.PathLike, *, run_id: str | None = None) -> None:
+    """Collect remote timing checkpoints for this GHA run; always overwrites."""
+    run_id = run_id or github_run_id()
+    record_timing_from_host(data_dir, run_id=run_id)
+    record_timing_machine_start(data_dir, run_id=run_id)
+
+
+def tasks_to_start(vendor: str, data_dir: str | os.PathLike, srv) -> list[Task]:
+    """Tasks that should trigger starting an instance.
+
+    Tasks with start_with_instance or always_run never start an instance on their own, but are
+    added here when another task is already starting the machine.
+    """
+    tasks = [task for task in get_tasks(vendor) if should_start(task, data_dir, srv)]
+    if not tasks:
+        return []
+    started = {id(task) for task in tasks}
+    for task in get_tasks(vendor):
+        if id(task) in started:
+            continue
+        if task.always_run:
+            logging.info(f"Adding {task.name} (always_run) for co-start")
+            tasks.append(task)
+            started.add(id(task))
+        elif task.start_with_instance and should_run(
+            task, data_dir, srv.vendor_id, srv.api_reference, srv.gpu_count
+        ):
+            logging.info(f"Adding {task.name} (start_with_instance) for co-start")
+            tasks.append(task)
+            started.add(id(task))
+    return tasks
 
 
 def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> None:
@@ -762,7 +842,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         INSTANCE=server,
         GPU_COUNT=srv_data.gpu_count,
         SHUTDOWN_MINS=timeout_mins + 30,  # give enough time to set up the machine
-        HOST_TIMING_DIR=host_timing_dir(vendor, server),
+        HOST_TIMING_DIR=host_timing_dir(vendor, server, github_run_id()),
     )
     b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
     if vendor in ("aws", "gcp", "hcloud", "upcloud", "ovh", "alicloud"):
@@ -1005,7 +1085,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 if not error_msgs:
                     error_msgs.append(str(e))
 
-    if instance_started and api_timing:
+    if instance_started and api_timing and any(task.always_run for task in tasks):
         with lock:
             repo.pull()
             record_timing_api(data_dir, api_timing[0], api_timing[1])

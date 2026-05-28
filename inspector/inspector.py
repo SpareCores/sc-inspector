@@ -475,7 +475,7 @@ def start(ctx, exclude, start_only, vendor):
             continue
         data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vnd, server)
         try:
-            tasks = list(filter(lambda task: lib.should_start(task, data_dir, srv_data), lib.get_tasks(vnd)))
+            tasks = lib.tasks_to_start(vnd, data_dir, srv_data)
         except Exception as e:
             # stop if an exception occurred
             exception = e

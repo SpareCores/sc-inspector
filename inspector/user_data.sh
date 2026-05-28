@@ -205,6 +205,7 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e GITHUB_SERVER_URL={GITHUB_SERVER_URL} \
     -e GITHUB_REPOSITORY={GITHUB_REPOSITORY} \
     -e GITHUB_RUN_ID={GITHUB_RUN_ID} \
+    -e HOST_TIMING_DIR="$TIMING_HOST_DIR" \
     -e BENCHMARK_SECRETS_PASSPHRASE={BENCHMARK_SECRETS_PASSPHRASE} \
     -e SENTINEL_API_TOKEN={SENTINEL_API_TOKEN} \
     ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT}
