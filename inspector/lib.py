@@ -32,6 +32,11 @@ TIMING_API_START = "api_start.utc"
 TIMING_API_SUCCESS = "api_success.utc"
 TIMING_MACHINE_STARTED = "machine_started.utc"
 TIMING_INSPECTOR_STARTED = "inspector_started.utc"
+TIMING_USER_DATA_START = "user_data_start.utc"
+TIMING_USER_DATA_END = "user_data_end.utc"
+# Host path for user_data timestamps; mounted read-only at HOST_TIMING_MOUNT in inspect container
+HOST_TIMING_BASE = "/var/lib/sparecores-inspector/timing"
+HOST_TIMING_MOUNT = "/host-timing"
 # add options to the task hash, whose function is to signal any
 # changes in the tasks' runtime parameters, which might alter the output
 TASK_HASH_KEYS = {"command", "transform_output", "image"}
@@ -402,6 +407,10 @@ def format_timing_utc(dt: datetime) -> str:
     return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def host_timing_dir(vendor: str, instance: str) -> str:
+    return os.path.join(HOST_TIMING_BASE, vendor, instance)
+
+
 def timing_dir(data_dir: str | os.PathLike) -> str:
     return os.path.join(data_dir, TIMING_TASK_NAME)
 
@@ -447,6 +456,36 @@ def record_timing_inspector_started(data_dir: str | os.PathLike) -> None:
     write_timing_file(data_dir, TIMING_INSPECTOR_STARTED, exclusive=True)
 
 
+def parse_timing_utc(text: str) -> datetime:
+    text = text.strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    return datetime.fromisoformat(text)
+
+
+def record_timing_from_host(data_dir: str | os.PathLike, host_dir: str | os.PathLike | None = None) -> None:
+    """Copy user_data timestamps from the host mount into the timing task directory."""
+    host_dir = host_dir or HOST_TIMING_MOUNT
+    for filename in (TIMING_USER_DATA_START, TIMING_USER_DATA_END):
+        src = os.path.join(host_dir, filename)
+        if not os.path.isfile(src):
+            logging.info(f"Host timing file not found: {src}")
+            continue
+        with open(src) as f:
+            ts = f.read().strip()
+        try:
+            when = parse_timing_utc(ts)
+        except ValueError:
+            logging.exception(f"Invalid timestamp in {src}: {ts!r}")
+            continue
+        write_timing_file(data_dir, filename, when, exclusive=True)
+
+
+def record_timing_metrics(data_dir: str | os.PathLike) -> None:
+    record_timing_from_host(data_dir)
+    record_timing_machine_started(data_dir)
+
+
 def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> None:
     while True:
         try:
@@ -459,7 +498,7 @@ def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> N
             os.makedirs(task_dir, exist_ok=True)
             if task.name == TIMING_TASK_NAME:
                 try:
-                    record_timing_machine_started(data_dir)
+                    record_timing_metrics(data_dir)
                     meta.end = datetime.now()
                     meta.exit_code = 0
                     meta.version = "n/a"
@@ -722,6 +761,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         INSTANCE=server,
         GPU_COUNT=srv_data.gpu_count,
         SHUTDOWN_MINS=timeout_mins + 30,  # give enough time to set up the machine
+        HOST_TIMING_DIR=host_timing_dir(vendor, server),
     )
     b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
     if vendor in ("aws", "gcp", "hcloud", "upcloud", "ovh", "alicloud"):

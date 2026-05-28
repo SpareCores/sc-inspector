@@ -215,7 +215,7 @@ RUN_NEW_TASKS_ON_SERVERS = DynamicServerSet(
 mem_bytes = psutil.virtual_memory().available
 
 
-# Records machine boot time (from uptime) in timing/*.utc files; inspector_started is set in inspect().
+# Records timing/*.utc files: user_data (host mount), machine boot (uptime); inspector_started in inspect().
 timing = Task(
     parallel=True,
     priority=0,
