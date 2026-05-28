@@ -4,7 +4,7 @@ from datetime import timedelta
 import parse
 import psutil
 import transform
-from lib import DOCKER_OPTS, DockerTask, META_NAME
+from lib import DOCKER_OPTS, DockerTask, META_NAME, Task
 
 def tracker_docker_opts(job_name: str, **extra_env: str | None) -> dict:
     return dict(
@@ -214,6 +214,14 @@ RUN_NEW_TASKS_ON_SERVERS = DynamicServerSet(
 # get the amount of available memory
 mem_bytes = psutil.virtual_memory().available
 
+
+# Records machine boot time (from uptime) in timing/*.utc files; inspector_started is set in inspect().
+timing = Task(
+    parallel=True,
+    priority=0,
+    command="",
+    timeout=timedelta(minutes=1),
+)
 
 dmidecode = DockerTask(
     parallel=True,

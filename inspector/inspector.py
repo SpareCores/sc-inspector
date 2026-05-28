@@ -718,6 +718,11 @@ def inspect(ctx, vendor, instance, gpu_count, threads):
     data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, instance)
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
+    lib.record_timing_inspector_started(data_dir)
+    try:
+        repo.push_path(lib.timing_dir(data_dir), f"Inspector started from {repo.gha_url()}")
+    except Exception:
+        logging.exception("Failed to push inspector timing")
     lib.run_tasks(
         vendor,
         data_dir,

@@ -1,5 +1,5 @@
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import cache
 from itertools import chain
 from pydantic import BaseModel
@@ -26,6 +26,12 @@ import transform
 from zlib import crc32
 
 META_NAME = "meta.json"
+TIMING_TASK_NAME = "timing"
+# UTC timestamps for instance startup intelligence (separate from meta.json to avoid git conflicts)
+TIMING_API_START = "api_start.utc"
+TIMING_API_SUCCESS = "api_success.utc"
+TIMING_MACHINE_STARTED = "machine_started.utc"
+TIMING_INSPECTOR_STARTED = "inspector_started.utc"
 # add options to the task hash, whose function is to signal any
 # changes in the tasks' runtime parameters, which might alter the output
 TASK_HASH_KEYS = {"command", "transform_output", "image"}
@@ -384,6 +390,63 @@ def write_meta(meta: Meta, file: str | os.PathLike) -> None:
         f.write(meta.model_dump_json())
 
 
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def format_timing_utc(dt: datetime) -> str:
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def timing_dir(data_dir: str | os.PathLike) -> str:
+    return os.path.join(data_dir, TIMING_TASK_NAME)
+
+
+def timing_file_path(data_dir: str | os.PathLike, filename: str) -> str:
+    return os.path.join(timing_dir(data_dir), filename)
+
+
+def write_timing_file(
+    data_dir: str | os.PathLike,
+    filename: str,
+    when: datetime | None = None,
+    *,
+    exclusive: bool = False,
+) -> bool:
+    """Write a single UTC timestamp (ISO-8601 Z) into the timing task directory."""
+    path = timing_file_path(data_dir, filename)
+    if exclusive and os.path.exists(path):
+        return False
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(format_timing_utc(when or utc_now()))
+        f.write("\n")
+    return True
+
+
+def machine_boot_time_utc() -> datetime:
+    with open("/proc/uptime") as f:
+        uptime_seconds = int(float(f.read().split()[0]))
+    return utc_now() - timedelta(seconds=uptime_seconds)
+
+
+def record_timing_machine_started(data_dir: str | os.PathLike) -> None:
+    write_timing_file(data_dir, TIMING_MACHINE_STARTED, machine_boot_time_utc(), exclusive=True)
+
+
+def record_timing_api_success(data_dir: str | os.PathLike, api_start: datetime, api_success: datetime) -> None:
+    write_timing_file(data_dir, TIMING_API_START, api_start)
+    write_timing_file(data_dir, TIMING_API_SUCCESS, api_success)
+
+
+def record_timing_inspector_started(data_dir: str | os.PathLike) -> None:
+    write_timing_file(data_dir, TIMING_INSPECTOR_STARTED, exclusive=True)
+
+
 def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> None:
     while True:
         try:
@@ -392,6 +455,20 @@ def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> N
                 break
             meta = Meta(start=datetime.now(), task_hash=task_hash(task), kernel_version=platform.release())
             failed = False
+            task_dir = os.path.join(data_dir, task.name)
+            os.makedirs(task_dir, exist_ok=True)
+            if task.name == TIMING_TASK_NAME:
+                try:
+                    record_timing_machine_started(data_dir)
+                    meta.end = datetime.now()
+                    meta.exit_code = 0
+                    meta.version = "n/a"
+                except Exception as e:
+                    failed = True
+                    meta.exit_code = 256
+                    meta.error_msg = str(e)
+                write_meta(meta, os.path.join(task_dir, META_NAME))
+                continue
             try:
                 if isinstance(task, DockerTask):
                     ver, stdout, stderr = run_docker(meta, task, os.path.join(data_dir, task.name), gpu_count)
@@ -403,8 +480,6 @@ def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> N
                 # return something positive (negative will be inspector start errors) and outside normal return codes
                 meta.exit_code = 256
                 meta.error_msg = str(e)
-            task_dir = os.path.join(data_dir, task.name)
-            os.makedirs(task_dir, exist_ok=True)
             if not failed:
                 for t in task.transform_output:
                     meta.outputs.extend(t(meta, task, task_dir, stdout, stderr))
@@ -582,13 +657,22 @@ def remove_matches(regexes, input_string):
     return input_string
 
 
-def retry_locked(func, *args, **kwargs):
-    """Retry a pulumi function with random backoff for locking issues"""
+def retry_locked(func, *args, api_timing: list | None = None, **kwargs):
+    """Retry a pulumi function with random backoff for locking issues.
+
+    If api_timing is a list, it is set to [start, end] UTC timestamps for the
+    successful call only. ConcurrentUpdateError retries are timed separately;
+    failed attempts are not included.
+    """
     import pulumi
 
     for i in range(3):
+        api_start = utc_now() if api_timing is not None else None
         try:
-            return func(*args, **kwargs)
+            result = func(*args, **kwargs)
+            if api_timing is not None:
+                api_timing[:] = [api_start, utc_now()]
+            return result
         except pulumi.automation.errors.ConcurrentUpdateError:
             logging.exception(f"ConcurrentUpdateError, retry #{i}")
             time.sleep(random.randint(1, 5))
@@ -608,6 +692,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
 
     error_msgs = []
     instance_started = False
+    api_timing: list[datetime] = []
     sum_timeout = timedelta()
     with lock:
         repo.pull()
@@ -662,9 +747,9 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
             stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger)
             try:
-                retry_locked(runner.create,vendor, {},
+                retry_locked(runner.create, vendor, {},
                              resource_opts | dict(instance_opts=instance_opts, user_data=user_data),
-                             stack_opts=stack_opts)
+                             stack_opts=stack_opts, api_timing=api_timing)
                 # empty it if create succeeded, just in case
                 error_msgs = []
                 instance_started = True
@@ -691,9 +776,9 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             pulumi_output = []
             stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger)
             try:
-                retry_locked(runner.create,vendor, {},
+                retry_locked(runner.create, vendor, {},
                              resource_opts | dict(instance_opts=instance_opts, user_data=b64_user_data),
-                             stack_opts=stack_opts)
+                             stack_opts=stack_opts, api_timing=api_timing)
                 # empty it if create succeeded, just in case
                 error_msgs = []
                 instance_started = True
@@ -752,7 +837,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 try:
                     retry_locked(runner.create, vendor, {},
                                  resource_opts | dict(instance_opts=current_instance_opts, user_data=b64_user_data),
-                                 stack_opts=stack_opts)
+                                 stack_opts=stack_opts, api_timing=api_timing)
                     # empty it if create succeeded, just in case
                     error_msgs = []
                     done = True
@@ -799,7 +884,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 try:
                     retry_locked(runner.create, vendor, {},
                                  resource_opts | dict(user_data=b64_user_data, image_sku=image_sku),
-                                 stack_opts=stack_opts)
+                                 stack_opts=stack_opts, api_timing=api_timing)
                     # empty it if create succeeded, just in case
                     error_msgs = []
                     done = True
@@ -868,7 +953,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             try:
                 retry_locked(runner.create, vendor, {},
                              resource_opts | dict(instance_opts=instance_opts),
-                             stack_opts=stack_opts)
+                             stack_opts=stack_opts, api_timing=api_timing)
                 # empty it if create succeeded, just in case
                 error_msgs = []
                 instance_started = True
@@ -878,6 +963,12 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 logging.exception("Couldn't start instance")
                 if not error_msgs:
                     error_msgs.append(str(e))
+
+    if instance_started and api_timing:
+        with lock:
+            repo.pull()
+            record_timing_api_success(data_dir, api_timing[0], api_timing[1])
+            repo.push_path(data_dir, f"Instance API timing from {repo.gha_url()}")
 
     if not instance_started:
         record_instance_start_failure(lock, data_dir, tasks, error_msgs)
