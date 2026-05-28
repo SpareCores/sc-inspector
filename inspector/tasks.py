@@ -221,6 +221,7 @@ timing = Task(
     priority=0,
     command="",
     timeout=timedelta(minutes=1),
+    servers_only=RUN_NEW_TASKS_ON_SERVERS,
 )
 
 dmidecode = DockerTask(
