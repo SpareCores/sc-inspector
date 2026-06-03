@@ -714,7 +714,8 @@ def inspect(ctx, vendor, instance, gpu_count, threads):
 
     logging.info("Updating the git repo")
     # we must clone the repo before writing anything to it
-    repo.get_repo()
+    sparse = (f"data/{vendor}/{instance}",)
+    repo.get_repo(sparse_paths=sparse)
     data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, instance)
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)

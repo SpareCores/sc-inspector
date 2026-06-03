@@ -10,7 +10,19 @@ RUN mkdir /repo
 RUN \
     git config --global --add safe.directory /repo/sc-inspector-data && \
     git config --global user.email "inspector@sparecores.com" && \
-    git config --global user.name "Spare Cores"
+    git config --global user.name "Spare Cores" && \
+    git config --global core.bigFileThreshold 1 && \
+    git config --global core.deltaBaseCacheLimit 0 && \
+    git config --global gc.auto 0 && \
+    git config --global pack.deltaCacheLimit 0 && \
+    git config --global pack.deltaCacheSize 1 && \
+    git config --global pack.threads 1 && \
+    git config --global pack.windowMemory 10m && \
+    git config --global pack.packSizeLimit 20m && \
+    git config --global core.packedGitWindowSize 16m && \
+    git config --global checkout.thresholdForParallelism 99999999 && \
+    git config --global core.compression 0 && \
+    git config --global index.threads 1
 RUN --mount=type=tmpfs,target=/tmp,rw \
     --mount=id=var_cache_apt,type=cache,target=/var/cache/apt,sharing=locked \
     --mount=id=var_lib_apt,type=cache,target=/var/lib/apt,sharing=locked \

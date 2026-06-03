@@ -13,7 +13,7 @@ from wrapt import synchronized
 REPO_URL = os.environ.get("REPO_URL")
 REPO_PATH = os.environ.get("REPO_PATH")
 
-commands = [
+_LOW_MEMORY_GIT_CONFIG = [
     ["git", "config", "--global", "core.bigFileThreshold", "1"],
     ["git", "config", "--global", "core.deltaBaseCacheLimit", "0"],
     ["git", "config", "--global", "gc.auto", "0"],
@@ -21,18 +21,35 @@ commands = [
     ["git", "config", "--global", "pack.deltaCacheSize", "1"],
     ["git", "config", "--global", "pack.threads", "1"],
     ["git", "config", "--global", "pack.windowMemory", "10m"],
+    ["git", "config", "--global", "pack.packSizeLimit", "20m"],
+    ["git", "config", "--global", "core.packedGitWindowSize", "16m"],
     ["git", "config", "--global", "checkout.thresholdForParallelism", "99999999"],
     ["git", "config", "--global", "core.compression", "0"],
-    ["git", "config", "--global", "index.threads", "1"]
+    ["git", "config", "--global", "index.threads", "1"],
 ]
 
-if psutil.virtual_memory().available < 1024 ** 3:
-    # try to reduce git's memory usage on small-mem machines
-    for command in commands:
+_git_low_memory_configured = False
+
+
+def _small_memory_machine() -> bool:
+    # Use total RAM: "available" often stays high on Linux due to cache.
+    return psutil.virtual_memory().total < 4 * 1024 ** 3
+
+
+def configure_git_low_memory() -> None:
+    global _git_low_memory_configured
+    if _git_low_memory_configured:
+        return
+    for command in _LOW_MEMORY_GIT_CONFIG:
         try:
             subprocess.run(command, check=True)
         except subprocess.CalledProcessError as e:
-            print(f"Error executing command: {e}")
+            logging.warning(f"git low-memory config failed: {command}: {e}")
+    _git_low_memory_configured = True
+
+
+if _small_memory_machine():
+    configure_git_low_memory()
 
 def is_ssh_url(url: str) -> bool:
     """Check if the URL is an SSH URL (starts with git@ or ssh://)."""
@@ -60,35 +77,76 @@ def add_token_auth(url: str, token: str) -> str:
     return urlunparse(unparsed)
 
 
-@functools.cache
-@synchronized
-def get_repo(repo_url=REPO_URL, repo_path=REPO_PATH):
-    """
-    Return git.Repo.
-
-    If there"s an already existing repo, use that, otherwise do a clone.
-    """
-    logging.info(f"Getting repo from {repo_path}, URL: {repo_url}")
-    # Only use token auth for HTTPS URLs, not SSH URLs
+def _authenticated_repo_url(repo_url: str) -> str:
     if not is_ssh_url(repo_url):
         if token := os.environ.get("GITHUB_TOKEN"):
             logging.debug("Using GITHUB_TOKEN for authentication")
-            repo_url = add_token_auth(repo_url, token)
-        else:
-            logging.debug("No GITHUB_TOKEN found, using URL as-is")
+            return add_token_auth(repo_url, token)
+        logging.debug("No GITHUB_TOKEN found, using URL as-is")
     else:
         logging.debug("Using SSH URL, no token auth needed")
+    return repo_url
+
+
+def _clone_repo(repo_url: str, repo_path: str, sparse_paths: tuple[str, ...] | None) -> None:
+    """Shallow clone via git CLI; optional sparse checkout limits working tree size."""
+    configure_git_low_memory()
+    parent = os.path.dirname(repo_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    logging.info(f"Cloning from {repo_url} to {repo_path} (sparse={sparse_paths})")
+    subprocess.run(
+        [
+            "git", "clone", "--depth", "1", "--single-branch", "--branch", "main",
+            "--no-checkout", repo_url, repo_path,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    if sparse_paths:
+        run_git_command(["sparse-checkout", "init", "--cone"], cwd=repo_path)
+        run_git_command(["sparse-checkout", "set", *sparse_paths], cwd=repo_path)
+    run_git_command(["checkout", "-f", "main"], cwd=repo_path)
+    logging.info(f"Successfully cloned repo to {repo_path}")
+
+
+def _repo_root(path: str | os.PathLike | None = None) -> str:
+    if REPO_PATH and os.path.isdir(os.path.join(REPO_PATH, ".git")):
+        return REPO_PATH
+    if path is None:
+        raise ValueError("REPO_PATH not set and no path given to locate git root")
+    cwd = path if os.path.isdir(path) else os.path.dirname(os.path.abspath(path))
+    return run_git_command(["rev-parse", "--show-toplevel"], cwd=cwd).strip()
+
+
+def path_has_changes(repo_root: str, path: str | os.PathLike) -> bool:
+    """Check for changes under path without loading the full index via GitPython."""
+    out = run_git_command(["status", "--porcelain", "--", path], cwd=repo_root)
+    return bool(out.strip())
+
+
+@functools.cache
+@synchronized
+def get_repo(repo_url=REPO_URL, repo_path=REPO_PATH, sparse_paths: tuple[str, ...] | None = None):
+    """
+    Return git.Repo.
+
+    If there"s an already existing repo, use that, otherwise do a shallow clone.
+    Pass sparse_paths (e.g. ("data/aws/t3.micro",)) to checkout only that subtree.
+    """
+    logging.info(f"Getting repo from {repo_path}, URL: {repo_url}, sparse={sparse_paths}")
+    repo_url = _authenticated_repo_url(repo_url)
     try:
         logging.info(f"Attempting to open existing repo at {repo_path}")
         repo = git.Repo(repo_path)
         logging.info(f"Successfully opened existing repo at {repo_path}")
         return repo
-    except (git.InvalidGitRepositoryError, git.NoSuchPathError) as e:
+    except (git.InvalidGitRepositoryError, git.NoSuchPathError):
         logging.info(f"Repo not found at {repo_path}, cloning from {repo_url}")
         try:
-            repo = git.Repo.clone_from(repo_url, repo_path, depth=1, branch="main", single_branch=True)
-            logging.info(f"Successfully cloned repo to {repo_path}")
-            return repo
+            _clone_repo(repo_url, repo_path, sparse_paths)
+            return git.Repo(repo_path)
         except Exception as clone_error:
             logging.error(f"Failed to clone repo from {repo_url} to {repo_path}: {clone_error}")
             raise
@@ -130,21 +188,15 @@ def push_path(path: str | os.PathLike, msg: str):
         is_ssh = is_ssh_url(repo_url)
         logging.warning(f"Skipping push: no authentication available (GITHUB_TOKEN={has_token}, SSH_URL={is_ssh}, REPO_URL={repo_url})")
         return
-    repo_path = os.path.dirname(os.path.abspath(path))
-    logging.info(f"Using repo_path: {repo_path}")
+    repo_root = _repo_root(path)
+    logging.info(f"Using repo root: {repo_root}")
     try:
-        repo = get_repo()
-        changes = repo.untracked_files + repo.index.diff(None)
-        logging.info(f"Found {len(changes)} changes: {len(repo.untracked_files)} untracked files, {len(repo.index.diff(None))} modified files")
-        if changes:
-            logging.info(f"Untracked files: {repo.untracked_files}")
-            logging.info(f"Modified files: {[d.a_path for d in repo.index.diff(None)]}")
-            # use git command instead of gitpython as the latter requires a lot of
-            # memory
+        get_repo()
+        if path_has_changes(repo_root, path):
             logging.info("Staging changes...")
-            run_git_command(['add', path], cwd=repo_path)
+            run_git_command(['add', path], cwd=repo_root)
             logging.info("Committing changes...")
-            run_git_command(['commit', '-m', msg], cwd=repo_path)
+            run_git_command(['commit', '-m', msg], cwd=repo_root)
             # Retry push with exponential backoff (remote ref may have moved; pull --rebase and retry)
             deadline = time.monotonic() + 10 * 60  # 10 minutes total
             wait_sec = 5  # initial backoff in seconds
@@ -158,9 +210,9 @@ def push_path(path: str | os.PathLike, msg: str):
                         time.sleep(sleep_sec)
                         wait_sec = min(wait_sec * 2, max_wait_per_round)
                     logging.info("Pulling with rebase...")
-                    run_git_command(['pull', '--rebase', 'origin'], cwd=repo_path)
+                    run_git_command(['pull', '--rebase', 'origin'], cwd=repo_root)
                     logging.info("Pushing to origin...")
-                    run_git_command(['push', 'origin'], cwd=repo_path)
+                    run_git_command(['push', 'origin'], cwd=repo_root)
                     logging.info(f"Successfully pushed changes to git: {msg}")
                     break
                 except subprocess.CalledProcessError as e:
@@ -179,14 +231,12 @@ def push_path(path: str | os.PathLike, msg: str):
 @synchronized
 def pull():
     logging.info("Pulling latest changes from remote...")
+    repo_root = _repo_root()
     try:
-        repo = get_repo()
-        origin = repo.remotes.origin
-        logging.info(f"Fetching from origin: {origin.url}")
-        origin.fetch()
-        logging.info("Fetch completed successfully")
+        get_repo()
+        run_git_command(["fetch", "origin"], cwd=repo_root)
         logging.info("Merging origin/main with 'theirs' strategy...")
-        repo.git.merge("-X", "theirs", "origin/main")
+        run_git_command(["merge", "-X", "theirs", "origin/main"], cwd=repo_root)
         logging.info("Pull completed successfully")
     except Exception as e:
         logging.error(f"Failed to pull from remote: {e}", exc_info=True)
