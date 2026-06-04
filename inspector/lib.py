@@ -127,6 +127,44 @@ class DockerTask(Task):
     version_docker_opts: dict = {}
 
 
+VLLM_PROBE_COMMAND = ["--probe-only"]
+# Wall-clock cap per image probe (must exceed harness /health wait; see SERVER_START_TIMEOUT_PROBE_*).
+VLLM_PROBE_TIMEOUT = timedelta(minutes=18)
+
+
+class VllmDockerTask(DockerTask):
+    """Try each image in order (probe startup, then full benchmark on first success)."""
+
+    images: list[str]
+    image: str = "vllm/unified"
+    probe_timeout: timedelta = VLLM_PROBE_TIMEOUT
+
+    def model_post_init(self, __context: Any) -> None:
+        object.__setattr__(self, "image", "|".join(self.images))
+
+
+def _vllm_image_label(image: str) -> str:
+    """Short label for logs (image name without registry/tag)."""
+    name = image.rsplit("/", 1)[-1]
+    return name.split(":", 1)[0]
+
+
+def _vllm_image_use_gpu(image: str) -> bool:
+    return "benchmark-vllm-gpu" in image
+
+
+def _vllm_image_attempts(
+    task: VllmDockerTask, gpu_count: float
+) -> list[tuple[str, str, bool]]:
+    attempts: list[tuple[str, str, bool]] = []
+    for image in task.images:
+        use_gpu = _vllm_image_use_gpu(image)
+        if use_gpu and gpu_count <= 0:
+            continue
+        attempts.append((_vllm_image_label(image), image, use_gpu))
+    return attempts
+
+
 def load_task_meta(task: Task, data_dir: str | os.PathLike, **kwargs) -> Meta:
     fn = os.path.join(data_dir, task.name, META_NAME)
     if os.path.exists(fn):
@@ -159,7 +197,7 @@ def get_taskgroups(vendor: str) -> dict[tuple[float, bool], list[Task]]:
     import tasks
     taskgroups = defaultdict(list)
     for name, task in inspect.getmembers(tasks):
-        if isinstance(task, Task) or isinstance(task, DockerTask):
+        if isinstance(task, (Task, DockerTask, VllmDockerTask)):
             # task name becomes the variable's name
             task.name = name.lower()
             # only add the task if vendor is listed in vendors_only or if it's empty
@@ -329,6 +367,114 @@ def container_remove(c):
     except Exception:
         # don't fail if we couldn't remove the container
         pass
+
+
+def _vllm_subtask_docker_opts(
+    task: VllmDockerTask, use_gpu: bool
+) -> dict:
+    opts = copy.deepcopy(task.docker_opts)
+    env = dict(opts.get("environment") or {})
+    env["BENCHMARK_VLLM_MODE"] = "gpu" if use_gpu else "cpu"
+    opts["environment"] = env
+    if use_gpu:
+        opts |= DOCKER_OPTS_GPU
+        opts["runtime"] = "nvidia"
+    return opts
+
+
+def _vllm_subtask(
+    task: VllmDockerTask,
+    image: str,
+    *,
+    command: list[str] | str | None,
+    timeout: timedelta,
+    use_gpu: bool,
+) -> DockerTask:
+    return DockerTask(
+        image=image,
+        command=command,
+        docker_opts=_vllm_subtask_docker_opts(task, use_gpu),
+        version_command=task.version_command,
+        version_docker_opts=task.version_docker_opts,
+        timeout=timeout,
+    )
+
+
+def _vllm_probe_image(
+    task: VllmDockerTask,
+    data_dir: str | os.PathLike,
+    image: str,
+    mode: str,
+    use_gpu: bool,
+    gpu_count: float,
+) -> tuple[bool, str]:
+    """Return (ok, error_detail). Only tests server startup, not bench serve."""
+    probe_meta = Meta(start=datetime.now())
+    sub = _vllm_subtask(
+        task,
+        image,
+        command=VLLM_PROBE_COMMAND,
+        timeout=task.probe_timeout,
+        use_gpu=use_gpu,
+    )
+    logging.info("vLLM probe mode=%s image=%s", mode, image)
+    run_docker(probe_meta, sub, data_dir, gpu_count if use_gpu else 0.0)
+    if probe_meta.exit_code == 0:
+        return True, ""
+    detail = probe_meta.error_msg or f"exit_code={probe_meta.exit_code}"
+    return False, detail
+
+
+def run_vllm_docker(
+    meta: Meta,
+    task: VllmDockerTask,
+    data_dir: str | os.PathLike,
+    gpu_count: float = 0.0,
+) -> tuple[str | None, bytes, bytes]:
+    attempts = _vllm_image_attempts(task, gpu_count)
+    probe_errors: list[str] = []
+    selected: tuple[str, str, bool] | None = None
+
+    for mode, image, use_gpu in attempts:
+        ok, detail = _vllm_probe_image(
+            task, data_dir, image, mode, use_gpu, gpu_count
+        )
+        if ok:
+            selected = (mode, image, use_gpu)
+            logging.info("vLLM probe selected mode=%s image=%s", mode, image)
+            break
+        probe_errors.append(f"probe {mode}: {detail}")
+        logging.info("vLLM probe failed mode=%s (%s), trying next", mode, detail)
+
+    if not selected:
+        meta.error_msg = "; ".join(probe_errors) or "No vLLM image passed startup probe"
+        meta.exit_code = 1
+        return None, b"", b""
+
+    mode, image, use_gpu = selected
+    meta.end = None
+    meta.exit_code = None
+    meta.error_msg = None
+    meta.stdout_bytes = None
+    meta.stderr_bytes = None
+
+    sub = _vllm_subtask(
+        task,
+        image,
+        command=task.command,
+        timeout=task.timeout,
+        use_gpu=use_gpu,
+    )
+    logging.info("vLLM full benchmark mode=%s image=%s", mode, image)
+    ver, stdout, stderr = run_docker(
+        meta, sub, data_dir, gpu_count if use_gpu else 0.0
+    )
+    if meta.exit_code != 0:
+        meta.error_msg = (
+            f"benchmark failed on {mode} after successful probe"
+            f" ({meta.error_msg or meta.exit_code})"
+        )
+    return ver, stdout, stderr
 
 
 def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> tuple[str | None, bytes, bytes]:
@@ -590,7 +736,11 @@ def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> N
                 write_meta(meta, os.path.join(task_dir, META_NAME))
                 continue
             try:
-                if isinstance(task, DockerTask):
+                if isinstance(task, VllmDockerTask):
+                    ver, stdout, stderr = run_vllm_docker(
+                        meta, task, os.path.join(data_dir, task.name), gpu_count
+                    )
+                elif isinstance(task, DockerTask):
                     ver, stdout, stderr = run_docker(meta, task, os.path.join(data_dir, task.name), gpu_count)
                 else:
                     ver, stdout, stderr = run_native(meta, task, os.path.join(data_dir, task.name))

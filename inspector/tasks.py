@@ -4,7 +4,12 @@ from datetime import timedelta
 import parse
 import psutil
 import transform
-from lib import DOCKER_OPTS, DockerTask, META_NAME, Task
+from lib import DOCKER_OPTS, DockerTask, META_NAME, Task, VllmDockerTask
+
+# vLLM CPU uses multiprocessing; default Docker /dev/shm (64 MiB) is too small.
+VLLM_DOCKER_OPTS = DOCKER_OPTS | {
+    "shm_size": 4 * 1024**3,
+}
 
 def tracker_docker_opts(job_name: str, **extra_env: str | None) -> dict:
     return dict(
@@ -491,9 +496,29 @@ llm = DockerTask(
     version_command="--version",
 )
 
+# Unified vLLM: probe GPU → Hub CPU → AVX2 CPU images, then GuideLLM benchmark on first probe success.
+# Output under data/.../vllm/ (no fallback after benchmark starts).
+
+vllm = VllmDockerTask(
+    parallel=False,
+    timeout=timedelta(hours=3),
+    minimum_memory=4,
+    priority=12,
+    images=[
+        "ghcr.io/sparecores/benchmark-vllm-gpu:main",
+        "ghcr.io/sparecores/benchmark-vllm-cpu:main",
+        "ghcr.io/sparecores/benchmark-vllm-cpu-avx2:main",
+    ],
+    docker_opts=VLLM_DOCKER_OPTS | tracker_docker_opts("vllm"),
+    command=None,
+    version_command="--version",
+    start_with_instance=True,
+    always_run=True,
+)
+
 membench = DockerTask(
     parallel=False,
-    priority=12,
+    priority=13,
     timeout=timedelta(minutes=40),
     image="ghcr.io/sparecores/membench:main",
     docker_opts=DOCKER_OPTS | tracker_docker_opts("membench"),
