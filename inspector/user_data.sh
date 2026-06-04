@@ -48,6 +48,26 @@ blacklist lbm-nouveau
 options nouveau modeset=0
 EOF
     }
+    # Headless cloud GPUs: apt nvidia-driver sets modeset=1 and 71-nvidia.rules auto-loads
+    # nvidia-drm. With no display connectors the DRM driver unloads immediately; udev then
+    # reloads it (~1 Hz), causing modprobe/nvidia-modeset CPU spin and PCI bind/unbind churn.
+    configure_headless_nvidia() {
+        cat > /etc/modprobe.d/nvidia-graphics-drivers-kms.conf <<'EOF'
+options nvidia_drm modeset=0
+options nvidia NVreg_PreserveVideoMemoryAllocations=1
+options nvidia NVreg_TemporaryFilePath=/var
+EOF
+        cat > /etc/udev/rules.d/72-nvidia-disable-runtime-pm.rules <<'EOF'
+ACTION=="add|bind", SUBSYSTEM=="pci", ATTR{vendor}=="0x10de", ATTR{class}=="0x03[0-9]*", TEST=="power/control", ATTR{power/control}="on"
+EOF
+        cat > /etc/udev/rules.d/73-nvidia-headless-benchmark.rules <<'EOF'
+ACTION=="add", DEVPATH=="/bus/pci/drivers/nvidia", RUN-="/sbin/modprobe nvidia-modeset"
+ACTION=="remove", DEVPATH=="/bus/pci/drivers/nvidia", RUN-="/sbin/modprobe -r nvidia-modeset"
+ACTION=="add", DEVPATH=="/bus/pci/drivers/nvidia", RUN-="/sbin/modprobe nvidia-drm"
+ACTION=="remove", DEVPATH=="/bus/pci/drivers/nvidia", RUN-="/sbin/modprobe -r nvidia-drm"
+EOF
+        udevadm control --reload-rules 2>/dev/null || true
+    }
     activate_nvidia_driver() {
         disable_nouveau
         for pci_addr in $(lspci -d 10de: -n 2>/dev/null | awk '{print "0000:"$1}'); do
@@ -57,12 +77,11 @@ EOF
                 echo "$pci_addr" > "/sys/bus/pci/devices/$pci_addr/driver/unbind" 2>/dev/null || true
             fi
         done
-        modprobe -r nvidia 2>/dev/null || true
+        modprobe -r nvidia_drm nvidia_modeset nvidia 2>/dev/null || true
         modprobe -r nouveau drm_ttm_helper ttm drm_gpuvm drm_exec gpu_sched drm_display_helper drm_kms_helper drm 2>/dev/null || true
         modprobe -r nouveau 2>/dev/null || true
         modprobe nvidia
         modprobe nvidia_uvm 2>/dev/null || true
-        modprobe nvidia_drm modeset=0 2>/dev/null || true
     }
     # nvidia container toolkit (always for GPU instances)
     curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
@@ -204,6 +223,7 @@ if [ -n "$NVIDIA_DRIVER_PKG" ]; then
         [ "$pkg" = "$NVIDIA_DRIVER_PKG" ] && continue
         apt-get remove -y "$pkg" || true
     done
+    configure_headless_nvidia
     activate_nvidia_driver
 fi
 systemctl restart docker
