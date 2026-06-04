@@ -34,10 +34,36 @@ echo \
   tee /etc/apt/sources.list.d/docker.list > /dev/null
 # nvidia drivers/toolkit when GPU_COUNT != 0
 NVIDIA_PKGS=""
+NVIDIA_DRIVER_PKG=""
 ALIYUN_DRIVER_PLUGIN=""
 FRACTIONAL_GPU_DRIVER=""
 
 if [ "{GPU_COUNT}" != "0" ] && [ "{GPU_COUNT}" != "0.0" ]; then
+    # Ubuntu cloud images (e.g. UpCloud) may boot with nouveau bound to the GPU.
+    # Blacklist and unbind without reboot so the proprietary driver can probe the device.
+    disable_nouveau() {
+        cat > /etc/modprobe.d/nouveau.conf <<'EOF'
+blacklist nouveau
+blacklist lbm-nouveau
+options nouveau modeset=0
+EOF
+    }
+    activate_nvidia_driver() {
+        disable_nouveau
+        for pci_addr in $(lspci -d 10de: -n 2>/dev/null | awk '{print "0000:"$1}'); do
+            [ -d "/sys/bus/pci/devices/$pci_addr/driver" ] || continue
+            driver=$(basename "$(readlink "/sys/bus/pci/devices/$pci_addr/driver" 2>/dev/null)" 2>/dev/null || echo "")
+            if [ "$driver" = "nouveau" ]; then
+                echo "$pci_addr" > "/sys/bus/pci/devices/$pci_addr/driver/unbind" 2>/dev/null || true
+            fi
+        done
+        modprobe -r nvidia 2>/dev/null || true
+        modprobe -r nouveau drm_ttm_helper ttm drm_gpuvm drm_exec gpu_sched drm_display_helper drm_kms_helper drm 2>/dev/null || true
+        modprobe -r nouveau 2>/dev/null || true
+        modprobe nvidia
+        modprobe nvidia_uvm 2>/dev/null || true
+        modprobe nvidia_drm modeset=0 2>/dev/null || true
+    }
     # nvidia container toolkit (always for GPU instances)
     curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg \
       && curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
@@ -137,6 +163,8 @@ EOF
     if [ -z "$FRACTIONAL_GPU_DRIVER" ]; then
         # Only proceed if NVIDIA_PKGS hasn't been set by Alibaba plugin or other means
         if [ -z "$NVIDIA_PKGS" ]; then
+            disable_nouveau
+            apt-get install -y jq lshw software-properties-common
             add-apt-repository ppa:graphics-drivers/ppa -y
             
             # Detect GPU using lshw (more reliable than lspci for product names)
@@ -158,7 +186,8 @@ EOF
                 fi
             fi
             
-            NVIDIA_PKGS="nvidia-driver-$DRIVER_VERSION-$DRIVER_VARIANT nvidia-container-toolkit"
+            NVIDIA_DRIVER_PKG="nvidia-driver-$DRIVER_VERSION-$DRIVER_VARIANT"
+            NVIDIA_PKGS="$NVIDIA_DRIVER_PKG nvidia-container-toolkit"
         fi
     fi
 fi
@@ -168,6 +197,14 @@ apt-get install -y $NVIDIA_PKGS docker-ce docker-ce-cli containerd.io docker-bui
 if [ -n "$ALIYUN_DRIVER_PLUGIN" ]; then
     acs-plugin-manager --remove --plugin "$ALIYUN_DRIVER_PLUGIN" >/dev/null 2>&1 || true
     acs-plugin-manager --exec --plugin "$ALIYUN_DRIVER_PLUGIN" >/dev/null 2>&1 || true
+fi
+# Load the apt-installed NVIDIA driver without reboot (UpCloud and similar Ubuntu images)
+if [ -n "$NVIDIA_DRIVER_PKG" ]; then
+    for pkg in $(dpkg-query -W -f='${{Package}}\n' 'nvidia-driver-*' 2>/dev/null); do
+        [ "$pkg" = "$NVIDIA_DRIVER_PKG" ] && continue
+        apt-get remove -y "$pkg" || true
+    done
+    activate_nvidia_driver
 fi
 systemctl restart docker
 # set up SSH for git operations
