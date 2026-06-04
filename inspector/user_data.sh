@@ -91,7 +91,7 @@ EOF
     
     # Check if this is a fractional GPU instance (GPU_COUNT is not a whole number)
     # Use awk to check if the number has a non-zero fractional part
-    IS_FRACTIONAL=$(echo "{GPU_COUNT}" | awk '{{if ($1 != int($1)) print "true"; else print "false"}}')
+    IS_FRACTIONAL=$(echo "{GPU_COUNT}" | awk '{if ($1 != int($1)) print "true"; else print "false"}')
     if [ "$IS_FRACTIONAL" = "true" ]; then
         IS_FRACTIONAL_GPU=true
     else
@@ -199,7 +199,7 @@ EOF
                 
                 # Check for older architectures that need proprietary server driver
                 # Volta (GV1xx, V100, V100S), Pascal (GP1xx, P100, P40, P4), Maxwell (GM1xx, M60, M40), Kepler (GK1xx, K80, K40)
-                if echo "$GPU_INFO" | grep -qiE 'GV1[0-9]{{2}}|V100S?|GP1[0-9]{{2}}|P[146]0|GM1[0-9]{{2}}|M[46]0|GK1[0-9]{{2}}|K[248]0'; then
+                if echo "$GPU_INFO" | grep -qiE 'GV1[0-9]{2}|V100S?|GP1[0-9]{2}|P[146]0|GM1[0-9]{2}|M[46]0|GK1[0-9]{2}|K[248]0'; then
                     DRIVER_VARIANT="server"
                     DRIVER_VERSION="580"
                 fi
@@ -219,7 +219,7 @@ if [ -n "$ALIYUN_DRIVER_PLUGIN" ]; then
 fi
 # Load the apt-installed NVIDIA driver without reboot (UpCloud and similar Ubuntu images)
 if [ -n "$NVIDIA_DRIVER_PKG" ]; then
-    for pkg in $(dpkg-query -W -f='${{Package}}\n' 'nvidia-driver-*' 2>/dev/null); do
+    for pkg in $(dpkg-query -W -f='${Package}\n' 'nvidia-driver-*' 2>/dev/null); do
         [ "$pkg" = "$NVIDIA_DRIVER_PKG" ] && continue
         apt-get remove -y "$pkg" || true
     done
@@ -249,7 +249,7 @@ pkill -9 -f assist_daemon
 sed -i 's/ENABLED=1/ENABLED=0/' /etc/default/motd-news 2>/dev/null
 chmod -x /etc/update-motd.d/* 2>/dev/null
 # remove unwanted packages
-apt-get autoremove -y $(dpkg-query -W -f='${{Package}}\n' \
+apt-get autoremove -y $(dpkg-query -W -f='${Package}\n' \
     apport fwupd unattended-upgrades snapd packagekit \
     walinuxagent google-osconfig-agent 2>/dev/null)
 # https://github.com/NVIDIA/nvidia-container-toolkit/issues/202

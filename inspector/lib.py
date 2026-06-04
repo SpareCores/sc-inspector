@@ -980,20 +980,23 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
     ssh_deploy_key = os.environ.get("SSH_DEPLOY_KEY", "")
     ssh_deploy_key_b64 = base64.b64encode(ssh_deploy_key.encode("utf-8")).decode("ascii") if ssh_deploy_key else ""
     # start instance
-    user_data = USER_DATA.format(
-        SSH_DEPLOY_KEY_B64=ssh_deploy_key_b64,
-        REPO_URL=repo_url_ssh,
-        GITHUB_SERVER_URL=os.environ.get("GITHUB_SERVER_URL", ""),
-        GITHUB_REPOSITORY=os.environ.get("GITHUB_REPOSITORY", ""),
-        GITHUB_RUN_ID=os.environ.get("GITHUB_RUN_ID", ""),
-        BENCHMARK_SECRETS_PASSPHRASE=os.environ.get("BENCHMARK_SECRETS_PASSPHRASE", ""),
-        SENTINEL_API_TOKEN=os.environ.get("SENTINEL_API_TOKEN", ""),
-        VENDOR=vendor,
-        INSTANCE=server,
-        GPU_COUNT=srv_data.gpu_count,
-        SHUTDOWN_MINS=timeout_mins + 30,  # give enough time to set up the machine
-        HOST_TIMING_DIR=host_timing_dir(vendor, server, github_run_id()),
-    )
+    replacements = {
+        "SSH_DEPLOY_KEY_B64": ssh_deploy_key_b64,
+        "REPO_URL": repo_url_ssh,
+        "GITHUB_SERVER_URL": os.environ.get("GITHUB_SERVER_URL", ""),
+        "GITHUB_REPOSITORY": os.environ.get("GITHUB_REPOSITORY", ""),
+        "GITHUB_RUN_ID": os.environ.get("GITHUB_RUN_ID", ""),
+        "BENCHMARK_SECRETS_PASSPHRASE": os.environ.get("BENCHMARK_SECRETS_PASSPHRASE", ""),
+        "SENTINEL_API_TOKEN": os.environ.get("SENTINEL_API_TOKEN", ""),
+        "VENDOR": vendor,
+        "INSTANCE": server,
+        "GPU_COUNT": srv_data.gpu_count,
+        "SHUTDOWN_MINS": timeout_mins + 30,  # give enough time to set up the machine
+        "HOST_TIMING_DIR": host_timing_dir(vendor, server, github_run_id()),
+    }
+    user_data = USER_DATA
+    for key, value in replacements.items():
+        user_data = user_data.replace("{" + key + "}", str(value))
     b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
     if vendor in ("aws", "gcp", "hcloud", "upcloud", "ovh", "alicloud"):
         # get the copy (so we don't modify the original) of the default instance opts for the vendor and add ours
