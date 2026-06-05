@@ -369,6 +369,25 @@ def container_remove(c):
         pass
 
 
+def docker_prune_after_round() -> None:
+    """Reclaim disk under /var/lib/docker between inspect taskgroups."""
+    if os.environ.get("DOCKER_PRUNE", "1").lower() in ("0", "false", "no"):
+        return
+    try:
+        d = docker.from_env(timeout=120)
+        containers = d.containers.prune()
+        images = d.images.prune(filters={"dangling": False})
+        networks = d.networks.prune()
+        logging.info(
+            "Docker prune after taskgroup: containers_deleted=%s images_space_reclaimed=%s networks_deleted=%s",
+            containers.get("ContainersDeleted"),
+            images.get("SpaceReclaimed"),
+            networks.get("NetworksDeleted"),
+        )
+    except Exception:
+        logging.exception("Docker prune failed (non-fatal)")
+
+
 def _vllm_subtask_docker_opts(
     task: VllmDockerTask, use_gpu: bool
 ) -> dict:
@@ -806,6 +825,7 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: flo
                 q.join()
         # wait at the end of the taskgroup
         q.join()
+        docker_prune_after_round()
         # do a push at the end of each round if we made changes
         if meta_changed:
             for i in range(3):
