@@ -1031,7 +1031,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             instance_opts |= dict(ssh_key={"name": "spare-cores"})
         if vendor == "upcloud":
             # explicitly set SSH key from envvar
-            resource_opts |= dict(public_key=os.environ.get("SSH_PUBLIC_KEY"))
+            resource_opts |= dict(public_key=os.environ.get("SSH_PUBLIC_KEY"), disk_size=VOLUME_SIZE)
         pulumi_output = []
         for region in regions:
             logging.info(f"Trying {region}")
