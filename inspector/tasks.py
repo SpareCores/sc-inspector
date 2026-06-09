@@ -18,6 +18,7 @@ def tracker_docker_opts(job_name: str, **extra_env: str | None) -> dict:
             "TRACKER_JOB_NAME": job_name,
             "TRACKER_EXTERNAL_RUN_ID": os.environ.get("GITHUB_RUN_ID"),
             "SENTINEL_API_TOKEN": os.environ.get("SENTINEL_API_TOKEN"),
+            "HF_TOKEN": os.environ.get("HF_TOKEN"),
             **extra_env,
         }
     )

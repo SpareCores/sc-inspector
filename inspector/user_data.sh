@@ -265,5 +265,6 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e HOST_TIMING_DIR="$TIMING_HOST_DIR" \
     -e BENCHMARK_SECRETS_PASSPHRASE={BENCHMARK_SECRETS_PASSPHRASE} \
     -e SENTINEL_API_TOKEN={SENTINEL_API_TOKEN} \
+    -e HF_TOKEN={HF_TOKEN} \
     ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT}
 poweroff

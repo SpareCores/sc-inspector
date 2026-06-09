@@ -525,9 +525,13 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, gpu_co
             image_ref = next(iter(image.attrs.get("RepoDigests") or []), task.image)
             env = dict(docker_opts.get("environment") or {})
             env["TRACKER_CONTAINER_IMAGE"] = image_ref
+            if hf_token := os.environ.get("HF_TOKEN"):
+                env["HF_TOKEN"] = hf_token
             docker_opts["environment"] = env
             version_env = dict(version_docker_opts.get("environment") or {})
             version_env["TRACKER_CONTAINER_IMAGE"] = image_ref
+            if hf_token := os.environ.get("HF_TOKEN"):
+                version_env["HF_TOKEN"] = hf_token
             version_docker_opts["environment"] = version_env
             if task.version_command:
                 ver = d.containers.run(task.image, task.version_command, **version_docker_opts).strip().decode("utf-8").replace("\n", ", ")
@@ -1008,6 +1012,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         "GITHUB_RUN_ID": os.environ.get("GITHUB_RUN_ID", ""),
         "BENCHMARK_SECRETS_PASSPHRASE": os.environ.get("BENCHMARK_SECRETS_PASSPHRASE", ""),
         "SENTINEL_API_TOKEN": os.environ.get("SENTINEL_API_TOKEN", ""),
+        "HF_TOKEN": os.environ.get("HF_TOKEN", ""),
         "VENDOR": vendor,
         "INSTANCE": server,
         "GPU_COUNT": srv_data.gpu_count,
