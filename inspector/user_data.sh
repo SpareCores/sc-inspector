@@ -68,6 +68,17 @@ ACTION=="remove", DEVPATH=="/bus/pci/drivers/nvidia", RUN-="/sbin/modprobe -r nv
 EOF
         udevadm control --reload-rules 2>/dev/null || true
     }
+    # Ubuntu transitional metapackages (e.g. nvidia-driver-590-open) depend on the real
+    # driver package (nvidia-driver-595-open). Resolve before pruning other drivers.
+    resolve_nvidia_driver_pkg() {
+        pkg="$1"
+        while true; do
+            dep=$(apt-cache show "$pkg" 2>/dev/null | awk -F': ' '/^Depends:/{print $2}' | tr ',' '\n' | sed 's/^[[:space:]]*//' | grep -E '^nvidia-driver-[0-9]' | head -1)
+            [ -n "$dep" ] && [ "$dep" != "$pkg" ] || break
+            pkg="$dep"
+        done
+        echo "$pkg"
+    }
     activate_nvidia_driver() {
         disable_nouveau
         for pci_addr in $(lspci -d 10de: -n 2>/dev/null | awk '{print "0000:"$1}'); do
@@ -219,6 +230,7 @@ if [ -n "$ALIYUN_DRIVER_PLUGIN" ]; then
 fi
 # Load the apt-installed NVIDIA driver without reboot (UpCloud and similar Ubuntu images)
 if [ -n "$NVIDIA_DRIVER_PKG" ]; then
+    NVIDIA_DRIVER_PKG=$(resolve_nvidia_driver_pkg "$NVIDIA_DRIVER_PKG")
     for pkg in $(dpkg-query -W -f='${Package}\n' 'nvidia-driver-*' 2>/dev/null); do
         [ "$pkg" = "$NVIDIA_DRIVER_PKG" ] && continue
         apt-get remove -y "$pkg" || true
@@ -248,7 +260,12 @@ pkill -9 -f assist_daemon
 # disable motd-news (makes network calls on login)
 sed -i 's/ENABLED=1/ENABLED=0/' /etc/default/motd-news 2>/dev/null
 chmod -x /etc/update-motd.d/* 2>/dev/null
-# remove unwanted packages
+# remove unwanted packages (keep NVIDIA libs; autoremove would drop them after metapackage pruning)
+if [ -n "$NVIDIA_DRIVER_PKG" ]; then
+    for pkg in $(dpkg-query -W -f='${Package}\n' 'nvidia-*' 'libnvidia-*' 2>/dev/null); do
+        apt-mark manual "$pkg" 2>/dev/null || true
+    done
+fi
 apt-get autoremove -y $(dpkg-query -W -f='${Package}\n' \
     apport fwupd unattended-upgrades snapd packagekit \
     walinuxagent google-osconfig-agent 2>/dev/null)
