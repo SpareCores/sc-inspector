@@ -7,6 +7,8 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # zstd layer compression for faster pulls on inspector VMs (Docker Engine ≥ 23.0).
+  IMAGE_OUTPUT: type=registry,push=true,oci-mediatypes=true,compression=zstd,compression-level=7,force-compression=true
 jobs:
   build-and-push-image:
     strategy:
@@ -52,7 +54,7 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
-          push: true
+          outputs: ${{ env.IMAGE_OUTPUT }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/sparecores/sc-inspector:buildcache-${{ matrix.arch }}
