@@ -153,6 +153,14 @@ def _vllm_image_use_gpu(image: str) -> bool:
     return "benchmark-vllm-gpu" in image
 
 
+def _vllm_image_amd64_only(image: str) -> bool:
+    return "benchmark-vllm-cpu-avx2" in image
+
+
+def _host_is_arm64() -> bool:
+    return platform.machine().lower() in ("aarch64", "arm64")
+
+
 def _vllm_image_attempts(
     task: VllmDockerTask, gpu_count: float
 ) -> list[tuple[str, str, bool]]:
@@ -160,6 +168,8 @@ def _vllm_image_attempts(
     for image in task.images:
         use_gpu = _vllm_image_use_gpu(image)
         if use_gpu and gpu_count <= 0:
+            continue
+        if _vllm_image_amd64_only(image) and _host_is_arm64():
             continue
         attempts.append((_vllm_image_label(image), image, use_gpu))
     return attempts
