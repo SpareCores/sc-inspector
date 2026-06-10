@@ -238,6 +238,9 @@ if [ -n "$NVIDIA_DRIVER_PKG" ]; then
     configure_headless_nvidia
     activate_nvidia_driver
 fi
+if [ "{GPU_COUNT}" != "0" ] && [ "{GPU_COUNT}" != "0.0" ]; then
+    nvidia-ctk runtime configure --runtime=nvidia 2>/dev/null || true
+fi
 systemctl restart docker
 # set up SSH for git operations
 mkdir -p /root/.ssh

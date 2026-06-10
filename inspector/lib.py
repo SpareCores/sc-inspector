@@ -397,7 +397,6 @@ def _vllm_subtask_docker_opts(
     opts["environment"] = env
     if use_gpu:
         opts |= DOCKER_OPTS_GPU
-        opts["runtime"] = "nvidia"
     return opts
 
 
