@@ -477,10 +477,11 @@ def start(ctx, exclude, start_only, vendor):
         try:
             tasks = lib.tasks_to_start(vnd, data_dir, srv_data)
         except Exception as e:
-            # stop if an exception occurred
-            exception = e
+            # record failure but keep evaluating other servers; raised at end of run
+            if exception is None:
+                exception = e
             logging.exception(f"{vnd}/{server} failed")
-            break
+            continue
         if not tasks:
             logging.info(f"No tasks for {vnd}/{server}")
             continue
