@@ -98,8 +98,7 @@ class Meta(BaseModel):
 
 class Task(BaseModel):
     vendors_only: set = set()  # run for these vendors only, empty means all
-    # Any first so DynamicServerSet is kept as-is (Pydantic would coerce it to set via __iter__, losing enable_vendors)
-    servers_only: Any | set[tuple] = set()  # run for these vendor/server pairs only, empty means all
+    servers_only: set[tuple] = set()  # run for these vendor/server pairs only, empty means all
     servers_exclude: set[tuple] = set()  # exclude these servers
     parallel: bool = False  # should we run this task concurrently with other tasks in the same priority group?
     priority: int | float = math.inf  # lower priority runs earlier, missing means last
@@ -224,9 +223,7 @@ def get_tasks(vendor: str) -> list[Task]:
 
 
 def _server_in_servers_only(servers_only, vendor, instance, data_dir=None):
-    """Check if (vendor, instance) is in servers_only. For DynamicServerSet with include_fresh, pass data_dir."""
-    if hasattr(servers_only, "contains"):
-        return servers_only.contains(vendor, instance, data_dir)
+    """Check if (vendor, instance) is in servers_only."""
     return (vendor, instance) in servers_only
 
 
@@ -1032,10 +1029,10 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
     for key, value in replacements.items():
         user_data = user_data.replace("{" + key + "}", str(value))
     b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
-    if vendor in ("aws", "gcp", "hcloud", "upcloud", "ovh", "alicloud"):
+    if vendor in ("aws", "gcp", "hcloud", "upcloud", "ovh", "alicloud", "vultr"):
         # get the copy (so we don't modify the original) of the default instance opts for the vendor and add ours
         instance_opts = copy.deepcopy(default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts"))
-    if vendor in ["hcloud", "upcloud", "ovh"]:
+    if vendor in ["hcloud", "upcloud", "ovh", "vultr"]:
         resource_opts = dict(instance=server)
         if vendor == "hcloud":
             # allows only one key with the same fingerprint, so we need to use the already existing one
@@ -1043,9 +1040,11 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         if vendor == "ovh":
             # also reuse already existing SSH key
             instance_opts |= dict(ssh_key={"name": "spare-cores"})
-        if vendor == "upcloud":
+        if vendor in ("upcloud", "vultr"):
             # explicitly set SSH key from envvar
-            resource_opts |= dict(public_key=os.environ.get("SSH_PUBLIC_KEY"), disk_size=VOLUME_SIZE)
+            resource_opts |= dict(public_key=os.environ.get("SSH_PUBLIC_KEY"))
+        if vendor == "upcloud":
+            resource_opts |= dict(disk_size=VOLUME_SIZE)
         pulumi_output = []
         for region in regions:
             logging.info(f"Trying {region}")

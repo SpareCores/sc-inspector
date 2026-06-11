@@ -4,7 +4,7 @@ from datetime import timedelta
 import parse
 import psutil
 import transform
-from lib import DOCKER_OPTS, DockerTask, META_NAME, Task, VllmDockerTask
+from lib import DOCKER_OPTS, DockerTask, Task, VllmDockerTask
 
 # vLLM CPU uses multiprocessing; default Docker /dev/shm (64 MiB) is too small.
 VLLM_DOCKER_OPTS = DOCKER_OPTS | {
@@ -35,187 +35,6 @@ GPU_EXCLUDE = {
     ("aws", "g3s.xlarge"),
     ("gcp", "a2-megagpu-16g"),
 }
-
-class DynamicServerSet:
-    """
-    A set-like object that allows dynamic inclusion of all instances for a specific vendor
-    while maintaining a static list for other vendors.
-
-    When include_fresh_servers=True, also includes servers that don't yet have
-    dmidecode/meta.json in the repo (newly introduced instance types under evaluation).
-    Use contains(vendor, instance, data_dir) with data_dir for fresh-server detection.
-    """
-    def __init__(self, static_servers, enable_vendors=None, include_fresh_servers=False):
-        """
-        :param static_servers: Set of (vendor, instance_type) tuples for static inclusion
-        :param enable_vendors: Set of vendor names that should match all instances
-        :param include_fresh_servers: If True, include servers without dmidecode/meta.json
-        """
-        self.static_servers = static_servers
-        self.enable_vendors = enable_vendors or set()
-        self.include_fresh_servers = include_fresh_servers
-
-    def contains(self, vendor, instance, data_dir=None):
-        """
-        Check if (vendor, instance) is in the set.
-        When include_fresh_servers=True and data_dir is provided, also returns True
-        for servers that don't have dmidecode/meta.json yet (fresh/newly introduced).
-        """
-        if (vendor, instance) in self.static_servers:
-            return True
-        if vendor in self.enable_vendors:
-            return True
-        if self.include_fresh_servers and data_dir:
-            dmidecode_meta = os.path.join(data_dir, "dmidecode", META_NAME)
-            if not os.path.exists(dmidecode_meta):
-                return True  # fresh server, no dmidecode output yet
-        return False
-
-    def __contains__(self, item):
-        """
-        Check if (vendor, instance_type) is in the set.
-        For fresh-server detection, use contains(vendor, instance, data_dir).
-        """
-        if not isinstance(item, tuple) or len(item) != 2:
-            return False
-        vendor, instance = item
-        if vendor in self.enable_vendors:
-            return True
-        return item in self.static_servers
-
-    def __bool__(self):
-        """Return True if there are any static servers or enabled vendors"""
-        return bool(self.static_servers) or bool(self.enable_vendors)
-
-    def __iter__(self):
-        """Iterate over static servers"""
-        return iter(self.static_servers)
-
-    def __len__(self):
-        """Return length of static servers (for compatibility)"""
-        return len(self.static_servers)
-
-
-RUN_NEW_TASKS_ON_SERVERS = DynamicServerSet(
-    static_servers={
-        # ("aws", "r8a.48xlarge"),
-        # ("aws", "r8g.48xlarge"),
-        ("aws", "r8a.4xlarge"),
-        ("aws", "g6.8xlarge"),
-        ("gcp", "c2d-highmem-32"),
-        ("hcloud", "ccx53"),
-        ("ovh", "r3-256"),
-        ("alicloud", "ecs.r8ae.8xlarge"),
-        # ("aws", "t3.nano"),
-        # ("aws", "t3a.nano"),
-        # ("aws", "i7ie.48xlarge"),
-        # ("aws", "i7ie.metal-48xl"),
-        # ("azure", "M416s_9_v2"),
-        # ("gcp", "c3d-highcpu-360"),
-        # AWS x8i instances
-        # ("aws", "x8i.12xlarge"),
-        # ("aws", "x8i.16xlarge"),
-        # ("aws", "x8i.24xlarge"),
-        # ("aws", "x8i.2xlarge"),
-        # ("aws", "x8i.32xlarge"),
-        # ("aws", "x8i.48xlarge"),
-        # ("aws", "x8i.4xlarge"),
-        # ("aws", "x8i.64xlarge"),
-        # ("aws", "x8i.8xlarge"),
-        # ("aws", "x8i.96xlarge"),
-        # ("aws", "x8i.large"),
-        # ("aws", "x8i.metal-48xl"),
-        # ("aws", "x8i.metal-96xl"),
-        # ("aws", "x8i.xlarge"),
-        # AWS x2i* instances
-        # ("aws", "x2idn.16xlarge"),
-        # ("aws", "x2idn.24xlarge"),
-        # ("aws", "x2idn.32xlarge"),
-        # ("aws", "x2idn.metal"),
-        # ("aws", "x2iedn.16xlarge"),
-        # ("aws", "x2iedn.24xlarge"),
-        # ("aws", "x2iedn.2xlarge"),
-        # ("aws", "x2iedn.32xlarge"),
-        # ("aws", "x2iedn.4xlarge"),
-        # ("aws", "x2iedn.8xlarge"),
-        # ("aws", "x2iedn.metal"),
-        # ("aws", "x2iedn.xlarge"),
-        # ("aws", "x2iezn.12xlarge"),
-        # ("aws", "x2iezn.2xlarge"),
-        # ("aws", "x2iezn.4xlarge"),
-        # ("aws", "x2iezn.6xlarge"),
-        # ("aws", "x2iezn.8xlarge"),
-        # ("aws", "x2iezn.metal"),
-        # AWS GPU instances (excluding those in GPU_EXCLUDE)
-        # ("aws", "dl1.24xlarge"),
-        # ("aws", "g3.4xlarge"),
-        # ("aws", "g3.8xlarge"),
-        # ("aws", "g3s.xlarge"),
-        # ("aws", "g4ad.16xlarge"),
-        # ("aws", "g4ad.2xlarge"),
-        # ("aws", "g4ad.4xlarge"),
-        # ("aws", "g4ad.8xlarge"),
-        # ("aws", "g4ad.xlarge"),
-        # ("aws", "g4dn.12xlarge"),
-        # ("aws", "g4dn.16xlarge"),
-        # ("aws", "g4dn.2xlarge"),
-        # ("aws", "g4dn.4xlarge"),
-        # ("aws", "g4dn.8xlarge"),
-        # ("aws", "g4dn.xlarge"),
-        # ("aws", "g5.12xlarge"),
-        # ("aws", "g5.16xlarge"),
-        # ("aws", "g5.24xlarge"),
-        # ("aws", "g5.2xlarge"),
-        # ("aws", "g5.48xlarge"),
-        # ("aws", "g5.4xlarge"),
-        # ("aws", "g5.8xlarge"),
-        # ("aws", "g5.xlarge"),
-        # ("aws", "g5g.16xlarge"),
-        # ("aws", "g5g.2xlarge"),
-        # ("aws", "g5g.4xlarge"),
-        # ("aws", "g5g.8xlarge"),
-        # ("aws", "g5g.metal"),
-        # ("aws", "g5g.xlarge"),
-        # ("aws", "g6.12xlarge"),
-        # ("aws", "g6.16xlarge"),
-        # ("aws", "g6.24xlarge"),
-        # ("aws", "g6.2xlarge"),
-        # ("aws", "g6.48xlarge"),
-        # ("aws", "g6.4xlarge"),
-        # ("aws", "g6.8xlarge"),
-        # ("aws", "g6.xlarge"),
-        # ("aws", "g6e.12xlarge"),
-        # ("aws", "g6e.16xlarge"),
-        # ("aws", "g6e.24xlarge"),
-        # ("aws", "g6e.2xlarge"),
-        # ("aws", "g6e.48xlarge"),
-        # ("aws", "g6e.4xlarge"),
-        # ("aws", "g6e.8xlarge"),
-        # ("aws", "g6e.xlarge"),
-        # ("aws", "g7e.12xlarge"),
-        # ("aws", "g7e.24xlarge"),
-        # ("aws", "g7e.2xlarge"),
-        # ("aws", "g7e.48xlarge"),
-        # ("aws", "g7e.4xlarge"),
-        # ("aws", "g7e.8xlarge"),
-        # ("aws", "gr6.4xlarge"),
-        # ("aws", "gr6.8xlarge"),
-        # ("aws", "p2.16xlarge"),
-        # ("aws", "p3.16xlarge"),
-        # ("aws", "p3.2xlarge"),
-        # ("aws", "p3.8xlarge"),
-        # ("aws", "p3dn.24xlarge"),
-        # ("aws", "p4de.24xlarge"),
-        # ("aws", "p5.48xlarge"),
-        # ("aws", "p5.4xlarge"),
-        # ("aws", "p5e.48xlarge"),
-        # ("aws", "p5en.48xlarge"),
-        # ("aws", "p6-b200.48xlarge"),
-        # ("aws", "p6-b300.48xlarge"),
-    },
-    enable_vendors={"alicloud", "gcp", "hcloud", "ovh", "upcloud"},
-    include_fresh_servers=True,  # also include servers without dmidecode/meta.json (newly introduced)
-)
 
 # get the amount of available memory
 mem_bytes = psutil.virtual_memory().available
@@ -257,7 +76,7 @@ lsblk = DockerTask(
     version_command="lsblk -V",
     command="lsblk -O -Jdb",
     timeout=timedelta(minutes=1),
-    servers_only=RUN_NEW_TASKS_ON_SERVERS,
+    start_with_instance=True,
 )
 
 lsblk_discard = DockerTask(
@@ -267,7 +86,7 @@ lsblk_discard = DockerTask(
     version_command="lsblk -V",
     command="lsblk -DJdb",
     timeout=timedelta(minutes=1),
-    servers_only=RUN_NEW_TASKS_ON_SERVERS,
+    start_with_instance=True,
 )
 
 lsblk_topo = DockerTask(
@@ -277,7 +96,7 @@ lsblk_topo = DockerTask(
     version_command="lsblk -V",
     command="lsblk -tJdb",
     timeout=timedelta(minutes=1),
-    servers_only=RUN_NEW_TASKS_ON_SERVERS,
+    start_with_instance=True,
 )
 
 lscpu = DockerTask(
@@ -297,7 +116,7 @@ lstopo = DockerTask(
     version_command="lstopo --version",
     command="lstopo --of xml",
     parse_output=[parse.lstopo],
-    servers_only=RUN_NEW_TASKS_ON_SERVERS,
+    start_with_instance=True,
     timeout=timedelta(seconds=30),
 )
 
@@ -353,7 +172,7 @@ stressng_benchmarks = DockerTask(
     version_command="-c \"stress-ng --version | awk '{print $3}'\"",
     command="-c 'nice -n -20 python3 /usr/local/bin/run_stressng_benchmarks.py'",
     timeout=timedelta(minutes=20),
-    servers_only=RUN_NEW_TASKS_ON_SERVERS,
+    start_with_instance=True,
 )
 
 # An extended version of the multicore StressNg task: running
@@ -514,7 +333,6 @@ vllm = VllmDockerTask(
     command=None,
     version_command="--version",
     start_with_instance=True,
-    always_run=True,
 )
 
 membench = DockerTask(
@@ -525,10 +343,10 @@ membench = DockerTask(
     docker_opts=DOCKER_OPTS | tracker_docker_opts("membench"),
     # run for 30 minutes max
     command="-Hv -t 1800",
-    servers_only=RUN_NEW_TASKS_ON_SERVERS,
+    start_with_instance=True,
     version_command="-V",
     minimum_memory=0.9,
-    exclude_servers={
+    servers_exclude={
         ("ovh", "r3-128"),
     },
 )
