@@ -158,11 +158,17 @@ def _remote_main_sha(repo_root: str) -> str:
     return out.split()[0]
 
 
-def _fetch_origin_main(repo_root: str, attempt: int) -> None:
-    """Update origin/main; shallow clones need explicit deepen/depth to see the latest tip."""
+# push_path only ever adds a handful of commits; rebasing more means refs are corrupt
+_MAX_REBASE_COMMITS = 20
+
+
+def _fetch_origin_main(repo_root: str) -> None:
+    """Update origin/main to the remote tip without altering full-clone history."""
     fetch_args = ["fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"]
     if _is_shallow_repo(repo_root):
-        fetch_args.extend(["--deepen", str(max(1, attempt + 1))])
+        # Shallow clone: fetch latest tip only. Do NOT --deepen; that walks backward
+        # through history and can leave origin/main far behind HEAD.
+        fetch_args.append("--depth=1")
     run_git_command(fetch_args, cwd=repo_root)
 
     remote_sha = _remote_main_sha(repo_root)
@@ -171,14 +177,14 @@ def _fetch_origin_main(repo_root: str, attempt: int) -> None:
         return
 
     logging.warning(
-        "origin/main stale after fetch (%s != %s), forcing shallow update",
+        "origin/main stale after fetch (%s != %s), retrying fetch",
         local_sha[:8],
         remote_sha[:8],
     )
-    run_git_command(
-        ["fetch", "origin", "+refs/heads/main:refs/remotes/origin/main", "--depth=1"],
-        cwd=repo_root,
-    )
+    retry_args = ["fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"]
+    if _is_shallow_repo(repo_root):
+        retry_args.append("--depth=1")
+    run_git_command(retry_args, cwd=repo_root)
     local_sha = _origin_main_sha(repo_root)
     if remote_sha != local_sha:
         raise RuntimeError(
@@ -186,7 +192,22 @@ def _fetch_origin_main(repo_root: str, attempt: int) -> None:
         )
 
 
+def _commits_ahead_of_origin(repo_root: str) -> int:
+    out = run_git_command(["rev-list", "--count", "origin/main..HEAD"], cwd=repo_root)
+    return int(out.strip())
+
+
 def _rebase_onto_origin_main(repo_root: str) -> None:
+    ahead = _commits_ahead_of_origin(repo_root)
+    if ahead == 0:
+        return
+    if ahead > _MAX_REBASE_COMMITS:
+        head = run_git_command(["rev-parse", "HEAD"], cwd=repo_root).strip()
+        origin = _origin_main_sha(repo_root)
+        raise RuntimeError(
+            f"Refusing to rebase {ahead} commits onto origin/main "
+            f"(HEAD={head[:8]}, origin/main={origin[:8]}); fetch likely left refs inconsistent"
+        )
     try:
         run_git_command(["rebase", "origin/main"], cwd=repo_root)
     except subprocess.CalledProcessError:
@@ -197,8 +218,8 @@ def _rebase_onto_origin_main(repo_root: str) -> None:
         raise
 
 
-def _sync_with_origin_main(repo_root: str, attempt: int) -> None:
-    _fetch_origin_main(repo_root, attempt)
+def _sync_with_origin_main(repo_root: str) -> None:
+    _fetch_origin_main(repo_root)
     _rebase_onto_origin_main(repo_root)
 
 
@@ -294,9 +315,9 @@ def push_path(path: str | os.PathLike, msg: str):
                         time.sleep(sleep_sec)
                         wait_sec = min(wait_sec * 2, max_wait_per_round)
                     logging.info("Fetching and rebasing onto origin/main...")
-                    _sync_with_origin_main(repo_root, attempt)
+                    _sync_with_origin_main(repo_root)
                     logging.info("Pushing to origin...")
-                    _fetch_origin_main(repo_root, attempt)
+                    _fetch_origin_main(repo_root)
                     _push_origin_main(repo_root)
                     logging.info(f"Successfully pushed changes to git: {msg}")
                     break
