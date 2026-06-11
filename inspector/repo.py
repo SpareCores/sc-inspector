@@ -3,6 +3,7 @@ import git
 import logging
 import os
 import psutil
+import random
 import subprocess
 import time
 from urllib.parse import urlparse, urlunparse
@@ -137,8 +138,72 @@ def _repo_root(path: str | os.PathLike | None = None) -> str:
 
 def path_has_changes(repo_root: str, path: str | os.PathLike) -> bool:
     """Check for changes under path without loading the full index via GitPython."""
-    out = run_git_command(["status", "--porcelain", "--", path], cwd=repo_root)
+    rel_path = os.path.relpath(path, repo_root)
+    out = run_git_command(["status", "--porcelain", "--", rel_path], cwd=repo_root)
     return bool(out.strip())
+
+
+def _is_shallow_repo(repo_root: str) -> bool:
+    return os.path.isfile(os.path.join(repo_root, ".git", "shallow"))
+
+
+def _origin_main_sha(repo_root: str) -> str:
+    return run_git_command(["rev-parse", "origin/main"], cwd=repo_root).strip()
+
+
+def _remote_main_sha(repo_root: str) -> str:
+    out = run_git_command(["ls-remote", "--heads", "origin", "main"], cwd=repo_root).strip()
+    if not out:
+        raise RuntimeError("origin has no main branch")
+    return out.split()[0]
+
+
+def _fetch_origin_main(repo_root: str, attempt: int) -> None:
+    """Update origin/main; shallow clones need explicit deepen/depth to see the latest tip."""
+    fetch_args = ["fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"]
+    if _is_shallow_repo(repo_root):
+        fetch_args.extend(["--deepen", str(max(1, attempt + 1))])
+    run_git_command(fetch_args, cwd=repo_root)
+
+    remote_sha = _remote_main_sha(repo_root)
+    local_sha = _origin_main_sha(repo_root)
+    if remote_sha == local_sha:
+        return
+
+    logging.warning(
+        "origin/main stale after fetch (%s != %s), forcing shallow update",
+        local_sha[:8],
+        remote_sha[:8],
+    )
+    run_git_command(
+        ["fetch", "origin", "+refs/heads/main:refs/remotes/origin/main", "--depth=1"],
+        cwd=repo_root,
+    )
+    local_sha = _origin_main_sha(repo_root)
+    if remote_sha != local_sha:
+        raise RuntimeError(
+            f"Could not sync origin/main to {remote_sha[:8]} (still at {local_sha[:8]})"
+        )
+
+
+def _rebase_onto_origin_main(repo_root: str) -> None:
+    try:
+        run_git_command(["rebase", "origin/main"], cwd=repo_root)
+    except subprocess.CalledProcessError:
+        try:
+            run_git_command(["rebase", "--abort"], cwd=repo_root)
+        except subprocess.CalledProcessError:
+            logging.warning("git rebase --abort failed after rebase error")
+        raise
+
+
+def _sync_with_origin_main(repo_root: str, attempt: int) -> None:
+    _fetch_origin_main(repo_root, attempt)
+    _rebase_onto_origin_main(repo_root)
+
+
+def _push_origin_main(repo_root: str) -> None:
+    run_git_command(["push", "origin", "HEAD:main"], cwd=repo_root)
 
 
 @functools.cache
@@ -209,11 +274,12 @@ def push_path(path: str | os.PathLike, msg: str):
     try:
         get_repo()
         if path_has_changes(repo_root, path):
+            rel_path = os.path.relpath(path, repo_root)
             logging.info("Staging changes...")
-            run_git_command(['add', path], cwd=repo_root)
+            run_git_command(["add", rel_path], cwd=repo_root)
             logging.info("Committing changes...")
-            run_git_command(['commit', '-m', msg], cwd=repo_root)
-            # Retry push with exponential backoff (remote ref may have moved; pull --rebase and retry)
+            run_git_command(["commit", "-m", msg], cwd=repo_root)
+            # Retry push with exponential backoff (many inspectors push concurrently)
             deadline = time.monotonic() + 10 * 60  # 10 minutes total
             wait_sec = 5  # initial backoff in seconds
             max_wait_per_round = 2 * 60  # cap 2 minutes per round
@@ -221,14 +287,17 @@ def push_path(path: str | os.PathLike, msg: str):
             while True:
                 try:
                     if attempt > 0:
-                        sleep_sec = min(wait_sec, max_wait_per_round)
-                        logging.info(f"Retry attempt {attempt}: waiting {sleep_sec}s then pull --rebase and push")
+                        sleep_sec = min(wait_sec, max_wait_per_round) + random.uniform(0, 2)
+                        logging.info(
+                            f"Retry attempt {attempt}: waiting {sleep_sec:.1f}s then fetch/rebase/push"
+                        )
                         time.sleep(sleep_sec)
                         wait_sec = min(wait_sec * 2, max_wait_per_round)
-                    logging.info("Pulling with rebase...")
-                    run_git_command(['pull', '--rebase', 'origin'], cwd=repo_root)
+                    logging.info("Fetching and rebasing onto origin/main...")
+                    _sync_with_origin_main(repo_root, attempt)
                     logging.info("Pushing to origin...")
-                    run_git_command(['push', 'origin'], cwd=repo_root)
+                    _fetch_origin_main(repo_root, attempt)
+                    _push_origin_main(repo_root)
                     logging.info(f"Successfully pushed changes to git: {msg}")
                     break
                 except subprocess.CalledProcessError as e:
