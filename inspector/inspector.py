@@ -346,6 +346,7 @@ def alicloud_inspector_allowlist() -> frozenset[str]:
         )
         .where(ServerPrice.vendor_id == "alicloud")
         .where(Server.memory_amount > ALICLOUD_INSPECTOR_MIN_RAM_MIB)
+        .where(Server.status == "ACTIVE")
         .where(ServerPrice.allocation == "ONDEMAND")
         .where(ServerPrice.status == "ACTIVE")
         .where(Region.country_id.not_in(excluded))
@@ -411,7 +412,9 @@ def available_servers(vendor: str | None = None, region: str | None = None):
             .where(ServerPrice.allocation == "ONDEMAND")
             .join(Region, Region.region_id == ServerPrice.region_id)
             .join(Zone, Zone.zone_id == ServerPrice.zone_id)
-            .join(Server).order_by(ServerPrice.price)
+            .join(Server)
+            .where(Server.status == "ACTIVE")
+            .order_by(ServerPrice.price)
     )
     if vendor:
         stmt = stmt.where(ServerPrice.vendor_id == vendor)
