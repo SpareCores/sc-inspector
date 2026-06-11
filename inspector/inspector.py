@@ -456,9 +456,6 @@ def start(ctx, exclude, start_only, vendor):
     lock = threading.Lock()
     exception = None
     for (vnd, server), (srv_data, regions, zones, zone_to_region) in available_servers(vendor=vendor).items():
-        if vnd == "alicloud" and server != "ecs.gn7i-c56g1.14xlarge":
-            logging.info(f"Excluding {vnd}/{server}")
-            continue
         if vnd == "aws" and not (server.startswith("m9g") or server == "c4.xlarge"):
             logging.info(f"Excluding {vnd}/{server}")
             continue
