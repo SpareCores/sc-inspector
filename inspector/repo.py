@@ -88,6 +88,21 @@ def _authenticated_repo_url(repo_url: str) -> str:
     return repo_url
 
 
+def _configure_origin_auth(repo_root: str) -> None:
+    """Set origin URL with token auth so git CLI push/pull work outside checkout's credential helper."""
+    repo_url = os.environ.get("REPO_URL", REPO_URL)
+    if not repo_url:
+        try:
+            repo_url = run_git_command(["remote", "get-url", "origin"], cwd=repo_root).strip()
+        except subprocess.CalledProcessError:
+            return
+    if is_ssh_url(repo_url) or not os.environ.get("GITHUB_TOKEN"):
+        return
+    auth_url = _authenticated_repo_url(repo_url)
+    logging.debug("Configuring origin remote with GITHUB_TOKEN authentication")
+    run_git_command(["remote", "set-url", "origin", auth_url], cwd=repo_root)
+
+
 def _clone_repo(repo_url: str, repo_path: str, sparse_paths: tuple[str, ...] | None) -> None:
     """Shallow clone via git CLI; optional sparse checkout limits working tree size."""
     configure_git_low_memory()
@@ -140,6 +155,7 @@ def get_repo(repo_url=REPO_URL, repo_path=REPO_PATH, sparse_paths: tuple[str, ..
     try:
         logging.info(f"Attempting to open existing repo at {repo_path}")
         repo = git.Repo(repo_path)
+        _configure_origin_auth(repo_path)
         logging.info(f"Successfully opened existing repo at {repo_path}")
         return repo
     except (git.InvalidGitRepositoryError, git.NoSuchPathError):
