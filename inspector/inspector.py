@@ -459,7 +459,7 @@ def start(ctx, exclude, start_only, vendor):
         if vnd == "alicloud" and server != "ecs.gn7i-c56g1.14xlarge":
             logging.info(f"Excluding {vnd}/{server}")
             continue
-        if vnd == "aws" and not server.startswith("m9g"):
+        if vnd == "aws" and not (server.startswith("m9g") or server == "c4.xlarge"):
             logging.info(f"Excluding {vnd}/{server}")
             continue
         # if vnd == "alicloud" and server not in alicloud_inspector_allowlist():
