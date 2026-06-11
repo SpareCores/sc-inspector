@@ -462,9 +462,6 @@ def start(ctx, exclude, start_only, vendor):
         if vnd == "aws" and not server.startswith("m9g"):
             logging.info(f"Excluding {vnd}/{server}")
             continue
-        if vnd == "vultr" and server != "vc2-1c-1gb":
-            logging.info(f"Excluding {vnd}/{server}")
-            continue
         # if vnd == "alicloud" and server not in alicloud_inspector_allowlist():
         #     logging.info(f"Excluding {vnd}/{server}")
         #     continue
@@ -494,7 +491,7 @@ def start(ctx, exclude, start_only, vendor):
         f = executor.submit(lib.start_inspect, executor, lock, data_dir, vnd, server, tasks, srv_data, regions, zones, zone_to_region)
         futures[f] = (vnd, server)
         count += 1
-        limit = 8 if vnd in {"alicloud", "aws", "upcloud"} else 1
+        limit = 8 if vnd in {"alicloud", "aws", "upcloud", "vultr"} else 1
         if count == limit:
             break
     for f in concurrent.futures.as_completed(futures):
