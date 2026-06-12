@@ -557,33 +557,40 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
     end_times = []
     already_ended = []
     sum_timeout = timedelta()
-    # get the maximum possible timeout for this server
-    max_timeout = sum([task.timeout for task in tasks if not (task.servers_only and (vendor, server) not in task.servers_only)], timedelta())
-    for task in tasks:
-        if task.servers_only and (vendor, server) not in task.servers_only:
-            # this task doesn't run on this server, leave it out
-            continue
-        meta = lib.load_task_meta(task, data_dir=data_dir)
+    max_unfinished_timeout = timedelta()
+    now = datetime.now()
+    applicable_tasks = [
+        task for task in tasks
+        if not (task.servers_only and (vendor, server) not in task.servers_only)
+        and not (task.servers_exclude and (vendor, server) in task.servers_exclude)
+    ]
+    task_metas = [(task, lib.load_task_meta(task, data_dir=data_dir)) for task in applicable_tasks]
+    last_activity = max((meta.end for _, meta in task_metas if meta.end), default=None)
+    for task, meta in task_metas:
         if not meta.start:
             continue
-        # only consider start times of tasks that are not finished yet
-        if not meta.end:
-            start_times.append(meta.start)
         if meta.end:
             end_times.append(meta.end)
-            # the task has already finished
             already_ended.append(True)
-        elif datetime.now() <= meta.start + max_timeout + lib.DESTROY_AFTER:
-            # only count tasks which might already be running and leave out those, which have started before the maximum
-            # timeout has passed to exclude hung tasks from the past
-            already_ended.append(False)
-            logging.info(f"{vendor}/{server} Adding task {task.name} timeout: {task.timeout}")
-            sum_timeout += task.timeout
+            continue
+        stale = now > meta.start + task.timeout + lib.DESTROY_AFTER
+        abandoned = lib.is_abandoned_boot_meta(meta, last_activity)
+        if stale or abandoned:
+            already_ended.append(True)
+            logging.info(
+                f"{vendor}/{server} Treating {task.name} as finished (abandoned={abandoned}, stale={stale})"
+            )
+            continue
+        start_times.append(meta.start)
+        already_ended.append(False)
+        logging.info(f"{vendor}/{server} Adding task {task.name} timeout: {task.timeout}")
+        sum_timeout += task.timeout
+        max_unfinished_timeout = max(max_unfinished_timeout, task.timeout)
 
-    if start_times and datetime.now() >= (wait_time := max(start_times) + max_timeout + lib.DESTROY_AFTER):
-        # safety net: after the max timeout has passed, the machine must be terminated
+    if start_times and now >= (wait_time := max(start_times) + max_unfinished_timeout + lib.DESTROY_AFTER):
+        # safety net: after the longest unfinished task timeout has passed, terminate the machine
         destroy = f"Destroying {vendor}/{server}, last_start: {max(start_times)}, last timeout: {wait_time}"
-    if start_times and datetime.now() >= (wait_time := max(start_times) + sum_timeout + lib.DESTROY_AFTER):
+    if start_times and now >= (wait_time := max(start_times) + sum_timeout + lib.DESTROY_AFTER):
         # We can only estimate the time by which all tasks should have been completed, as the start date is added
         # to the git repository before the machine starts up, the machine startup can take a long time, and the
         # tasks do not necessarily run sequentially.
@@ -593,6 +600,9 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
     # if all tasks have already finished, we can destroy the stack
     if already_ended and all(already_ended):
         destroy = f"Destroying {vendor}/{server}, all tasks have finished"
+
+    if not destroy and not start_times and end_times and now >= max(end_times) + lib.DESTROY_AFTER:
+        destroy = f"Destroying {vendor}/{server}, last end: {max(end_times)}"
 
     if not destroy and not start_times and force:
         # forced cleanup, even if there are metas for the server (might be due to a forced retry from git, by deleting
@@ -632,22 +642,33 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
               help="Number of threads to run Pulumi concurrently. Each thread consumes around 60 MiB of RAM.")
 @click.option("--force/--no-force", type=bool, default=False, help="Do a cleanup even if there's no meta for the server")
 @click.option("--all-regions/--no-all-regions", type=bool, default=False, help="Clean up in all regions, not just in those which list the server as available")
-@click.option("--lookback-mins", type=int, show_default=True, help="Only clean up those instances that started at most this many minutes ago")
+@click.option(
+    "--lookback-mins",
+    type=int,
+    default=None,
+    help="Fixed lookback in minutes (daily safety net). Default: task-timeout-based window.",
+)
+@click.option(
+    "--data-only/--no-data-only",
+    default=False,
+    help="Only consider servers with a data directory in the repo (skips the full catalog).",
+)
 @click.option("--vendor", type=str, default=None, help="Only clean up resources for the specified vendor")
-def cleanup(ctx, threads, force, all_regions, lookback_mins, vendor):
+def cleanup(ctx, threads, force, all_regions, lookback_mins, data_only, vendor):
     from sc_runner.resources import supported_vendors
-    from datetime import datetime, timedelta
     import concurrent.futures
 
-    max_start = None
-    if lookback_mins:
-        max_start = datetime.now() - timedelta(minutes=lookback_mins)
+    repo_data = os.path.join(ctx.parent.params["repo_path"], "data")
+    candidates = available_servers(vendor=vendor)
+    candidates = {
+        k: v
+        for k, v in candidates.items()
+        if lib.should_scan_for_cleanup(
+            repo_data, k[0], k[1], lookback_mins=lookback_mins, data_only=data_only
+        )
+    }
     futures = []
-    servers = lib.sort_available_servers(
-        available_servers(vendor=vendor),
-        data_dir=os.path.join(ctx.parent.params["repo_path"], "data"),
-        max_start=max_start,
-    )
+    servers = lib.sort_available_servers(candidates, data_dir=repo_data)
     with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
         for (vendor, server), (_, regions, zones, _zone_to_region) in servers:
             if all_regions:
@@ -737,6 +758,7 @@ def inspect(ctx, vendor, instance, gpu_count, threads):
             nthreads=threads,
         )
     finally:
+        lib.finalize_task_metas(vendor, data_dir, instance, gpu_count=gpu_count)
         lib.record_timing_inspector_end(data_dir)
         try:
             repo.push_path(lib.timing_dir(data_dir), f"Inspector finished from {repo.gha_url()}")

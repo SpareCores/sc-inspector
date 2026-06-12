@@ -48,6 +48,10 @@ FAIL_IF_NO_OUTPUT = timedelta(days=3)
 FAIL_ON_ERROR = timedelta(days=3)
 # destroy the instance 15 mins after the last task has timed out
 DESTROY_AFTER = timedelta(minutes=15)
+# extra slack for slow cloud boot / user-data before inspect starts
+CLEANUP_BOOT_SLACK = timedelta(hours=2)
+# keep retrying Pulumi destroy after tasks finish
+CLEANUP_DESTROY_RETRY = timedelta(hours=24)
 DOCKER_OPTS = dict(detach=True, privileged=True, network_mode="host")
 DOCKER_OPTS_GPU = dict(device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])])
 # filter error_msg which is written to meta.json for these, we don't want to leak information
@@ -849,6 +853,89 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: flo
     q.join()
 
 
+def is_abandoned_boot_meta(meta: Meta, last_activity: datetime | None) -> bool:
+    """Boot-time placeholder meta left when inspect exits before the task actually runs."""
+    return bool(
+        meta.start
+        and not meta.end
+        and last_activity is not None
+        and meta.start < last_activity
+        and meta.version is None
+        and meta.kernel_version is None
+    )
+
+
+def finalize_task_metas(
+    vendor: str,
+    data_dir: str | os.PathLike,
+    instance: str,
+    gpu_count: float = 0.0,
+) -> None:
+    """Mark unfinished task metas when inspect ends before every queued task ran."""
+    changed = False
+    last_activity = None
+    for task in get_tasks(vendor):
+        if task.servers_only and (vendor, instance) not in task.servers_only:
+            continue
+        if task.servers_exclude and (vendor, instance) in task.servers_exclude:
+            continue
+        meta = load_task_meta(task, data_dir=data_dir)
+        if meta.end:
+            last_activity = max(last_activity, meta.end) if last_activity else meta.end
+    for task in get_tasks(vendor):
+        if task.servers_only and (vendor, instance) not in task.servers_only:
+            continue
+        if task.servers_exclude and (vendor, instance) in task.servers_exclude:
+            continue
+        meta = load_task_meta(task, data_dir=data_dir)
+        if not meta.start or meta.end is not None:
+            continue
+        if should_run(task, data_dir, vendor, instance, gpu_count):
+            meta.end = datetime.now()
+            meta.exit_code = -4
+            meta.task_hash = task_hash(task)
+            meta.error_msg = "Inspect ended before task completed"
+            write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
+            changed = True
+        elif meta.exit_code is None:
+            meta.end = datetime.now()
+            meta.exit_code = -2
+            meta.task_hash = task_hash(task)
+            meta.error_msg = "Task doesn't need to run on this instance"
+            write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
+            changed = True
+    if changed:
+        for i in range(3):
+            try:
+                repo.push_path(data_dir, f"Finalized task metas from {repo.gha_url()}")
+                break
+            except Exception:
+                logging.exception("push failed")
+                if i < 2:
+                    time.sleep(random.randint(1, 10))
+
+
+def _applicable_tasks(vendor: str, server: str):
+    return [
+        task for task in get_tasks(vendor)
+        if not (task.servers_only and (vendor, server) not in task.servers_only)
+        and not (task.servers_exclude and (vendor, server) in task.servers_exclude)
+    ]
+
+
+def max_server_runtime(vendor: str, server: str) -> timedelta:
+    """Upper bound on inspect wall time: sum of per-priority max task timeouts."""
+    from collections import defaultdict
+
+    taskgroups = defaultdict(list)
+    for task in _applicable_tasks(vendor, server):
+        taskgroups[task.priority].append(task)
+    runtime = timedelta()
+    for priority in sorted(taskgroups):
+        runtime += max((task.timeout for task in taskgroups[priority]), default=timedelta())
+    return runtime
+
+
 @cache
 def get_last_start(data_dir, vendor, server):
     tasks = list(get_tasks(vendor))
@@ -856,9 +943,7 @@ def get_last_start(data_dir, vendor, server):
         # if there are no tasks, return a low value which can be used as a sort key
         return datetime.min
     server_data_dir = os.path.join(data_dir, vendor, server)
-    tasks = [task for task in tasks
-             if not (task.servers_only and not _server_in_servers_only(task.servers_only, vendor, server, server_data_dir)) and
-             not (task.servers_exclude and (vendor, server) in task.servers_exclude)]
+    tasks = _applicable_tasks(vendor, server)
     meta_starts = [load_task_meta(task, data_dir=server_data_dir).start for task in tasks]
     meta_starts = [start for start in meta_starts if start]
     if not meta_starts:
@@ -867,6 +952,43 @@ def get_last_start(data_dir, vendor, server):
     else:
         last_start = max(meta_starts)
     return last_start
+
+
+def get_last_end(data_dir, vendor, server):
+    server_data_dir = os.path.join(data_dir, vendor, server)
+    meta_ends = [
+        load_task_meta(task, data_dir=server_data_dir).end
+        for task in _applicable_tasks(vendor, server)
+    ]
+    meta_ends = [end for end in meta_ends if end]
+    if not meta_ends:
+        return None
+    return max(meta_ends)
+
+
+def should_scan_for_cleanup(
+    data_dir,
+    vendor,
+    server,
+    *,
+    lookback_mins: int | None = None,
+    data_only: bool = False,
+) -> bool:
+    """Return True if this server should be checked by a cleanup run."""
+    server_data_dir = os.path.join(data_dir, vendor, server)
+    if data_only and not os.path.isdir(server_data_dir):
+        return False
+    last_start = get_last_start(data_dir, vendor, server)
+    if last_start == datetime.min:
+        return False
+    now = datetime.now()
+    if lookback_mins is not None:
+        return last_start >= now - timedelta(minutes=lookback_mins)
+    last_end = get_last_end(data_dir, vendor, server)
+    active_deadline = last_start + max_server_runtime(vendor, server) + DESTROY_AFTER + CLEANUP_BOOT_SLACK
+    if last_end:
+        return now <= max(active_deadline, last_end + CLEANUP_DESTROY_RETRY)
+    return now <= active_deadline
 
 
 def sort_available_servers(available_servers: dict, data_dir, reverse=True, max_start=None):
@@ -1045,6 +1167,11 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             resource_opts |= dict(public_key=os.environ.get("SSH_PUBLIC_KEY"))
         if vendor == "upcloud":
             resource_opts |= dict(disk_size=VOLUME_SIZE)
+        if vendor == "vultr":
+            from sc_runner.resources import vultr as vultr_resources
+
+            resource_opts |= dict(disk_size=VOLUME_SIZE)
+            regions = vultr_resources.filter_regions(server, list(regions), disk_size=VOLUME_SIZE)
         pulumi_output = []
         for region in regions:
             logging.info(f"Trying {region}")
