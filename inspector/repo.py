@@ -1,4 +1,3 @@
-import functools
 import git
 import logging
 import os
@@ -13,6 +12,9 @@ from wrapt import synchronized
 # pre-set in the ghcr.io/sparecores/sc-inspector:main image
 REPO_URL = os.environ.get("REPO_URL")
 REPO_PATH = os.environ.get("REPO_PATH")
+
+# Sparse checkout prefix(es) for this inspector run (e.g. data/vultr/vhf-6c-24gb).
+_sparse_paths: tuple[str, ...] | None = None
 
 _LOW_MEMORY_GIT_CONFIG = [
     ["git", "config", "--global", "core.bigFileThreshold", "1"],
@@ -158,8 +160,29 @@ def _remote_main_sha(repo_root: str) -> str:
     return out.split()[0]
 
 
-# push_path only ever adds a handful of commits; rebasing more means refs are corrupt
-_MAX_REBASE_COMMITS = 20
+def _read_sparse_paths(repo_root: str) -> tuple[str, ...] | None:
+    try:
+        out = run_git_command(["sparse-checkout", "list"], cwd=repo_root).strip()
+    except subprocess.CalledProcessError:
+        return None
+    paths = tuple(line.strip() for line in out.splitlines() if line.strip())
+    return paths or None
+
+
+def _path_under_prefix(rel_path: str, prefix: str) -> bool:
+    return rel_path == prefix or rel_path.startswith(prefix + "/")
+
+
+def _assert_path_in_sparse(rel_path: str) -> None:
+    if not _sparse_paths:
+        return
+    if any(_path_under_prefix(rel_path, prefix) for prefix in _sparse_paths):
+        return
+    logging.warning(
+        "push_path %s is outside sparse checkout %s; concurrent pushes may conflict",
+        rel_path,
+        _sparse_paths,
+    )
 
 
 def _fetch_origin_main(repo_root: str) -> None:
@@ -192,42 +215,67 @@ def _fetch_origin_main(repo_root: str) -> None:
         )
 
 
-def _commits_ahead_of_origin(repo_root: str) -> int:
-    out = run_git_command(["rev-list", "--count", "origin/main..HEAD"], cwd=repo_root)
-    return int(out.strip())
+def _changed_files_under(repo_root: str, rel_path: str) -> list[str]:
+    """Return list of file paths changed between origin/main and HEAD under rel_path.
+
+    Must be called BEFORE fetching so origin/main still points to our base.
+    The returned list is stable across retries and safe to pass to
+    ``_squash_commit_and_push`` even after origin/main advances.
+    """
+    out = run_git_command(
+        ["diff", "--name-only", "origin/main", "HEAD", "--", rel_path],
+        cwd=repo_root,
+    )
+    return [f.strip() for f in out.splitlines() if f.strip()]
 
 
-def _rebase_onto_origin_main(repo_root: str) -> None:
-    ahead = _commits_ahead_of_origin(repo_root)
-    if ahead == 0:
+def _squash_commit_and_push(
+    repo_root: str, rel_path: str, msg: str, changed_files: list[str],
+) -> None:
+    """
+    Publish *only* ``changed_files`` as a single commit on origin/main.
+
+    The caller captures ``changed_files`` once (before fetching) so the list
+    reflects exactly the files this inspector modified, regardless of how
+    origin/main moves between retries.  Only those files are checked out from
+    ``saved_head`` — the rest of the tree (including paths written by other
+    concurrent inspectors) is left at origin/main's version.
+    """
+    if not changed_files:
+        logging.info("No changed files under %s to push", rel_path)
         return
-    if ahead > _MAX_REBASE_COMMITS:
-        head = run_git_command(["rev-parse", "HEAD"], cwd=repo_root).strip()
-        origin = _origin_main_sha(repo_root)
-        raise RuntimeError(
-            f"Refusing to rebase {ahead} commits onto origin/main "
-            f"(HEAD={head[:8]}, origin/main={origin[:8]}); fetch likely left refs inconsistent"
-        )
-    try:
-        run_git_command(["rebase", "origin/main"], cwd=repo_root)
-    except subprocess.CalledProcessError:
-        try:
-            run_git_command(["rebase", "--abort"], cwd=repo_root)
-        except subprocess.CalledProcessError:
-            logging.warning("git rebase --abort failed after rebase error")
-        raise
 
+    origin = "origin/main"
+    saved_head = run_git_command(["rev-parse", "HEAD"], cwd=repo_root).strip()
+    logging.info(
+        "Squashing %d files under %s onto %s from %s",
+        len(changed_files),
+        rel_path,
+        origin,
+        saved_head[:8],
+    )
 
-def _sync_with_origin_main(repo_root: str) -> None:
-    _fetch_origin_main(repo_root)
-    _rebase_onto_origin_main(repo_root)
+    run_git_command(["reset", "--hard", origin], cwd=repo_root)
+    run_git_command(["checkout", saved_head, "--"] + changed_files, cwd=repo_root)
+    run_git_command(["add", "--"] + changed_files, cwd=repo_root)
+
+    no_staged_changes = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"],
+        cwd=repo_root,
+        capture_output=True,
+    ).returncode == 0
+    if no_staged_changes:
+        logging.info("Already up to date with %s for %s after squash", origin, rel_path)
+        return
+
+    run_git_command(["commit", "-m", msg], cwd=repo_root)
+    _push_origin_main(repo_root)
 
 
 def _push_origin_main(repo_root: str) -> None:
     run_git_command(["push", "origin", "HEAD:main"], cwd=repo_root)
 
 
-@functools.cache
 @synchronized
 def get_repo(repo_url=REPO_URL, repo_path=REPO_PATH, sparse_paths: tuple[str, ...] | None = None):
     """
@@ -236,18 +284,24 @@ def get_repo(repo_url=REPO_URL, repo_path=REPO_PATH, sparse_paths: tuple[str, ..
     If there"s an already existing repo, use that, otherwise do a shallow clone.
     Pass sparse_paths (e.g. ("data/aws/t3.micro",)) to checkout only that subtree.
     """
+    global _sparse_paths
     logging.info(f"Getting repo from {repo_path}, URL: {repo_url}, sparse={sparse_paths}")
     repo_url = _authenticated_repo_url(repo_url)
     try:
         logging.info(f"Attempting to open existing repo at {repo_path}")
         repo = git.Repo(repo_path)
         _configure_origin_auth(repo_path)
+        if sparse_paths:
+            _sparse_paths = sparse_paths
+        elif _sparse_paths is None:
+            _sparse_paths = _read_sparse_paths(repo_path)
         logging.info(f"Successfully opened existing repo at {repo_path}")
         return repo
     except (git.InvalidGitRepositoryError, git.NoSuchPathError):
         logging.info(f"Repo not found at {repo_path}, cloning from {repo_url}")
         try:
             _clone_repo(repo_url, repo_path, sparse_paths)
+            _sparse_paths = sparse_paths
             return git.Repo(repo_path)
         except Exception as clone_error:
             logging.error(f"Failed to clone repo from {repo_url} to {repo_path}: {clone_error}")
@@ -296,10 +350,17 @@ def push_path(path: str | os.PathLike, msg: str):
         get_repo()
         if path_has_changes(repo_root, path):
             rel_path = os.path.relpath(path, repo_root)
+            _assert_path_in_sparse(rel_path)
             logging.info("Staging changes...")
             run_git_command(["add", rel_path], cwd=repo_root)
             logging.info("Committing changes...")
             run_git_command(["commit", "-m", msg], cwd=repo_root)
+            # Snapshot the exact files we changed BEFORE fetching.
+            # origin/main still points to our base, so this diff is stable.
+            changed_files = _changed_files_under(repo_root, rel_path)
+            if not changed_files:
+                logging.info("Commit created but no file-level diff vs origin/main")
+                return
             # Retry push with exponential backoff (many inspectors push concurrently)
             deadline = time.monotonic() + 10 * 60  # 10 minutes total
             wait_sec = 5  # initial backoff in seconds
@@ -310,15 +371,13 @@ def push_path(path: str | os.PathLike, msg: str):
                     if attempt > 0:
                         sleep_sec = min(wait_sec, max_wait_per_round) + random.uniform(0, 2)
                         logging.info(
-                            f"Retry attempt {attempt}: waiting {sleep_sec:.1f}s then fetch/rebase/push"
+                            f"Retry attempt {attempt}: waiting {sleep_sec:.1f}s then fetch/squash/push"
                         )
                         time.sleep(sleep_sec)
                         wait_sec = min(wait_sec * 2, max_wait_per_round)
-                    logging.info("Fetching and rebasing onto origin/main...")
-                    _sync_with_origin_main(repo_root)
-                    logging.info("Pushing to origin...")
+                    logging.info("Fetching origin/main and squashing push...")
                     _fetch_origin_main(repo_root)
-                    _push_origin_main(repo_root)
+                    _squash_commit_and_push(repo_root, rel_path, msg, changed_files)
                     logging.info(f"Successfully pushed changes to git: {msg}")
                     break
                 except subprocess.CalledProcessError as e:
