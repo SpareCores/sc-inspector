@@ -28,6 +28,7 @@ from zlib import crc32
 META_NAME = "meta.json"
 TIMING_TASK_NAME = "timing"
 # UTC timestamps for instance startup intelligence (separate from meta.json to avoid git conflicts)
+# Instance cloud-resource creation window (from Pulumi engine events / output), not full stack.up runtime
 TIMING_API_START = "api_start"
 TIMING_API_END = "api_end"
 TIMING_MACHINE_START = "machine_start"
@@ -671,6 +672,7 @@ def record_timing_api(
     *,
     run_id: str | None = None,
 ) -> None:
+    """Write instance resource create start/end (Pulumi ResourcePre/Outputs events)."""
     write_timing_file(data_dir, TIMING_API_START, api_start, run_id=run_id)
     write_timing_file(data_dir, TIMING_API_END, api_end, run_id=run_id)
 
@@ -1009,6 +1011,71 @@ def custom_sort(lst, key):
     return lst
 
 
+# Pulumi engine logs instance creation as e.g. "aws:ec2:Instance m9g.large created (15s)".
+# The same timing is available more reliably from ResourcePreEvent / ResOutputsEvent (on_event).
+INSTANCE_RESOURCE_SUFFIXES = (
+    ":Instance",
+    ":Server",
+    ":VirtualMachine",
+    ":BareMetalServer",
+)
+PULUMI_INSTANCE_CREATED_RE = re.compile(
+    r"([\w:.-]+)\s+(\S+)\s+created\s+\((\d+(?:\.\d+)?)s\)"
+)
+
+
+def strip_pulumi_output(text: str) -> str:
+    text = re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", text)
+    return re.sub(r"<\{%[^%]+%\}>", "", text)
+
+
+def is_instance_resource_type(resource_type: str) -> bool:
+    return any(resource_type.endswith(suffix) for suffix in INSTANCE_RESOURCE_SUFFIXES)
+
+
+def resource_name_from_urn(urn: str) -> str:
+    return urn.rsplit("::", 1)[-1]
+
+
+class InstanceCreationTiming:
+    """Tracks cloud instance resource create start/end from Pulumi engine events or output."""
+
+    def __init__(self) -> None:
+        self.start: datetime | None = None
+        self.end: datetime | None = None
+        self._from_events = False
+
+    def reset(self) -> None:
+        self.start = None
+        self.end = None
+        self._from_events = False
+
+    def complete(self) -> bool:
+        return self.start is not None and self.end is not None
+
+    def record_pre_event(self, when: datetime) -> None:
+        self.start = when
+        self._from_events = True
+
+    def record_outputs_event(self, when: datetime) -> None:
+        self.end = when
+        self._from_events = True
+
+    def record_from_log(self, message: str, server: str) -> None:
+        if self._from_events:
+            return
+        clean = strip_pulumi_output(message)
+        match = PULUMI_INSTANCE_CREATED_RE.search(clean)
+        if not match:
+            return
+        resource_type, name, duration_s = match.group(1), match.group(2), float(match.group(3))
+        if name != server or not is_instance_resource_type(resource_type):
+            return
+        end = utc_now()
+        self.end = end
+        self.start = end - timedelta(seconds=duration_s)
+
+
 def pulumi_output_filter(message, error_msgs, output, logger=logging):
     # print output to the console with logger, so we have the dates
     logger.info(message)
@@ -1025,12 +1092,45 @@ def pulumi_event_filter(event, error_msgs):
         pass
 
 
-def pulumi_stack_opts(error_msgs, output, logger):
-    """Capture Pulumi errors from both stdout and diagnostic events."""
-    return dict(
-        on_output=lambda message: pulumi_output_filter(message, error_msgs, output, logger),
-        on_event=lambda event: pulumi_event_filter(event, error_msgs),
-    )
+def pulumi_instance_timing_event(event, timing: InstanceCreationTiming | None, server: str, error_msgs):
+    if timing is not None:
+        from pulumi.automation.events import OpType
+
+        when = datetime.fromtimestamp(event.timestamp, tz=timezone.utc)
+
+        pre = event.resource_pre_event
+        if pre and pre.metadata.op == OpType.CREATE:
+            meta = pre.metadata
+            if is_instance_resource_type(meta.type) and resource_name_from_urn(meta.urn) == server:
+                timing.record_pre_event(when)
+
+        outputs = event.res_outputs_event
+        if outputs and outputs.metadata.op == OpType.CREATE:
+            meta = outputs.metadata
+            if is_instance_resource_type(meta.type) and resource_name_from_urn(meta.urn) == server:
+                timing.record_outputs_event(when)
+
+    pulumi_event_filter(event, error_msgs)
+
+
+def pulumi_stack_opts(
+    error_msgs,
+    output,
+    logger,
+    instance_timing: InstanceCreationTiming | None = None,
+    server: str | None = None,
+):
+    """Capture Pulumi errors and instance-creation timing from stdout and engine events."""
+
+    def on_output(message):
+        pulumi_output_filter(message, error_msgs, output, logger)
+        if instance_timing is not None and server is not None:
+            instance_timing.record_from_log(message, server)
+
+    def on_event(event):
+        pulumi_instance_timing_event(event, instance_timing, server, error_msgs)
+
+    return dict(on_output=on_output, on_event=on_event)
 
 
 def record_instance_start_failure(lock, data_dir, tasks, error_msgs, fallback_msg=None):
@@ -1079,22 +1179,15 @@ def remove_matches(regexes, input_string):
     return input_string
 
 
-def retry_locked(func, *args, api_timing: list | None = None, **kwargs):
-    """Retry a pulumi function with random backoff for locking issues.
-
-    If api_timing is a list, it is set to [start, end] UTC timestamps for the
-    successful call only. ConcurrentUpdateError retries are timed separately;
-    failed attempts are not included.
-    """
+def retry_locked(func, *args, instance_timing: InstanceCreationTiming | None = None, **kwargs):
+    """Retry a pulumi function with random backoff for locking issues."""
     import pulumi
 
     for i in range(3):
-        api_start = utc_now() if api_timing is not None else None
+        if instance_timing is not None:
+            instance_timing.reset()
         try:
-            result = func(*args, **kwargs)
-            if api_timing is not None:
-                api_timing[:] = [api_start, utc_now()]
-            return result
+            return func(*args, **kwargs)
         except pulumi.automation.errors.ConcurrentUpdateError:
             logging.exception(f"ConcurrentUpdateError, retry #{i}")
             time.sleep(random.randint(1, 5))
@@ -1114,7 +1207,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
 
     error_msgs = []
     instance_started = False
-    api_timing: list[datetime] = []
+    instance_timing = InstanceCreationTiming()
     sum_timeout = timedelta()
     with lock:
         repo.pull()
@@ -1179,11 +1272,11 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
             runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
-            stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger)
+            stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger, instance_timing, server)
             try:
                 retry_locked(runner.create, vendor, {},
                              resource_opts | dict(instance_opts=instance_opts, user_data=user_data),
-                             stack_opts=stack_opts, api_timing=api_timing)
+                             stack_opts=stack_opts, instance_timing=instance_timing)
                 # empty it if create succeeded, just in case
                 error_msgs = []
                 instance_started = True
@@ -1208,11 +1301,11 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
             runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
             pulumi_output = []
-            stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger)
+            stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger, instance_timing, server)
             try:
                 retry_locked(runner.create, vendor, {},
                              resource_opts | dict(instance_opts=instance_opts, user_data=b64_user_data),
-                             stack_opts=stack_opts, api_timing=api_timing)
+                             stack_opts=stack_opts, instance_timing=instance_timing)
                 # empty it if create succeeded, just in case
                 error_msgs = []
                 instance_started = True
@@ -1260,8 +1353,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
             error_msgs = []
             output = []
-            # Alicloud (like Azure) doesn't give sensible error events, use its output
-            stack_opts = dict(on_output=lambda message: pulumi_output_filter(message, error_msgs, output, instance_logger))
+            stack_opts = pulumi_stack_opts(error_msgs, output, instance_logger, instance_timing, server)
             # try with cloud_auto first, then retry without system_disk_category if needed
             current_instance_opts = copy.deepcopy(instance_opts)
             # Ensure first attempt has cloud_auto
@@ -1271,7 +1363,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 try:
                     retry_locked(runner.create, vendor, {},
                                  resource_opts | dict(instance_opts=current_instance_opts, user_data=b64_user_data),
-                                 stack_opts=stack_opts, api_timing=api_timing)
+                                 stack_opts=stack_opts, instance_timing=instance_timing)
                     # empty it if create succeeded, just in case
                     error_msgs = []
                     done = True
@@ -1313,14 +1405,13 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
 
             error_msgs = []
             output = []
-            # Azure native doesn't give sensible error events, use its output
-            stack_opts = dict(on_output=lambda message: pulumi_output_filter(message, error_msgs, output, instance_logger))
+            stack_opts = pulumi_stack_opts(error_msgs, output, instance_logger, instance_timing, server)
             for _ in range(2):
                 # try normal images first, then gen1 if we get Hypervisor Generation '2' error
                 try:
                     retry_locked(runner.create, vendor, {},
                                  resource_opts | dict(user_data=b64_user_data, image_sku=image_sku),
-                                 stack_opts=stack_opts, api_timing=api_timing)
+                                 stack_opts=stack_opts, instance_timing=instance_timing)
                     # empty it if create succeeded, just in case
                     error_msgs = []
                     done = True
@@ -1385,11 +1476,11 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
 
             pulumi_output = []
-            stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger)
+            stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger, instance_timing, server)
             try:
                 retry_locked(runner.create, vendor, {},
                              resource_opts | dict(instance_opts=instance_opts),
-                             stack_opts=stack_opts, api_timing=api_timing)
+                             stack_opts=stack_opts, instance_timing=instance_timing)
                 # empty it if create succeeded, just in case
                 error_msgs = []
                 instance_started = True
@@ -1400,11 +1491,16 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 if not error_msgs:
                     error_msgs.append(str(e))
 
-    if instance_started and api_timing and any(task.always_run for task in tasks):
+    if instance_started and instance_timing.complete() and any(task.always_run for task in tasks):
         with lock:
             repo.pull()
-            record_timing_api(data_dir, api_timing[0], api_timing[1])
-            repo.push_path(data_dir, f"Instance API timing from {repo.gha_url()}")
+            record_timing_api(data_dir, instance_timing.start, instance_timing.end)
+            repo.push_path(data_dir, f"Instance creation timing from {repo.gha_url()}")
+    elif instance_started and any(task.always_run for task in tasks):
+        logging.warning(
+            f"Instance started but creation timing not captured for {vendor}/{server} "
+            f"(start={instance_timing.start}, end={instance_timing.end})"
+        )
 
     if not instance_started:
         record_instance_start_failure(lock, data_dir, tasks, error_msgs)
