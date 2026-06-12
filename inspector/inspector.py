@@ -295,22 +295,81 @@ EXCLUDE_INSTANCES: list[tuple[str, str]] = [
 # AliCloud `start` allowlist: derived from sc-crawler schema via ``sc_data.db.path`` (see ``alicloud_inspector_allowlist``).
 ALICLOUD_INSPECTOR_EXCLUDED_COUNTRIES = frozenset({"CN", "HK"})
 ALICLOUD_INSPECTOR_BUDGET_USD = 1000.0
-ALICLOUD_INSPECTOR_HOURS = 3
+ALICLOUD_INSPECTOR_HOURS = 3.0  # fallback when repo has no GPU timing samples
 # ``sc_crawler`` stores RAM as MiB; require strictly more than 2 GiB.
 ALICLOUD_INSPECTOR_MIN_RAM_MIB = 2048
+# Prefer this many largest (by total VRAM) unmeasured GPU shapes before filling with cheaper ones.
+ALICLOUD_INSPECTOR_BIG_GPU_SLOTS = 4
+
+
+def _alicloud_gpu_benchmark_measured(repo_path: str, api_reference: str) -> bool:
+    """True when nvidia_smi completed successfully in the inspector-data repo."""
+    import json
+
+    meta_path = os.path.join(repo_path, "data", "alicloud", api_reference, "nvidia_smi", "meta.json")
+    if not os.path.isfile(meta_path):
+        return False
+    try:
+        meta = json.loads(open(meta_path).read())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return meta.get("exit_code") == 0
+
+
+def _alicloud_inspector_run_hours(repo_path: str) -> float:
+    """Median wall-clock GPU benchmark duration from inspector-data, with setup overhead."""
+    import glob
+    import json
+    from datetime import datetime
+
+    base = os.path.join(repo_path, "data", "alicloud")
+    if not os.path.isdir(base):
+        return ALICLOUD_INSPECTOR_HOURS
+
+    hours: list[float] = []
+    for inst in os.listdir(base):
+        nsmi = os.path.join(base, inst, "nvidia_smi", "meta.json")
+        if not os.path.isfile(nsmi):
+            continue
+        try:
+            if json.loads(open(nsmi).read()).get("exit_code") != 0:
+                continue
+        except (OSError, json.JSONDecodeError):
+            continue
+        starts: list[datetime] = []
+        ends: list[datetime] = []
+        for meta_path in glob.glob(os.path.join(base, inst, "*", "meta.json")):
+            if "/timing/" in meta_path:
+                continue
+            try:
+                meta = json.loads(open(meta_path).read())
+            except (OSError, json.JSONDecodeError):
+                continue
+            if meta.get("start"):
+                starts.append(datetime.fromisoformat(meta["start"]))
+            if meta.get("end"):
+                ends.append(datetime.fromisoformat(meta["end"]))
+        if not starts or not ends:
+            continue
+        elapsed = (max(ends) - min(starts)).total_seconds() / 3600
+        if 0.5 < elapsed < 12:
+            hours.append(elapsed)
+
+    if not hours:
+        return ALICLOUD_INSPECTOR_HOURS
+    hours.sort()
+    median = hours[len(hours) // 2]
+    return max(median * 1.15, 2.0)
 
 
 @cache
-def alicloud_inspector_allowlist() -> frozenset[str]:
-    """Return allowed AliCloud instance api_reference values for inspection.
+def alicloud_inspector_allowlist(repo_path: str) -> frozenset[str]:
+    """Return AliCloud GPU instances we can afford to benchmark within budget.
 
-    Reads the same SQLite database as ``available_servers`` (``sc_data.db.path``): per
-    ``server_id``, minimum ACTIVE ONDEMAND hourly ``price`` among regions whose
-    ``country_id`` is not in ``ALICLOUD_INSPECTOR_EXCLUDED_COUNTRIES``; only instances
-    with ``memory_amount`` greater than ``ALICLOUD_INSPECTOR_MIN_RAM_MIB`` (MiB); sort
-    instances by that price ascending; greedily include each instance once while the
-    running sum of ``price * ALICLOUD_INSPECTOR_HOURS`` stays at or below
-    ``ALICLOUD_INSPECTOR_BUDGET_USD``.
+    Only unmeasured GPU shapes (no successful ``nvidia_smi`` in *repo_path*) with
+    ONDEMAND pricing outside ``ALICLOUD_INSPECTOR_EXCLUDED_COUNTRIES`` are candidates.
+    Reserves budget for the largest unmeasured shapes (by total VRAM), then fills with
+    cheaper unmeasured instances.
     """
     from sqlalchemy import and_, func
     from sc_crawler.tables import Region, Server, ServerPrice
@@ -329,12 +388,17 @@ def alicloud_inspector_allowlist() -> frozenset[str]:
     excluded = tuple(ALICLOUD_INSPECTOR_EXCLUDED_COUNTRIES)
     min_price = func.min(ServerPrice.price).label("min_hr")
     stmt = (
-        select(ServerPrice.server_id, min_price)
+        select(
+            Server.api_reference,
+            Server.gpu_count,
+            Server.gpu_memory_total,
+            min_price,
+        )
         .join(
-            Server,
+            ServerPrice,
             and_(
-                Server.vendor_id == ServerPrice.vendor_id,
-                Server.server_id == ServerPrice.server_id,
+                ServerPrice.vendor_id == Server.vendor_id,
+                ServerPrice.server_id == Server.server_id,
             ),
         )
         .join(
@@ -345,27 +409,71 @@ def alicloud_inspector_allowlist() -> frozenset[str]:
             ),
         )
         .where(ServerPrice.vendor_id == "alicloud")
+        .where(Server.gpu_count > 0)
         .where(Server.memory_amount > ALICLOUD_INSPECTOR_MIN_RAM_MIB)
         .where(Server.status == "ACTIVE")
         .where(ServerPrice.allocation == "ONDEMAND")
         .where(ServerPrice.status == "ACTIVE")
         .where(Region.country_id.not_in(excluded))
-        .group_by(ServerPrice.server_id)
-        .order_by(min_price)
+        .group_by(Server.api_reference, Server.gpu_count, Server.gpu_memory_total)
     )
     engine = create_engine(f"sqlite:///{path}")
     with Session(engine) as session:
         rows = session.exec(stmt).all()
 
-    total = 0.0
-    chosen: list[str] = []
+    run_hours = _alicloud_inspector_run_hours(repo_path)
+    candidates = []
+    for api_reference, gpu_count, gpu_memory_total, min_hr in rows:
+        if _alicloud_gpu_benchmark_measured(repo_path, api_reference):
+            continue
+        candidates.append(
+            {
+                "api_reference": api_reference,
+                "gpu_count": gpu_count or 0,
+                "gpu_memory_total": gpu_memory_total or 0,
+                "min_hr": float(min_hr),
+                "cost": float(min_hr) * run_hours,
+            }
+        )
+
     budget = ALICLOUD_INSPECTOR_BUDGET_USD
-    hours = ALICLOUD_INSPECTOR_HOURS
-    for server_id, min_hr in rows:
-        cost = min_hr * hours
-        if total + cost <= budget:
-            chosen.append(server_id)
-            total += cost
+    chosen: list[str] = []
+    spent = 0.0
+
+    big = sorted(
+        candidates,
+        key=lambda r: (-r["gpu_memory_total"], -r["gpu_count"], r["cost"]),
+    )[:ALICLOUD_INSPECTOR_BIG_GPU_SLOTS]
+    for row in big:
+        if spent + row["cost"] <= budget:
+            chosen.append(row["api_reference"])
+            spent += row["cost"]
+
+    for row in sorted(candidates, key=lambda r: r["cost"]):
+        if row["api_reference"] in chosen:
+            continue
+        if spent + row["cost"] <= budget:
+            chosen.append(row["api_reference"])
+            spent += row["cost"]
+
+    logging.info(
+        "AliCloud GPU allowlist: %d unmeasured candidates, chose %d (~$%.0f of $%.0f budget, %.1fh/run est)",
+        len(candidates),
+        len(chosen),
+        spent,
+        budget,
+        run_hours,
+    )
+    for api_reference in sorted(chosen):
+        row = next(r for r in candidates if r["api_reference"] == api_reference)
+        logging.info(
+            "  allow %s (%.1fx VRAM %s MiB, $%.3f/hr, ~$%.1f/run)",
+            api_reference,
+            row["gpu_count"],
+            row["gpu_memory_total"],
+            row["min_hr"],
+            row["cost"],
+        )
     return frozenset(chosen)
 
 
@@ -462,9 +570,9 @@ def start(ctx, exclude, start_only, vendor):
         if vnd == "aws" and not (server.startswith("m9g") or server == "c4.xlarge"):
             logging.info(f"Excluding {vnd}/{server}")
             continue
-        # if vnd == "alicloud" and server not in alicloud_inspector_allowlist():
-        #     logging.info(f"Excluding {vnd}/{server}")
-        #     continue
+        if vnd == "alicloud" and server not in alicloud_inspector_allowlist(ctx.parent.params["repo_path"]):
+            logging.info(f"Excluding {vnd}/{server} (not in AliCloud GPU budget allowlist)")
+            continue
         if vnd not in supported_vendors:
             # sc-runner can't yet handle this vendor
             continue
