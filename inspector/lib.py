@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 import transform
+import user_data as user_data_pack
 from zlib import crc32
 
 META_NAME = "meta.json"
@@ -1208,9 +1209,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         "SHUTDOWN_MINS": timeout_mins + 30,  # give enough time to set up the machine
         "HOST_TIMING_DIR": host_timing_dir(vendor, server, github_run_id()),
     }
-    user_data = USER_DATA
-    for key, value in replacements.items():
-        user_data = user_data.replace("{" + key + "}", str(value))
+    user_data = user_data_pack.render_packed_user_data(USER_DATA, replacements, vendor=vendor)
     b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
     if vendor in ("aws", "gcp", "hcloud", "upcloud", "ovh", "alicloud", "vultr"):
         # get the copy (so we don't modify the original) of the default instance opts for the vendor and add ours
