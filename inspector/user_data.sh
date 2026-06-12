@@ -25,11 +25,16 @@ apt-get update -y
 # Add the required repositories to Apt sources:
 apt-get install -y ca-certificates curl
 install -m 0755 -d /etc/apt/keyrings
-# docker
-curl -fsSL https://download.docker.com/linux/$ID/gpg -o /etc/apt/keyrings/docker.asc
+# docker (download.docker.com is unreachable from Alibaba Cloud China)
+if [ "{VENDOR}" = "alicloud" ]; then
+    DOCKER_REPO="https://mirrors.aliyun.com/docker-ce/linux/$ID"
+else
+    DOCKER_REPO="https://download.docker.com/linux/$ID"
+fi
+curl -fsSL "$DOCKER_REPO/gpg" -o /etc/apt/keyrings/docker.asc
 chmod a+r /etc/apt/keyrings/docker.asc
 echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$ID \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] $DOCKER_REPO \
   $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
   tee /etc/apt/sources.list.d/docker.list > /dev/null
 # nvidia drivers/toolkit when GPU_COUNT != 0
