@@ -1288,9 +1288,11 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                         error_msgs = []
                         output = []
                         continue
-                    # on failure, destroy in background and try the next zone
+                    # try the next zone; do not schedule delayed_destroy here — the stack
+                    # name is alicloud.{region}.{instance} (zone is not part of it), so a
+                    # background destroy from a failed zone would delete a later success
+                    # in the same region; the next iteration's sync destroy handles cleanup
                     logging.exception(f"Couldn't start instance in zone {zone}")
-                    executor.submit(delayed_destroy, vendor, server, copy.deepcopy(resource_opts))
                     break
             if done:
                 break
