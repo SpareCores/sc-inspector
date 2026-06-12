@@ -246,6 +246,31 @@ fi
 if [ "{GPU_COUNT}" != "0" ] && [ "{GPU_COUNT}" != "0.0" ]; then
     nvidia-ctk runtime configure --runtime=nvidia 2>/dev/null || true
 fi
+# Docker defaults to 3 concurrent layer downloads per pull; raise for better aggregate
+# bandwidth on high-latency links (e.g. mainland China -> ghcr.io).
+mkdir -p /etc/docker
+if [ "{VENDOR}" = "alicloud" ]; then
+    # registry-1.docker.io is unreachable from Alibaba Cloud; mirror Hub for nvidia/cuda etc.
+    # Community mirrors (Jun 2026); Docker tries in order. Skip dead legacy mirrors
+    # (registry.cn-hangzhou.aliyuncs.com, hub-mirror.c.163.com) and rate-limited ones.
+    cat > /etc/docker/daemon.json <<'EOF'
+{
+  "max-concurrent-downloads": 20,
+  "registry-mirrors": [
+    "https://docker.m.daocloud.io",
+    "https://docker.1ms.run",
+    "https://hub.rat.dev",
+    "https://docker.1panel.live"
+  ]
+}
+EOF
+else
+    cat > /etc/docker/daemon.json <<'EOF'
+{
+  "max-concurrent-downloads": 20
+}
+EOF
+fi
 systemctl restart docker
 # set up SSH for git operations
 mkdir -p /root/.ssh
