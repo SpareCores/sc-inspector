@@ -1012,7 +1012,7 @@ def custom_sort(lst, key):
 
 
 # Pulumi engine logs instance creation as e.g. "aws:ec2:Instance m9g.large created (15s)".
-# The same timing is available more reliably from ResourcePreEvent / ResOutputsEvent (on_event).
+# Use that line (end time + duration) as the source of truth; engine event timestamps lag behind.
 INSTANCE_RESOURCE_SUFFIXES = (
     ":Instance",
     ":Server",
@@ -1033,37 +1033,21 @@ def is_instance_resource_type(resource_type: str) -> bool:
     return any(resource_type.endswith(suffix) for suffix in INSTANCE_RESOURCE_SUFFIXES)
 
 
-def resource_name_from_urn(urn: str) -> str:
-    return urn.rsplit("::", 1)[-1]
-
-
 class InstanceCreationTiming:
-    """Tracks cloud instance resource create start/end from Pulumi engine events or output."""
+    """Tracks cloud instance resource create start/end from Pulumi progress output."""
 
     def __init__(self) -> None:
         self.start: datetime | None = None
         self.end: datetime | None = None
-        self._from_events = False
 
     def reset(self) -> None:
         self.start = None
         self.end = None
-        self._from_events = False
 
     def complete(self) -> bool:
         return self.start is not None and self.end is not None
 
-    def record_pre_event(self, when: datetime) -> None:
-        self.start = when
-        self._from_events = True
-
-    def record_outputs_event(self, when: datetime) -> None:
-        self.end = when
-        self._from_events = True
-
     def record_from_log(self, message: str, server: str) -> None:
-        if self._from_events:
-            return
         clean = strip_pulumi_output(message)
         match = PULUMI_INSTANCE_CREATED_RE.search(clean)
         if not match:
@@ -1071,6 +1055,7 @@ class InstanceCreationTiming:
         resource_type, name, duration_s = match.group(1), match.group(2), float(match.group(3))
         if name != server or not is_instance_resource_type(resource_type):
             return
+        # Pulumi prints "created (Xs)" when the resource finishes; duration is its stopwatch.
         end = utc_now()
         self.end = end
         self.start = end - timedelta(seconds=duration_s)
@@ -1092,24 +1077,7 @@ def pulumi_event_filter(event, error_msgs):
         pass
 
 
-def pulumi_instance_timing_event(event, timing: InstanceCreationTiming | None, server: str, error_msgs):
-    if timing is not None:
-        from pulumi.automation.events import OpType
-
-        when = datetime.fromtimestamp(event.timestamp, tz=timezone.utc)
-
-        pre = event.resource_pre_event
-        if pre and pre.metadata.op == OpType.CREATE:
-            meta = pre.metadata
-            if is_instance_resource_type(meta.type) and resource_name_from_urn(meta.urn) == server:
-                timing.record_pre_event(when)
-
-        outputs = event.res_outputs_event
-        if outputs and outputs.metadata.op == OpType.CREATE:
-            meta = outputs.metadata
-            if is_instance_resource_type(meta.type) and resource_name_from_urn(meta.urn) == server:
-                timing.record_outputs_event(when)
-
+def pulumi_instance_timing_event(event, error_msgs):
     pulumi_event_filter(event, error_msgs)
 
 
@@ -1128,7 +1096,7 @@ def pulumi_stack_opts(
             instance_timing.record_from_log(message, server)
 
     def on_event(event):
-        pulumi_instance_timing_event(event, instance_timing, server, error_msgs)
+        pulumi_instance_timing_event(event, error_msgs)
 
     return dict(on_output=on_output, on_event=on_event)
 
