@@ -172,26 +172,27 @@ EOF
                         ;;
                 esac
                 ;;
-            alicloud)
-                # Alibaba Cloud fractional GPUs: use acs-plugin-manager for eligible instance types
-                if command -v acs-plugin-manager >/dev/null 2>&1; then
-                    case "{INSTANCE}" in
-                        *sgn7i-vws*) PLUGIN="grid_driver_install" ;;
-                        *sgn8ia*)    PLUGIN="gpu_grid_driver_install" ;;
-                        *)           PLUGIN="" ;;
-                    esac
-                    if [ -n "$PLUGIN" ] && acs-plugin-manager --list 2>/dev/null | grep -q "$PLUGIN"; then
-                        ALIYUN_DRIVER_PLUGIN="$PLUGIN"
-                        FRACTIONAL_GPU_DRIVER="alicloud-acs"
-                        NVIDIA_PKGS="nvidia-container-toolkit"
-                    fi
-                fi
-                ;;
             *)
                 # Other vendors: use standard driver detection
                 # Fall through to standard detection logic
                 ;;
         esac
+    fi
+
+    # Alibaba vGPU VWS types need GRID via acs-plugin-manager regardless of GPU_COUNT fractionality
+    if [ "{VENDOR}" = "alicloud" ] && [ -z "$FRACTIONAL_GPU_DRIVER" ]; then
+        if command -v acs-plugin-manager >/dev/null 2>&1; then
+            case "{INSTANCE}" in
+                *-vws*)     PLUGIN="grid_driver_install" ;;
+                *sgn8ia*)   PLUGIN="gpu_grid_driver_install" ;;
+                *)          PLUGIN="" ;;
+            esac
+            if [ -n "$PLUGIN" ] && acs-plugin-manager --list 2>/dev/null | grep -q "$PLUGIN"; then
+                ALIYUN_DRIVER_PLUGIN="$PLUGIN"
+                FRACTIONAL_GPU_DRIVER="alicloud-acs"
+                NVIDIA_PKGS="nvidia-container-toolkit"
+            fi
+        fi
     fi
     
     # Detect GPU architecture and select appropriate driver (only if not using fractional GPU driver)
