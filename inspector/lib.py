@@ -1018,6 +1018,7 @@ def build_inspector_user_data(
     import s3_runs
 
     log_url, run_url = s3_runs.presigned_urls_for_instance(vendor, server)
+    task_logs_post_b64 = s3_runs.presigned_task_logs_post_b64(vendor, server)
     replacements = {
         "SSH_DEPLOY_KEY_B64": ssh_deploy_key_b64,
         "REPO_URL": repo_url_ssh,
@@ -1037,6 +1038,7 @@ def build_inspector_user_data(
         "HOST_TIMING_DIR": host_timing_dir(vendor, server, github_run_id()),
         "LOG_UPLOAD_URL": log_url,
         "RUN_UPLOAD_URL": run_url,
+        "TASK_LOGS_S3_POST_B64": task_logs_post_b64,
     }
     user_data = user_data_pack.render_packed_user_data(USER_DATA, replacements, vendor=vendor)
     b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")

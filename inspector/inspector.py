@@ -779,13 +779,11 @@ def cleanup_s3_run(vendor: str, record) -> None:
     resource_opts = {"instance": record.instance}
     if vendor == "gcp":
         if not record.zone:
-            logging.warning("Skipping %s: missing zone for GCP cleanup", record.key)
-            return
+            raise RuntimeError(f"missing zone for GCP cleanup ({record.key})")
         resource_opts["zone"] = record.zone
     else:
         if not record.region:
-            logging.warning("Skipping %s: missing region for cleanup", record.key)
-            return
+            raise RuntimeError(f"missing region for cleanup ({record.key})")
         resource_opts["region"] = record.region
 
     with tempfile.TemporaryDirectory() as tempdir:
@@ -793,22 +791,23 @@ def cleanup_s3_run(vendor: str, record) -> None:
         try:
             stack = runner.get_stack(vendor, pulumi_opts, resource_opts)
         except AttributeError:
-            logging.exception("Couldn't get stack for %s", record.key)
-            return
+            raise RuntimeError(f"vendor {vendor} not supported for {record.key}") from None
         resources = stack.export_stack().deployment.get("resources", [])
         if len(resources) <= 1:
             logging.info(
-                "Pulumi stack for %s/%s already clean (%d resources); removing run record",
+                "Pulumi stack for %s/%s in %s already clean (%d resources); removing run record",
                 vendor,
                 record.instance,
+                record.region or record.zone,
                 len(resources),
             )
             s3_runs.delete_run_record(record.key)
             return
         logging.info(
-            "Destroying %s/%s from run record %s (success=%s, terminated_at=%s)",
+            "Destroying %s/%s in %s from run record %s (success=%s, terminated_at=%s)",
             vendor,
             record.instance,
+            record.region or record.zone,
             record.key,
             record.success,
             record.terminated_at,
@@ -905,25 +904,39 @@ def cleanup(ctx, threads, vendor):
     import s3_runs
 
     records = s3_runs.list_completed_runs(vendor=vendor)
-    futures = []
+    logging.info(
+        "Found %d completed S3 run record(s) to clean up%s",
+        len(records),
+        f" for {vendor}" if vendor else "",
+    )
+    if not records:
+        return
+
+    futures = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
         for record in records:
             if record.vendor not in supported_vendors:
+                logging.warning("Skipping unsupported vendor %s in %s", record.vendor, record.key)
                 continue
-            futures.append(
-                executor.submit(cleanup_s3_run, record.vendor, record)
-            )
-        error_occurred = False
-        for f in concurrent.futures.as_completed(futures):
+            futures[executor.submit(cleanup_s3_run, record.vendor, record)] = record
+
+        failures: list[str] = []
+        for future, record in futures.items():
             try:
-                f.result()
+                future.result()
             except Exception:
-                logging.exception("Error in S3-driven cleanup")
-                error_occurred = True
-        if error_occurred:
-            raise Exception("Errors occurred during cleanup")
-    if not records:
-        logging.info("No completed inspector runs to clean up%s", f" for {vendor}" if vendor else "")
+                logging.exception("S3-driven cleanup failed for %s", record.key)
+                failures.append(record.key)
+
+        if failures:
+            raise Exception(
+                f"S3 cleanup failed for {len(failures)} run(s): {', '.join(failures)}"
+            )
+    logging.info(
+        "S3 cleanup finished for %d run record(s)%s",
+        len(futures),
+        f" ({vendor})" if vendor else "",
+    )
 
 
 @cli.command()
@@ -989,6 +1002,12 @@ def inspect(ctx, vendor, instance, gpu_count, threads):
     finally:
         lib.finalize_task_metas(vendor, data_dir, instance, gpu_count=gpu_count)
         lib.record_timing_inspector_end(data_dir)
+        try:
+            import s3_runs
+
+            s3_runs.upload_task_logs_to_s3(data_dir)
+        except Exception:
+            logging.exception("Failed to upload task logs to S3")
         try:
             repo.push_path(lib.timing_dir(data_dir), f"Inspector finished from {repo.gha_url()}")
         except Exception:

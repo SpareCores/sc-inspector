@@ -356,6 +356,7 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e BENCHMARK_SECRETS_PASSPHRASE={BENCHMARK_SECRETS_PASSPHRASE} \
     -e SENTINEL_API_TOKEN={SENTINEL_API_TOKEN} \
     -e HF_TOKEN={HF_TOKEN} \
+    -e TASK_LOGS_S3_POST_B64={TASK_LOGS_S3_POST_B64} \
     ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT}
 inspect_exit=$?
 set -e

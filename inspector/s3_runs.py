@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import base64
 import json
 import logging
 import os
 import re
+from typing import Any
 
 import boto3
 from botocore.config import Config
+import requests
 
 # Presigned PUT URLs are signed with the GHA OIDC role (configure-aws-credentials).
 # STS credentials cap URL lifetime at session duration (we request 12h in start.yml).
@@ -37,6 +40,13 @@ def log_key(vendor: str, instance: str, run_id: str, *, when: datetime | None = 
     return (
         f"logs/{INSPECTOR_RUNS_CATEGORY}/{_sanitize_segment(vendor)}/{_sanitize_segment(instance)}/"
         f"{_date_path(when)}/{_sanitize_segment(run_id)}.log"
+    )
+
+
+def task_logs_prefix(vendor: str, instance: str, run_id: str, *, when: datetime | None = None) -> str:
+    return (
+        f"logs/{INSPECTOR_RUNS_CATEGORY}/{_sanitize_segment(vendor)}/{_sanitize_segment(instance)}/"
+        f"{_date_path(when)}/{_sanitize_segment(run_id)}/tasks/"
     )
 
 
@@ -69,6 +79,79 @@ def presigned_put_url(key: str, *, content_type: str) -> str:
         },
         ExpiresIn=PRESIGN_EXPIRES_SECONDS,
     )
+
+
+def presigned_post_for_prefix(prefix: str, *, max_bytes: int = 100 * 1024 * 1024) -> dict[str, Any]:
+    return _s3_client().generate_presigned_post(
+        Bucket=bucket_name(),
+        Key=prefix,
+        Conditions=[
+            ["starts-with", "$key", prefix],
+            ["content-length-range", 1, max_bytes],
+        ],
+        ExpiresIn=PRESIGN_EXPIRES_SECONDS,
+    )
+
+
+def presigned_task_logs_post(
+    vendor: str,
+    instance: str,
+    run_id: str,
+    *,
+    when: datetime | None = None,
+) -> dict[str, Any]:
+    prefix = task_logs_prefix(vendor, instance, run_id, when=when)
+    post = presigned_post_for_prefix(prefix)
+    return {"url": post["url"], "fields": post["fields"], "prefix": prefix}
+
+
+def presigned_task_logs_post_b64(vendor: str, instance: str) -> str:
+    run_id = os.environ.get("GITHUB_RUN_ID", "local")
+    when = datetime.now(timezone.utc)
+    payload = presigned_task_logs_post(vendor, instance, run_id, when=when)
+    return base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+
+
+def _upload_presigned_post(path: str, key: str, post: dict[str, Any]) -> None:
+    with open(path, "rb") as f:
+        fields = dict(post["fields"])
+        fields["key"] = key
+        response = requests.post(post["url"], data=fields, files={"file": f}, timeout=600)
+        response.raise_for_status()
+
+
+def upload_task_logs_to_s3(data_dir: str) -> None:
+    """Upload per-task stdout/stderr from the inspect data directory to S3."""
+    raw = os.environ.get("TASK_LOGS_S3_POST_B64")
+    if not raw:
+        return
+    try:
+        post = json.loads(base64.b64decode(raw))
+    except (json.JSONDecodeError, ValueError):
+        logging.exception("Invalid TASK_LOGS_S3_POST_B64")
+        return
+    prefix = post.get("prefix", "")
+    if not prefix or "url" not in post or "fields" not in post:
+        logging.warning("TASK_LOGS_S3_POST_B64 is missing url/fields/prefix")
+        return
+    uploaded = 0
+    for name in sorted(os.listdir(data_dir)):
+        task_dir = os.path.join(data_dir, name)
+        if not os.path.isdir(task_dir):
+            continue
+        safe_name = _sanitize_segment(name)
+        for stream in ("stdout", "stderr"):
+            path = os.path.join(task_dir, stream)
+            if not os.path.isfile(path) or os.path.getsize(path) == 0:
+                continue
+            key = f"{prefix}{safe_name}/{stream}"
+            try:
+                _upload_presigned_post(path, key, post)
+                uploaded += 1
+                logging.info("Uploaded task log %s", key)
+            except Exception:
+                logging.exception("Failed to upload task log %s", key)
+    logging.info("Uploaded %d task log file(s) to S3 under %s", uploaded, prefix)
 
 
 def presigned_urls_for_instance(vendor: str, instance: str) -> tuple[str, str]:
@@ -145,3 +228,4 @@ def list_completed_runs(*, vendor: str | None = None) -> list[RunRecord]:
 
 def delete_run_record(key: str) -> None:
     _s3_client().delete_object(Bucket=bucket_name(), Key=key)
+    logging.info("Deleted run record s3://%s/%s", bucket_name(), key)
