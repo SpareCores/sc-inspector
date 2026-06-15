@@ -27,6 +27,7 @@ import user_data as user_data_pack
 from zlib import crc32
 
 META_NAME = "meta.json"
+DEPLOYMENT_FILE = "deployment.json"
 TIMING_TASK_NAME = "timing"
 # UTC timestamps for instance startup intelligence (separate from meta.json to avoid git conflicts)
 # Instance cloud-resource creation window (from Pulumi engine events / output), not full stack.up runtime
@@ -939,6 +940,160 @@ def max_server_runtime(vendor: str, server: str) -> timedelta:
     return runtime
 
 
+def load_deployments(data_dir: str) -> list[dict[str, str]]:
+    path = os.path.join(data_dir, DEPLOYMENT_FILE)
+    if not os.path.isfile(path):
+        return []
+    with open(path) as f:
+        data = json.load(f)
+    deployments = data.get("deployments") or []
+    return [d for d in deployments if d.get("region")]
+
+
+def save_deployments(data_dir: str, deployments: list[dict[str, str]]) -> None:
+    path = os.path.join(data_dir, DEPLOYMENT_FILE)
+    if not deployments:
+        if os.path.isfile(path):
+            os.remove(path)
+        return
+    with open(path, "w") as f:
+        json.dump({"deployments": deployments}, f)
+
+
+def _merge_deployment_entry(
+    deployments: list[dict[str, str]], entry: dict[str, str]
+) -> list[dict[str, str]]:
+    result = [dict(d) for d in deployments]
+    for deployment in result:
+        if deployment["region"] == entry["region"]:
+            deployment.update(entry)
+            return result
+    result.append(dict(entry))
+    return result
+
+
+def mutate_deployments(
+    data_dir: str,
+    mutate: Callable[[list[dict[str, str]]], tuple[list[dict[str, str]], bool]],
+    *,
+    push_message: str | None = None,
+) -> bool:
+    """Pull latest git state, update deployment.json, and push when it changed."""
+    repo.pull()
+    deployments = load_deployments(data_dir)
+    deployments, changed = mutate(deployments)
+    if not changed:
+        return False
+    save_deployments(data_dir, deployments)
+    if repo.should_push():
+        repo.push_path(
+            data_dir,
+            push_message or f"Update {DEPLOYMENT_FILE} from {repo.gha_url()}",
+        )
+    return True
+
+
+def load_deployment_regions(data_dir: str) -> list[str]:
+    return [d["region"] for d in load_deployments(data_dir)]
+
+
+def remove_deployment_location(data_dir: str, region: str) -> bool:
+    return remove_deployment_locations(data_dir, [region])
+
+
+def remove_deployment_locations(data_dir: str, regions: list[str]) -> bool:
+    if not regions:
+        return False
+    drop = set(regions)
+
+    def mutate(deployments: list[dict[str, str]]) -> tuple[list[dict[str, str]], bool]:
+        filtered = [d for d in deployments if d["region"] not in drop]
+        return filtered, len(filtered) != len(deployments)
+
+    return mutate_deployments(data_dir, mutate)
+
+
+def destroy_stale_deployment_stacks(
+    vendor: str,
+    server: str,
+    data_dir: str,
+    new_region: str,
+    *,
+    on_output=logging.info,
+) -> None:
+    """Destroy Pulumi stacks left in previously recorded regions after a cross-region re-start."""
+    from sc_runner import runner
+    import tempfile
+
+    repo.pull()
+    stale_regions = [r for r in load_deployment_regions(data_dir) if r != new_region]
+    if not stale_regions:
+        return
+
+    removed_regions: list[str] = []
+    with tempfile.TemporaryDirectory() as tempdir:
+        pulumi_opts = dict(work_dir=tempdir)
+        for region in stale_regions:
+            resource_opts = dict(instance=server, region=region)
+            try:
+                try:
+                    stack = runner.get_stack(vendor, pulumi_opts, resource_opts)
+                except AttributeError:
+                    logging.exception("Couldn't get stack for stale deployment cleanup")
+                    break
+                resources = stack.export_stack().deployment.get("resources", [])
+                if len(resources) <= 1:
+                    logging.info(
+                        f"No stale stack for {vendor}/{region}/{server} "
+                        f"({len(resources)} resources)"
+                    )
+                    removed_regions.append(region)
+                    continue
+                logging.info(f"Destroying stale deployment stack {vendor}/{region}/{server}")
+                runner.destroy_stack(
+                    vendor,
+                    pulumi_opts,
+                    resource_opts,
+                    stack_opts=dict(on_output=on_output),
+                )
+                removed_regions.append(region)
+            except Exception:
+                logging.exception(f"Failed to destroy stale stack {vendor}/{region}/{server}")
+
+    if removed_regions:
+        remove_deployment_locations(data_dir, removed_regions)
+
+
+def save_deployment_location(
+    data_dir: str,
+    region: str,
+    zone: str | None = None,
+    *,
+    vendor: str | None = None,
+    server: str | None = None,
+    on_output=None,
+) -> None:
+    """Record deployment location until its stack is destroyed."""
+    if vendor and server:
+        destroy_stale_deployment_stacks(
+            vendor,
+            server,
+            data_dir,
+            region,
+            on_output=on_output or logging.info,
+        )
+    entry: dict[str, str] = {"region": region}
+    if zone:
+        entry["zone"] = zone
+
+    def mutate(deployments: list[dict[str, str]]) -> tuple[list[dict[str, str]], bool]:
+        updated = _merge_deployment_entry(deployments, entry)
+        changed = json.dumps(updated, sort_keys=True) != json.dumps(deployments, sort_keys=True)
+        return updated, changed
+
+    mutate_deployments(data_dir, mutate)
+
+
 @cache
 def get_last_start(data_dir, vendor, server):
     tasks = list(get_tasks(vendor))
@@ -1247,6 +1402,13 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 # empty it if create succeeded, just in case
                 error_msgs = []
                 instance_started = True
+                save_deployment_location(
+                    data_dir,
+                    resource_opts["region"],
+                    vendor=vendor,
+                    server=server,
+                    on_output=instance_logger.info,
+                )
                 break
             except Exception as e:
                 # on failure, try the next one
@@ -1335,6 +1497,14 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                     error_msgs = []
                     done = True
                     instance_started = True
+                    save_deployment_location(
+                        data_dir,
+                        resource_opts["region"],
+                        zone=zone,
+                        vendor=vendor,
+                        server=server,
+                        on_output=instance_logger.info,
+                    )
                     break
                 except Exception as e:
                     # Check if the error is about disk category not being supported

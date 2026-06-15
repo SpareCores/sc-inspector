@@ -487,7 +487,7 @@ def get_regions(vendor: str):
     engine = create_engine(f"sqlite:///{path}")
     session = Session(engine)
     stmt = select(Region).where(Region.vendor_id==vendor)
-    return [region.region_id for region in session.exec(stmt.distinct()).all()]
+    return [region.api_reference for region in session.exec(stmt.distinct()).all()]
 
 
 def servers():
@@ -721,6 +721,7 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
         resource_opts = {}
         destroy_errors = []
         destroy_attempted = []
+        removed_deployment_regions: list[str] = []
         with tempfile.TemporaryDirectory() as tempdir:
             pulumi_opts = dict(work_dir=tempdir)
             # use either regions or zones for cleaning up the stacks
@@ -742,13 +743,21 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
                             # a non-existent stack will have zero, a clean (already destroyed) stack should have exactly one
                             # resource (the Pulumi Stack itself). If we can see either of these, we have nothing to clean up.
                             logging.info(f"Pulumi stack for {vendor}/{value}/{server} has {len(resources)} resources, no cleanup needed")
+                            if opt_name == "region":
+                                removed_deployment_regions.append(value)
                             continue
                     logging.info(destroy)
                     destroy_attempted.append(value)
                     runner.destroy_stack(vendor, pulumi_opts, resource_opts | dict(instance=server), stack_opts=dict(on_output=logging.info))
+                    if opt_name == "region":
+                        removed_deployment_regions.append(value)
                 except Exception:
                     logging.exception(f"Failed to destroy {vendor}/{value}/{server}")
                     destroy_errors.append(value)
+        if removed_deployment_regions:
+            lib.remove_deployment_locations(
+                data_dir, list(dict.fromkeys(removed_deployment_regions))
+            )
         if destroy_attempted and len(destroy_errors) == len(destroy_attempted):
             raise Exception(
                 f"Failed to destroy {vendor}/{server} in all {len(destroy_errors)} attempted location(s): "
@@ -783,6 +792,7 @@ def cleanup(ctx, threads, force, all_regions, lookback_mins, data_only, vendor):
     import concurrent.futures
 
     repo_data = os.path.join(ctx.parent.params["repo_path"], "data")
+    repo.pull()
     candidates = available_servers(vendor=vendor)
     candidates = {
         k: v
@@ -794,17 +804,26 @@ def cleanup(ctx, threads, force, all_regions, lookback_mins, data_only, vendor):
     futures = []
     servers = lib.sort_available_servers(candidates, data_dir=repo_data)
     with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
-        for (vendor, server), (_, regions, zones, _zone_to_region) in servers:
+        for (vendor, server), (_, regions, zones, zone_to_region) in servers:
+            data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
             if all_regions:
                 regions = get_regions(vendor)
             elif vendor == "vultr":
                 from sc_runner.resources import vultr as vultr_resources
 
                 regions = vultr_resources.cleanup_regions(server, list(regions), disk_size=lib.VOLUME_SIZE)
+            elif vendor == "alicloud":
+                from sc_runner.resources import alicloud as alicloud_resources
+
+                regions = alicloud_resources.cleanup_regions(
+                    server, list(regions), list(zones), zone_to_region
+                )
+            regions = list(dict.fromkeys([*regions, *lib.load_deployment_regions(data_dir)]))
+            if vendor == "alicloud" and lookback_mins is not None:
+                regions = list(dict.fromkeys([*regions, *get_regions(vendor)]))
             if vendor not in supported_vendors:
                 # sc-runner can't yet handle this vendor
                 continue
-            data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
             # process the cleanup in a thread as getting Pulumi state is very slow
             if vendor in {"gcp"}:
                 # we use zones with these vendors
