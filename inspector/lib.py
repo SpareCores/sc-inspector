@@ -1015,7 +1015,7 @@ def build_inspector_user_data(
     ssh_deploy_key_b64: str,
     repo_url_ssh: str,
 ) -> tuple[str, str]:
-    from . import s3_runs
+    import s3_runs
 
     log_url, run_url = s3_runs.presigned_urls_for_instance(vendor, server)
     replacements = {

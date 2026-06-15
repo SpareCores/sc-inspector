@@ -773,7 +773,7 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
 
 def cleanup_s3_run(vendor: str, record) -> None:
     from sc_runner import runner
-    from . import s3_runs
+    import s3_runs
     import tempfile
 
     resource_opts = {"instance": record.instance}
@@ -902,7 +902,7 @@ def cleanup(ctx, threads, vendor):
     """S3 run-record driven cleanup (frequent scheduled job)."""
     from sc_runner.resources import supported_vendors
     import concurrent.futures
-    from . import s3_runs
+    import s3_runs
 
     records = s3_runs.list_completed_runs(vendor=vendor)
     futures = []
