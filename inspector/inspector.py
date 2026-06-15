@@ -719,29 +719,45 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
 
     if destroy:
         resource_opts = {}
+        destroy_errors = []
+        destroy_attempted = []
         with tempfile.TemporaryDirectory() as tempdir:
             pulumi_opts = dict(work_dir=tempdir)
             # use either regions or zones for cleaning up the stacks
             for opt_name, value in itertools.chain(zip(["region"] * len(regions), regions), zip(["zone"] * len(zones), zones)):
                 resource_opts[opt_name] = value
-                # if forced, we do a full refresh and delete for all resources
-                if not force:
-                    # In order not to cause unnecessary locks in Pulumi, we first get the stack's resources to see if
-                    # it's already empty, and in that case, we don't destroy it.
-                    try:
-                        stack = runner.get_stack(vendor, pulumi_opts, resource_opts | dict(instance=server))
-                    except AttributeError:
-                        logging.exception("Couldn't get stack")
-                        # this vendor is not yet supported
-                        return
-                    resources = stack.export_stack().deployment.get("resources", [])
-                    if len(resources) <= 1:
-                        # a non-existent stack will have zero, a clean (already destroyed) stack should have exactly one
-                        # resource (the Pulumi Stack itself). If we can see either of these, we have nothing to clean up.
-                        logging.info(f"Pulumi stack for {vendor}/{value}/{server} has {len(resources)} resources, no cleanup needed")
-                        continue
-                logging.info(destroy)
-                runner.destroy_stack(vendor, pulumi_opts, resource_opts | dict(instance=server), stack_opts=dict(on_output=logging.info))
+                try:
+                    # if forced, we do a full refresh and delete for all resources
+                    if not force:
+                        # In order not to cause unnecessary locks in Pulumi, we first get the stack's resources to see if
+                        # it's already empty, and in that case, we don't destroy it.
+                        try:
+                            stack = runner.get_stack(vendor, pulumi_opts, resource_opts | dict(instance=server))
+                        except AttributeError:
+                            logging.exception("Couldn't get stack")
+                            # this vendor is not yet supported
+                            return
+                        resources = stack.export_stack().deployment.get("resources", [])
+                        if len(resources) <= 1:
+                            # a non-existent stack will have zero, a clean (already destroyed) stack should have exactly one
+                            # resource (the Pulumi Stack itself). If we can see either of these, we have nothing to clean up.
+                            logging.info(f"Pulumi stack for {vendor}/{value}/{server} has {len(resources)} resources, no cleanup needed")
+                            continue
+                    logging.info(destroy)
+                    destroy_attempted.append(value)
+                    runner.destroy_stack(vendor, pulumi_opts, resource_opts | dict(instance=server), stack_opts=dict(on_output=logging.info))
+                except Exception:
+                    logging.exception(f"Failed to destroy {vendor}/{value}/{server}")
+                    destroy_errors.append(value)
+        if destroy_attempted and len(destroy_errors) == len(destroy_attempted):
+            raise Exception(
+                f"Failed to destroy {vendor}/{server} in all {len(destroy_errors)} attempted location(s): "
+                + ", ".join(destroy_errors)
+            )
+        if destroy_errors:
+            logging.warning(
+                f"{vendor}/{server}: destroy failed in {destroy_errors} but succeeded in other location(s)"
+            )
 
 
 @cli.command()
@@ -781,6 +797,10 @@ def cleanup(ctx, threads, force, all_regions, lookback_mins, data_only, vendor):
         for (vendor, server), (_, regions, zones, _zone_to_region) in servers:
             if all_regions:
                 regions = get_regions(vendor)
+            elif vendor == "vultr":
+                from sc_runner.resources import vultr as vultr_resources
+
+                regions = vultr_resources.cleanup_regions(server, list(regions), disk_size=lib.VOLUME_SIZE)
             if vendor not in supported_vendors:
                 # sc-runner can't yet handle this vendor
                 continue
