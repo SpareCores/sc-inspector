@@ -660,7 +660,6 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
 
     # see if we have to destroy the resources in the Pulumi stack
     destroy = ""
-
     start_times = []
     end_times = []
     already_ended = []
@@ -721,11 +720,13 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
         resource_opts = {}
         destroy_errors = []
         destroy_attempted = []
-        removed_deployment_regions: list[str] = []
         with tempfile.TemporaryDirectory() as tempdir:
             pulumi_opts = dict(work_dir=tempdir)
             # use either regions or zones for cleaning up the stacks
-            for opt_name, value in itertools.chain(zip(["region"] * len(regions), regions), zip(["zone"] * len(zones), zones)):
+            for opt_name, value in itertools.chain(
+                zip(["region"] * len(regions), regions),
+                zip(["zone"] * len(zones), zones),
+            ):
                 resource_opts[opt_name] = value
                 try:
                     # if forced, we do a full refresh and delete for all resources
@@ -733,7 +734,9 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
                         # In order not to cause unnecessary locks in Pulumi, we first get the stack's resources to see if
                         # it's already empty, and in that case, we don't destroy it.
                         try:
-                            stack = runner.get_stack(vendor, pulumi_opts, resource_opts | dict(instance=server))
+                            stack = runner.get_stack(
+                                vendor, pulumi_opts, resource_opts | dict(instance=server)
+                            )
                         except AttributeError:
                             logging.exception("Couldn't get stack")
                             # this vendor is not yet supported
@@ -742,22 +745,21 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
                         if len(resources) <= 1:
                             # a non-existent stack will have zero, a clean (already destroyed) stack should have exactly one
                             # resource (the Pulumi Stack itself). If we can see either of these, we have nothing to clean up.
-                            logging.info(f"Pulumi stack for {vendor}/{value}/{server} has {len(resources)} resources, no cleanup needed")
-                            if opt_name == "region":
-                                removed_deployment_regions.append(value)
+                            logging.info(
+                                f"Pulumi stack for {vendor}/{value}/{server} has {len(resources)} resources, no cleanup needed"
+                            )
                             continue
                     logging.info(destroy)
                     destroy_attempted.append(value)
-                    runner.destroy_stack(vendor, pulumi_opts, resource_opts | dict(instance=server), stack_opts=dict(on_output=logging.info))
-                    if opt_name == "region":
-                        removed_deployment_regions.append(value)
+                    runner.destroy_stack(
+                        vendor,
+                        pulumi_opts,
+                        resource_opts | dict(instance=server),
+                        stack_opts=dict(on_output=logging.info),
+                    )
                 except Exception:
                     logging.exception(f"Failed to destroy {vendor}/{value}/{server}")
                     destroy_errors.append(value)
-        if removed_deployment_regions:
-            lib.remove_deployment_locations(
-                data_dir, list(dict.fromkeys(removed_deployment_regions))
-            )
         if destroy_attempted and len(destroy_errors) == len(destroy_attempted):
             raise Exception(
                 f"Failed to destroy {vendor}/{server} in all {len(destroy_errors)} attempted location(s): "
@@ -769,12 +771,64 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
             )
 
 
-@cli.command()
+def cleanup_s3_run(vendor: str, record) -> None:
+    from sc_runner import runner
+    from . import s3_runs
+    import tempfile
+
+    resource_opts = {"instance": record.instance}
+    if vendor == "gcp":
+        if not record.zone:
+            logging.warning("Skipping %s: missing zone for GCP cleanup", record.key)
+            return
+        resource_opts["zone"] = record.zone
+    else:
+        if not record.region:
+            logging.warning("Skipping %s: missing region for cleanup", record.key)
+            return
+        resource_opts["region"] = record.region
+
+    with tempfile.TemporaryDirectory() as tempdir:
+        pulumi_opts = dict(work_dir=tempdir)
+        try:
+            stack = runner.get_stack(vendor, pulumi_opts, resource_opts)
+        except AttributeError:
+            logging.exception("Couldn't get stack for %s", record.key)
+            return
+        resources = stack.export_stack().deployment.get("resources", [])
+        if len(resources) <= 1:
+            logging.info(
+                "Pulumi stack for %s/%s already clean (%d resources); removing run record",
+                vendor,
+                record.instance,
+                len(resources),
+            )
+            s3_runs.delete_run_record(record.key)
+            return
+        logging.info(
+            "Destroying %s/%s from run record %s (success=%s, terminated_at=%s)",
+            vendor,
+            record.instance,
+            record.key,
+            record.success,
+            record.terminated_at,
+        )
+        runner.destroy_stack(
+            vendor,
+            pulumi_opts,
+            resource_opts,
+            stack_opts=dict(on_output=logging.info),
+        )
+    s3_runs.delete_run_record(record.key)
+
+
+@cli.command("cleanup-sweep")
 @click.pass_context
 @click.option("--threads", type=int, default=64, show_default=True,
               help="Number of threads to run Pulumi concurrently. Each thread consumes around 60 MiB of RAM.")
 @click.option("--force/--no-force", type=bool, default=False, help="Do a cleanup even if there's no meta for the server")
-@click.option("--all-regions/--no-all-regions", type=bool, default=False, help="Clean up in all regions, not just in those which list the server as available")
+@click.option("--all-regions/--no-all-regions", type=bool, default=False,
+              help="Clean up in all regions, not just in those which list the server as available")
 @click.option(
     "--lookback-mins",
     type=int,
@@ -787,12 +841,12 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
     help="Only consider servers with a data directory in the repo (skips the full catalog).",
 )
 @click.option("--vendor", type=str, default=None, help="Only clean up resources for the specified vendor")
-def cleanup(ctx, threads, force, all_regions, lookback_mins, data_only, vendor):
+def cleanup_sweep(ctx, threads, force, all_regions, lookback_mins, data_only, vendor):
+    """Catalog/meta-driven cleanup sweep (daily safety net)."""
     from sc_runner.resources import supported_vendors
     import concurrent.futures
 
     repo_data = os.path.join(ctx.parent.params["repo_path"], "data")
-    repo.pull()
     candidates = available_servers(vendor=vendor)
     candidates = {
         k: v
@@ -804,33 +858,28 @@ def cleanup(ctx, threads, force, all_regions, lookback_mins, data_only, vendor):
     futures = []
     servers = lib.sort_available_servers(candidates, data_dir=repo_data)
     with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
-        for (vendor, server), (_, regions, zones, zone_to_region) in servers:
-            data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
+        for (vendor, server), (_, regions, zones, _zone_to_region) in servers:
             if all_regions:
                 regions = get_regions(vendor)
             elif vendor == "vultr":
                 from sc_runner.resources import vultr as vultr_resources
 
                 regions = vultr_resources.cleanup_regions(server, list(regions), disk_size=lib.VOLUME_SIZE)
-            elif vendor == "alicloud":
-                from sc_runner.resources import alicloud as alicloud_resources
-
-                regions = alicloud_resources.cleanup_regions(
-                    server, list(regions), list(zones), zone_to_region
-                )
-            regions = list(dict.fromkeys([*regions, *lib.load_deployment_regions(data_dir)]))
-            if vendor == "alicloud" and lookback_mins is not None:
-                regions = list(dict.fromkeys([*regions, *get_regions(vendor)]))
             if vendor not in supported_vendors:
                 # sc-runner can't yet handle this vendor
                 continue
+            data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
             # process the cleanup in a thread as getting Pulumi state is very slow
             if vendor in {"gcp"}:
                 # we use zones with these vendors
-                futures.append([vendor, server, executor.submit(cleanup_task, vendor, server, data_dir, zones=zones, force=force)])
+                futures.append(
+                    [vendor, server, executor.submit(cleanup_task, vendor, server, data_dir, zones=zones, force=force)]
+                )
             else:
                 # others use regions
-                futures.append([vendor, server, executor.submit(cleanup_task, vendor, server, data_dir, regions=regions, force=force)])
+                futures.append(
+                    [vendor, server, executor.submit(cleanup_task, vendor, server, data_dir, regions=regions, force=force)]
+                )
 
         error_occurred = False
         for vendor, server, f in futures:
@@ -842,6 +891,39 @@ def cleanup(ctx, threads, force, all_regions, lookback_mins, data_only, vendor):
 
         if error_occurred:
             raise Exception("Errors occurred during cleanup")
+
+
+@cli.command()
+@click.pass_context
+@click.option("--threads", type=int, default=64, show_default=True,
+              help="Number of threads to run Pulumi concurrently. Each thread consumes around 60 MiB of RAM.")
+@click.option("--vendor", type=str, default=None, help="Only clean up resources for the specified vendor")
+def cleanup(ctx, threads, vendor):
+    """S3 run-record driven cleanup (frequent scheduled job)."""
+    from sc_runner.resources import supported_vendors
+    import concurrent.futures
+    from . import s3_runs
+
+    records = s3_runs.list_completed_runs(vendor=vendor)
+    futures = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
+        for record in records:
+            if record.vendor not in supported_vendors:
+                continue
+            futures.append(
+                executor.submit(cleanup_s3_run, record.vendor, record)
+            )
+        error_occurred = False
+        for f in concurrent.futures.as_completed(futures):
+            try:
+                f.result()
+            except Exception:
+                logging.exception("Error in S3-driven cleanup")
+                error_occurred = True
+        if error_occurred:
+            raise Exception("Errors occurred during cleanup")
+    if not records:
+        logging.info("No completed inspector runs to clean up%s", f" for {vendor}" if vendor else "")
 
 
 @cli.command()

@@ -3,6 +3,44 @@
 # Redirect all output to /var/log/user_data.log for debugging
 exec >> /var/log/user_data.log 2>&1
 
+upload_user_data_log() {
+    url="{LOG_UPLOAD_URL}"
+    if [ -z "$url" ]; then
+        return
+    fi
+    curl -sfS -X PUT -T /var/log/user_data.log -H "Content-Type: text/plain" "$url" || true
+}
+
+upload_run_status() {
+    success="$1"
+    exit_code="$2"
+    url="{RUN_UPLOAD_URL}"
+    if [ -z "$url" ]; then
+        return
+    fi
+    terminated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    cat <<EOF | curl -sfS -X PUT -H "Content-Type: application/json" --data-binary @- "$url"
+{"vendor":"{VENDOR}","instance":"{INSTANCE}","region":"{REGION}","zone":"{ZONE}","workflow":"{GITHUB_WORKFLOW}","run_id":"{GITHUB_RUN_ID}","terminated_at":"$terminated_at","success":$success,"exit_code":$exit_code}
+EOF
+}
+
+finish_user_data() {
+    if [ -n "${USER_DATA_FINISHED:-}" ]; then
+        return
+    fi
+    USER_DATA_FINISHED=1
+    exit_code="$1"
+    if [ "$exit_code" -eq 0 ]; then
+        success=true
+    else
+        success=false
+    fi
+    upload_user_data_log
+    upload_run_status "$success" "$exit_code"
+}
+
+trap 'exit_code=$?; finish_user_data "$exit_code"' EXIT
+
 TIMING_HOST_DIR="{HOST_TIMING_DIR}"
 mkdir -p "$TIMING_HOST_DIR"
 date -u +%Y-%m-%dT%H:%M:%SZ > "$TIMING_HOST_DIR/user_data_start"
@@ -307,6 +345,7 @@ apt-get autoremove -y $(dpkg-query -W -f='${Package}\n' \
 # on some machines docker initialization times out with a lot of GPUs. Enable persistence mode to overcome that.
 nvidia-smi -pm 1
 date -u +%Y-%m-%dT%H:%M:%SZ > "$TIMING_HOST_DIR/user_data_end"
+set +e
 docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/docker.sock -v /root/.ssh:/root/.ssh \
     -v "$TIMING_HOST_DIR:/host-timing:ro" \
     -e REPO_URL={REPO_URL} \
@@ -318,4 +357,7 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e SENTINEL_API_TOKEN={SENTINEL_API_TOKEN} \
     -e HF_TOKEN={HF_TOKEN} \
     ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT}
+inspect_exit=$?
+set -e
+finish_user_data "$inspect_exit"
 poweroff

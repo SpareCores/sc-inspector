@@ -27,7 +27,6 @@ import user_data as user_data_pack
 from zlib import crc32
 
 META_NAME = "meta.json"
-DEPLOYMENT_FILE = "deployment.json"
 TIMING_TASK_NAME = "timing"
 # UTC timestamps for instance startup intelligence (separate from meta.json to avoid git conflicts)
 # Instance cloud-resource creation window (from Pulumi engine events / output), not full stack.up runtime
@@ -940,160 +939,6 @@ def max_server_runtime(vendor: str, server: str) -> timedelta:
     return runtime
 
 
-def load_deployments(data_dir: str) -> list[dict[str, str]]:
-    path = os.path.join(data_dir, DEPLOYMENT_FILE)
-    if not os.path.isfile(path):
-        return []
-    with open(path) as f:
-        data = json.load(f)
-    deployments = data.get("deployments") or []
-    return [d for d in deployments if d.get("region")]
-
-
-def save_deployments(data_dir: str, deployments: list[dict[str, str]]) -> None:
-    path = os.path.join(data_dir, DEPLOYMENT_FILE)
-    if not deployments:
-        if os.path.isfile(path):
-            os.remove(path)
-        return
-    with open(path, "w") as f:
-        json.dump({"deployments": deployments}, f)
-
-
-def _merge_deployment_entry(
-    deployments: list[dict[str, str]], entry: dict[str, str]
-) -> list[dict[str, str]]:
-    result = [dict(d) for d in deployments]
-    for deployment in result:
-        if deployment["region"] == entry["region"]:
-            deployment.update(entry)
-            return result
-    result.append(dict(entry))
-    return result
-
-
-def mutate_deployments(
-    data_dir: str,
-    mutate: Callable[[list[dict[str, str]]], tuple[list[dict[str, str]], bool]],
-    *,
-    push_message: str | None = None,
-) -> bool:
-    """Pull latest git state, update deployment.json, and push when it changed."""
-    repo.pull()
-    deployments = load_deployments(data_dir)
-    deployments, changed = mutate(deployments)
-    if not changed:
-        return False
-    save_deployments(data_dir, deployments)
-    if repo.should_push():
-        repo.push_path(
-            data_dir,
-            push_message or f"Update {DEPLOYMENT_FILE} from {repo.gha_url()}",
-        )
-    return True
-
-
-def load_deployment_regions(data_dir: str) -> list[str]:
-    return [d["region"] for d in load_deployments(data_dir)]
-
-
-def remove_deployment_location(data_dir: str, region: str) -> bool:
-    return remove_deployment_locations(data_dir, [region])
-
-
-def remove_deployment_locations(data_dir: str, regions: list[str]) -> bool:
-    if not regions:
-        return False
-    drop = set(regions)
-
-    def mutate(deployments: list[dict[str, str]]) -> tuple[list[dict[str, str]], bool]:
-        filtered = [d for d in deployments if d["region"] not in drop]
-        return filtered, len(filtered) != len(deployments)
-
-    return mutate_deployments(data_dir, mutate)
-
-
-def destroy_stale_deployment_stacks(
-    vendor: str,
-    server: str,
-    data_dir: str,
-    new_region: str,
-    *,
-    on_output=logging.info,
-) -> None:
-    """Destroy Pulumi stacks left in previously recorded regions after a cross-region re-start."""
-    from sc_runner import runner
-    import tempfile
-
-    repo.pull()
-    stale_regions = [r for r in load_deployment_regions(data_dir) if r != new_region]
-    if not stale_regions:
-        return
-
-    removed_regions: list[str] = []
-    with tempfile.TemporaryDirectory() as tempdir:
-        pulumi_opts = dict(work_dir=tempdir)
-        for region in stale_regions:
-            resource_opts = dict(instance=server, region=region)
-            try:
-                try:
-                    stack = runner.get_stack(vendor, pulumi_opts, resource_opts)
-                except AttributeError:
-                    logging.exception("Couldn't get stack for stale deployment cleanup")
-                    break
-                resources = stack.export_stack().deployment.get("resources", [])
-                if len(resources) <= 1:
-                    logging.info(
-                        f"No stale stack for {vendor}/{region}/{server} "
-                        f"({len(resources)} resources)"
-                    )
-                    removed_regions.append(region)
-                    continue
-                logging.info(f"Destroying stale deployment stack {vendor}/{region}/{server}")
-                runner.destroy_stack(
-                    vendor,
-                    pulumi_opts,
-                    resource_opts,
-                    stack_opts=dict(on_output=on_output),
-                )
-                removed_regions.append(region)
-            except Exception:
-                logging.exception(f"Failed to destroy stale stack {vendor}/{region}/{server}")
-
-    if removed_regions:
-        remove_deployment_locations(data_dir, removed_regions)
-
-
-def save_deployment_location(
-    data_dir: str,
-    region: str,
-    zone: str | None = None,
-    *,
-    vendor: str | None = None,
-    server: str | None = None,
-    on_output=None,
-) -> None:
-    """Record deployment location until its stack is destroyed."""
-    if vendor and server:
-        destroy_stale_deployment_stacks(
-            vendor,
-            server,
-            data_dir,
-            region,
-            on_output=on_output or logging.info,
-        )
-    entry: dict[str, str] = {"region": region}
-    if zone:
-        entry["zone"] = zone
-
-    def mutate(deployments: list[dict[str, str]]) -> tuple[list[dict[str, str]], bool]:
-        updated = _merge_deployment_entry(deployments, entry)
-        changed = json.dumps(updated, sort_keys=True) != json.dumps(deployments, sort_keys=True)
-        return updated, changed
-
-    mutate_deployments(data_dir, mutate)
-
-
 @cache
 def get_last_start(data_dir, vendor, server):
     tasks = list(get_tasks(vendor))
@@ -1106,10 +951,8 @@ def get_last_start(data_dir, vendor, server):
     meta_starts = [start for start in meta_starts if start]
     if not meta_starts:
         # put it to the back
-        last_start = datetime.min
-    else:
-        last_start = max(meta_starts)
-    return last_start
+        return datetime.min
+    return max(meta_starts)
 
 
 def get_last_end(data_dir, vendor, server):
@@ -1151,9 +994,69 @@ def should_scan_for_cleanup(
 
 def sort_available_servers(available_servers: dict, data_dir, reverse=True, max_start=None):
     if max_start:
-        available_servers = {k: v for k, v in available_servers.items() if get_last_start(data_dir, k[0], k[1]) >= max_start}
-    sorted_servers = sorted(available_servers.items(), key=lambda item: get_last_start(data_dir, item[0][0], item[0][1]), reverse=reverse)
-    return sorted_servers
+        available_servers = {
+            k: v for k, v in available_servers.items()
+            if get_last_start(data_dir, k[0], k[1]) >= max_start
+        }
+    return sorted(
+        available_servers.items(),
+        key=lambda item: get_last_start(data_dir, item[0][0], item[0][1]),
+        reverse=reverse,
+    )
+
+
+def build_inspector_user_data(
+    vendor: str,
+    server: str,
+    srv_data,
+    region: str,
+    zone: str | None,
+    timeout_mins: int,
+    ssh_deploy_key_b64: str,
+    repo_url_ssh: str,
+) -> tuple[str, str]:
+    from . import s3_runs
+
+    log_url, run_url = s3_runs.presigned_urls_for_instance(vendor, server)
+    replacements = {
+        "SSH_DEPLOY_KEY_B64": ssh_deploy_key_b64,
+        "REPO_URL": repo_url_ssh,
+        "GITHUB_SERVER_URL": os.environ.get("GITHUB_SERVER_URL", ""),
+        "GITHUB_REPOSITORY": os.environ.get("GITHUB_REPOSITORY", ""),
+        "GITHUB_RUN_ID": os.environ.get("GITHUB_RUN_ID", ""),
+        "GITHUB_WORKFLOW": s3_runs.workflow_slug(),
+        "BENCHMARK_SECRETS_PASSPHRASE": os.environ.get("BENCHMARK_SECRETS_PASSPHRASE", ""),
+        "SENTINEL_API_TOKEN": os.environ.get("SENTINEL_API_TOKEN", ""),
+        "HF_TOKEN": os.environ.get("HF_TOKEN", ""),
+        "VENDOR": vendor,
+        "INSTANCE": server,
+        "REGION": region or "",
+        "ZONE": zone or "",
+        "GPU_COUNT": srv_data.gpu_count,
+        "SHUTDOWN_MINS": timeout_mins + 30,  # give enough time to set up the machine
+        "HOST_TIMING_DIR": host_timing_dir(vendor, server, github_run_id()),
+        "LOG_UPLOAD_URL": log_url,
+        "RUN_UPLOAD_URL": run_url,
+    }
+    user_data = user_data_pack.render_packed_user_data(USER_DATA, replacements, vendor=vendor)
+    b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
+    return user_data, b64_user_data
+
+
+def delayed_destroy(vendor, server, resource_opts):
+    from sc_runner import runner
+
+    # to be run in the background
+    time.sleep(180)
+
+    # change the thread name for logging
+    current_thread = threading.current_thread()
+    current_thread.name = f"{vendor}/{server}"
+    instance_logger = logging.getLogger(f"{vendor}/{server}")
+    try:
+        runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
+    except Exception:
+        logging.exception("Failed to destroy")
 
 
 def custom_sort(lst, key):
@@ -1349,23 +1252,6 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
     ssh_deploy_key = os.environ.get("SSH_DEPLOY_KEY", "")
     ssh_deploy_key_b64 = base64.b64encode(ssh_deploy_key.encode("utf-8")).decode("ascii") if ssh_deploy_key else ""
     # start instance
-    replacements = {
-        "SSH_DEPLOY_KEY_B64": ssh_deploy_key_b64,
-        "REPO_URL": repo_url_ssh,
-        "GITHUB_SERVER_URL": os.environ.get("GITHUB_SERVER_URL", ""),
-        "GITHUB_REPOSITORY": os.environ.get("GITHUB_REPOSITORY", ""),
-        "GITHUB_RUN_ID": os.environ.get("GITHUB_RUN_ID", ""),
-        "BENCHMARK_SECRETS_PASSPHRASE": os.environ.get("BENCHMARK_SECRETS_PASSPHRASE", ""),
-        "SENTINEL_API_TOKEN": os.environ.get("SENTINEL_API_TOKEN", ""),
-        "HF_TOKEN": os.environ.get("HF_TOKEN", ""),
-        "VENDOR": vendor,
-        "INSTANCE": server,
-        "GPU_COUNT": srv_data.gpu_count,
-        "SHUTDOWN_MINS": timeout_mins + 30,  # give enough time to set up the machine
-        "HOST_TIMING_DIR": host_timing_dir(vendor, server, github_run_id()),
-    }
-    user_data = user_data_pack.render_packed_user_data(USER_DATA, replacements, vendor=vendor)
-    b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
     if vendor in ("aws", "gcp", "hcloud", "upcloud", "ovh", "alicloud", "vultr"):
         # get the copy (so we don't modify the original) of the default instance opts for the vendor and add ours
         instance_opts = copy.deepcopy(default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts"))
@@ -1391,6 +1277,9 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         for region in regions:
             logging.info(f"Trying {region}")
             resource_opts["region"] = region
+            user_data, b64_user_data = build_inspector_user_data(
+                vendor, server, srv_data, region, None, timeout_mins, ssh_deploy_key_b64, repo_url_ssh
+            )
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
             runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
@@ -1402,13 +1291,6 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 # empty it if create succeeded, just in case
                 error_msgs = []
                 instance_started = True
-                save_deployment_location(
-                    data_dir,
-                    resource_opts["region"],
-                    vendor=vendor,
-                    server=server,
-                    on_output=instance_logger.info,
-                )
                 break
             except Exception as e:
                 # on failure, try the next one
@@ -1426,6 +1308,9 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         for region in custom_sort(regions, "us-west-2"):
             logging.info(f"Trying {region}")
             resource_opts["region"] = region
+            user_data, b64_user_data = build_inspector_user_data(
+                vendor, server, srv_data, region, None, timeout_mins, ssh_deploy_key_b64, repo_url_ssh
+            )
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
             runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
@@ -1477,6 +1362,9 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             logging.info(f"Trying zone {zone} (region {region})")
             resource_opts["region"] = region
             resource_opts["availability_zone"] = zone
+            user_data, b64_user_data = build_inspector_user_data(
+                vendor, server, srv_data, region, zone, timeout_mins, ssh_deploy_key_b64, repo_url_ssh
+            )
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
             runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
@@ -1497,14 +1385,6 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                     error_msgs = []
                     done = True
                     instance_started = True
-                    save_deployment_location(
-                        data_dir,
-                        resource_opts["region"],
-                        zone=zone,
-                        vendor=vendor,
-                        server=server,
-                        on_output=instance_logger.info,
-                    )
                     break
                 except Exception as e:
                     # Check if the error is about disk category not being supported
@@ -1537,6 +1417,9 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         for region in custom_sort(regions, "centralus"):
             logging.info(f"Trying {region}")
             resource_opts["region"] = region
+            user_data, b64_user_data = build_inspector_user_data(
+                vendor, server, srv_data, region, None, timeout_mins, ssh_deploy_key_b64, repo_url_ssh
+            )
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
             runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
 
@@ -1604,11 +1487,17 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                                   on_host_maintenance="TERMINATE" if is_preemptible else "MIGRATE"),
                               )
         # enable nested virtualization
-        instance_opts |= dict(metadata_startup_script=user_data, advanced_machine_features=dict(enable_nested_virtualization=True))
-
         for zone in zones:
             logging.info(f"Trying {zone}")
             resource_opts["zone"] = zone
+            user_data, b64_user_data = build_inspector_user_data(
+                vendor, server, srv_data, "", zone, timeout_mins, ssh_deploy_key_b64, repo_url_ssh
+            )
+            instance_opts = copy.deepcopy(default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts"))
+            instance_opts |= dict(
+                metadata_startup_script=user_data,
+                advanced_machine_features=dict(enable_nested_virtualization=True),
+            )
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
             runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
 
