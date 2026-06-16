@@ -82,11 +82,12 @@ def presigned_put_url(key: str, *, content_type: str) -> str:
 
 
 def presigned_post_for_prefix(prefix: str, *, max_bytes: int = 100 * 1024 * 1024) -> dict[str, Any]:
+    # Key must end with ${filename} so boto3 emits a starts-with condition on prefix.
+    # A bare prefix would add an exact key match and reject keys like prefix/task/stdout.
     return _s3_client().generate_presigned_post(
         Bucket=bucket_name(),
-        Key=prefix,
+        Key=f"{prefix}${{filename}}",
         Conditions=[
-            ["starts-with", "$key", prefix],
             ["content-length-range", 1, max_bytes],
         ],
         ExpiresIn=PRESIGN_EXPIRES_SECONDS,
@@ -116,8 +117,14 @@ def _upload_presigned_post(path: str, key: str, post: dict[str, Any]) -> None:
     with open(path, "rb") as f:
         fields = dict(post["fields"])
         fields["key"] = key
-        response = requests.post(post["url"], data=fields, files={"file": f}, timeout=600)
-        response.raise_for_status()
+        response = requests.post(post["url"], data=fields, files={"file": ("", f)}, timeout=600)
+        try:
+            response.raise_for_status()
+        except requests.HTTPError as exc:
+            body = (response.text or "").strip()
+            if body:
+                raise requests.HTTPError(f"{exc}; S3 response: {body}", response=response) from exc
+            raise
 
 
 def upload_task_logs_to_s3(data_dir: str) -> None:
