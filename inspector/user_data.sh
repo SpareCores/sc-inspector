@@ -95,18 +95,36 @@ apt_retry update -y
 # Add the required repositories to Apt sources:
 apt_retry install -y ca-certificates curl
 install -m 0755 -d /etc/apt/keyrings
-# docker (download.docker.com is unreachable from Alibaba Cloud China)
-if [ "{VENDOR}" = "alicloud" ]; then
-    DOCKER_REPO="https://mirrors.aliyun.com/docker-ce/linux/$ID"
-else
-    DOCKER_REPO="https://download.docker.com/linux/$ID"
+
+DOCKER_REPO_DEFAULT="https://download.docker.com/linux/$ID"
+DOCKER_REPO_ALIYUN="https://mirrors.aliyun.com/docker-ce/linux/$ID"
+DOCKER_APT_PKGS="docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin openssh-client"
+DOCKER_REPO="$DOCKER_REPO_DEFAULT"
+
+setup_docker_repo() {
+    repo="$1"
+    echo "Setting up Docker apt repo: $repo"
+    curl -fsSL "$repo/gpg" -o /etc/apt/keyrings/docker.asc || return 1
+    chmod a+r /etc/apt/keyrings/docker.asc
+    echo \
+      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] $repo \
+      $VERSION_CODENAME stable" | \
+      tee /etc/apt/sources.list.d/docker.list > /dev/null
+}
+
+if ! setup_docker_repo "$DOCKER_REPO"; then
+    if [ "{VENDOR}" = "alicloud" ]; then
+        echo "download.docker.com unreachable, falling back to Aliyun mirror"
+        DOCKER_REPO="$DOCKER_REPO_ALIYUN"
+        setup_docker_repo "$DOCKER_REPO" || exit 1
+    else
+        exit 1
+    fi
 fi
-curl -fsSL "$DOCKER_REPO/gpg" -o /etc/apt/keyrings/docker.asc
-chmod a+r /etc/apt/keyrings/docker.asc
-echo \
-  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] $DOCKER_REPO \
-  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
-  tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+install_docker_apt() {
+    apt_retry update -y && apt_retry install -y $NVIDIA_PKGS $DOCKER_APT_PKGS
+}
 # nvidia drivers/toolkit when GPU_COUNT != 0
 NVIDIA_PKGS=""
 NVIDIA_DRIVER_PKG=""
@@ -297,8 +315,17 @@ EOF
         fi
     fi
 fi
-apt_retry update -y
-apt_retry install -y $NVIDIA_PKGS docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin openssh-client
+if ! install_docker_apt; then
+    if [ "{VENDOR}" = "alicloud" ] && [ "$DOCKER_REPO" != "$DOCKER_REPO_ALIYUN" ]; then
+        echo "Docker apt install failed on download.docker.com, falling back to Aliyun mirror"
+        DOCKER_REPO="$DOCKER_REPO_ALIYUN"
+        setup_docker_repo "$DOCKER_REPO" || exit 1
+        apt-get clean || true
+        install_docker_apt || exit 1
+    else
+        exit 1
+    fi
+fi
 # install Alibaba GPU driver via acs-plugin-manager when applicable (never fail the script)
 if [ -n "$ALIYUN_DRIVER_PLUGIN" ]; then
     acs-plugin-manager --remove --plugin "$ALIYUN_DRIVER_PLUGIN" >/dev/null 2>&1 || true
