@@ -1208,6 +1208,53 @@ def remove_matches(regexes, input_string):
     return input_string
 
 
+STALE_LOCK_AGE = timedelta(days=1)
+_LOCK_CREATED_RE = re.compile(r" at (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)")
+
+
+class StackLockedError(Exception):
+    """Pulumi stack is locked by another process and cleanup should be retried later."""
+
+
+def lock_created_at(exc: BaseException) -> datetime | None:
+    match = _LOCK_CREATED_RE.search(str(exc))
+    if not match:
+        return None
+    return datetime.fromisoformat(match.group(1).replace("Z", "+00:00"))
+
+
+def retry_locked_cleanup(func: Callable[[], Any], cancel_func: Callable[[], None] | None = None) -> Any:
+    """Retry a Pulumi cleanup operation; cancel and retry when the lock is older than a day."""
+    import pulumi
+
+    stale_cancelled = False
+    for i in range(3):
+        try:
+            return func()
+        except pulumi.automation.errors.ConcurrentUpdateError as exc:
+            created_at = lock_created_at(exc)
+            now = datetime.now(timezone.utc)
+            if (
+                cancel_func
+                and created_at
+                and now - created_at > STALE_LOCK_AGE
+                and not stale_cancelled
+            ):
+                logging.warning(
+                    "Cancelling stale Pulumi lock created at %s (older than %s)",
+                    created_at,
+                    STALE_LOCK_AGE,
+                )
+                cancel_func()
+                stale_cancelled = True
+                continue
+            if i < 2:
+                logging.warning("ConcurrentUpdateError during cleanup, retry #%d", i + 1)
+                time.sleep(random.randint(1, 5))
+                continue
+            raise StackLockedError(str(exc)) from exc
+
+
 def retry_locked(func, *args, instance_timing: InstanceCreationTiming | None = None, **kwargs):
     """Retry a pulumi function with random backoff for locking issues."""
     import pulumi

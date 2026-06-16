@@ -584,11 +584,13 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
             )
 
 
-def cleanup_s3_run(vendor: str, record) -> None:
-    from sc_runner import runner
-    import s3_runs
-    import tempfile
+def stack_key_for_record(record) -> tuple:
+    if record.vendor == "gcp":
+        return (record.vendor, record.zone, record.instance)
+    return (record.vendor, record.region, record.instance)
 
+
+def _resource_opts_for_record(vendor: str, record) -> dict:
     resource_opts = {"instance": record.instance}
     if vendor == "gcp":
         if not record.zone:
@@ -598,40 +600,87 @@ def cleanup_s3_run(vendor: str, record) -> None:
         if not record.region:
             raise RuntimeError(f"missing region for cleanup ({record.key})")
         resource_opts["region"] = record.region
+    return resource_opts
+
+
+def cleanup_s3_stack(vendor: str, records: list) -> None:
+    """Clean up one Pulumi stack; delete S3 markers only after the instance is gone."""
+    from sc_runner import runner
+    import s3_runs
+    import tempfile
+
+    record = records[0]
+    keys = [r.key for r in records]
+    location = record.region or record.zone
+    resource_opts = _resource_opts_for_record(vendor, record)
 
     with tempfile.TemporaryDirectory() as tempdir:
         pulumi_opts = dict(work_dir=tempdir)
+
+        def cancel_lock() -> None:
+            runner.cancel(vendor, pulumi_opts, resource_opts)
+
         try:
-            stack = runner.get_stack(vendor, pulumi_opts, resource_opts)
+            stack = lib.retry_locked_cleanup(
+                lambda: runner.get_stack(vendor, pulumi_opts, resource_opts),
+                cancel_func=cancel_lock,
+            )
+        except lib.StackLockedError:
+            logging.warning(
+                "Stack %s/%s in %s is locked; retaining %d run record(s) until cleanup succeeds",
+                vendor,
+                record.instance,
+                location,
+                len(keys),
+            )
+            return
         except AttributeError:
             raise RuntimeError(f"vendor {vendor} not supported for {record.key}") from None
+
         resources = stack.export_stack().deployment.get("resources", [])
         if len(resources) <= 1:
             logging.info(
-                "Pulumi stack for %s/%s in %s already clean (%d resources); removing run record",
+                "Pulumi stack for %s/%s in %s already clean (%d resources); removing %d run record(s)",
                 vendor,
                 record.instance,
-                record.region or record.zone,
+                location,
                 len(resources),
+                len(keys),
             )
-            s3_runs.delete_run_record(record.key)
+            for key in keys:
+                s3_runs.delete_run_record(key)
             return
+
         logging.info(
-            "Destroying %s/%s in %s from run record %s (success=%s, terminated_at=%s)",
+            "Destroying %s/%s in %s for %d run record(s) (e.g. %s)",
             vendor,
             record.instance,
-            record.region or record.zone,
+            location,
+            len(keys),
             record.key,
-            record.success,
-            record.terminated_at,
         )
-        runner.destroy_stack(
-            vendor,
-            pulumi_opts,
-            resource_opts,
-            stack_opts=dict(on_output=logging.info),
-        )
-    s3_runs.delete_run_record(record.key)
+        try:
+            lib.retry_locked_cleanup(
+                lambda: runner.destroy_stack(
+                    vendor,
+                    pulumi_opts,
+                    resource_opts,
+                    stack_opts=dict(on_output=logging.info),
+                ),
+                cancel_func=cancel_lock,
+            )
+        except lib.StackLockedError:
+            logging.warning(
+                "Destroy for %s/%s in %s is locked; retaining %d run record(s) until cleanup succeeds",
+                vendor,
+                record.instance,
+                location,
+                len(keys),
+            )
+            return
+
+    for key in keys:
+        s3_runs.delete_run_record(key)
 
 
 @cli.command("cleanup-sweep")
@@ -712,6 +761,7 @@ def cleanup_sweep(ctx, threads, force, all_regions, lookback_mins, data_only, ve
 @click.option("--vendor", type=str, default=None, help="Only clean up resources for the specified vendor")
 def cleanup(ctx, threads, vendor):
     """S3 run-record driven cleanup (frequent scheduled job)."""
+    from collections import defaultdict
     from sc_runner.resources import supported_vendors
     import concurrent.futures
     import s3_runs
@@ -725,29 +775,36 @@ def cleanup(ctx, threads, vendor):
     if not records:
         return
 
+    stacks: dict[tuple, list] = defaultdict(list)
+    for record in records:
+        if record.vendor not in supported_vendors:
+            logging.warning("Skipping unsupported vendor %s in %s", record.vendor, record.key)
+            continue
+        stacks[stack_key_for_record(record)].append(record)
+
     futures = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
-        for record in records:
-            if record.vendor not in supported_vendors:
-                logging.warning("Skipping unsupported vendor %s in %s", record.vendor, record.key)
-                continue
-            futures[executor.submit(cleanup_s3_run, record.vendor, record)] = record
+        for group_records in stacks.values():
+            stack_vendor = group_records[0].vendor
+            futures[executor.submit(cleanup_s3_stack, stack_vendor, group_records)] = group_records
 
         failures: list[str] = []
-        for future, record in futures.items():
+        for future, group_records in futures.items():
             try:
                 future.result()
             except Exception:
-                logging.exception("S3-driven cleanup failed for %s", record.key)
-                failures.append(record.key)
+                keys = ", ".join(r.key for r in group_records)
+                logging.exception("S3-driven cleanup failed for stack record(s): %s", keys)
+                failures.extend(r.key for r in group_records)
 
         if failures:
             raise Exception(
                 f"S3 cleanup failed for {len(failures)} run(s): {', '.join(failures)}"
             )
     logging.info(
-        "S3 cleanup finished for %d run record(s)%s",
+        "S3 cleanup finished for %d stack(s) (%d run record(s))%s",
         len(futures),
+        len(records),
         f" ({vendor})" if vendor else "",
     )
 
