@@ -59,9 +59,41 @@ systemctl disable gce-workload-cert-refresh.timer 2>/dev/null || true
 
 export DEBIAN_FRONTEND=noninteractive
 . /etc/os-release
-apt-get update -y
+
+# Retry apt-get update/install on transient mirror errors (hash sum mismatch, etc.)
+# for up to 3 minutes with random backoff between attempts.
+apt_retry() {
+    deadline=$(($(date +%s) + 180))
+    attempt=0
+    while :; do
+        attempt=$((attempt + 1))
+        if apt-get "$@"; then
+            return 0
+        fi
+        rc=$?
+        now=$(date +%s)
+        if [ "$now" -ge "$deadline" ]; then
+            echo "apt_retry: failed after ${attempt} attempt(s), deadline exceeded: apt-get $*"
+            return "$rc"
+        fi
+        remaining=$((deadline - now))
+        jitter=$(awk 'BEGIN{srand(); print int(5 + rand() * 26)}')
+        [ "$jitter" -gt "$remaining" ] && jitter="$remaining"
+        [ "$jitter" -lt 1 ] && jitter=1
+        echo "apt_retry: attempt ${attempt} failed (apt-get $*), sleeping ${jitter}s before retry"
+        sleep "$jitter"
+        case "$1" in
+            install)
+                apt-get clean || true
+                apt-get update -y || true
+                ;;
+        esac
+    done
+}
+
+apt_retry update -y
 # Add the required repositories to Apt sources:
-apt-get install -y ca-certificates curl
+apt_retry install -y ca-certificates curl
 install -m 0755 -d /etc/apt/keyrings
 # docker (download.docker.com is unreachable from Alibaba Cloud China)
 if [ "{VENDOR}" = "alicloud" ]; then
@@ -160,7 +192,7 @@ EOF
                 # Install aws-cli before snap is removed
                 snap install aws-cli --classic
                 # Install build tools required for NVIDIA driver compilation
-                apt-get install -y build-essential
+                apt_retry install -y build-essential
                 # Download and install NVIDIA driver from AWS S3
                 aws s3 cp --recursive s3://ec2-linux-nvidia-drivers/latest/ /tmp/ --no-sign-request
                 chmod +x /tmp/NVIDIA-Linux-x86_64*.run
@@ -177,7 +209,7 @@ EOF
                     *NV*as_v4|*NV*s_v2|*NV*ads_V710_v5|*NV*ads_A10_v5)
                         # Install GRID driver for NV-series fractional GPU instances
                         # Install build essentials and kernel headers
-                        apt-get install -y build-essential linux-azure
+                        apt_retry install -y build-essential linux-azure
                         
                         # Disable nouveau driver (incompatible with NVIDIA)
                         cat > /etc/modprobe.d/nouveau.conf <<EOF
@@ -238,7 +270,7 @@ EOF
         # Only proceed if NVIDIA_PKGS hasn't been set by Alibaba plugin or other means
         if [ -z "$NVIDIA_PKGS" ]; then
             disable_nouveau
-            apt-get install -y jq lshw software-properties-common
+            apt_retry install -y jq lshw software-properties-common
             add-apt-repository ppa:graphics-drivers/ppa -y
             
             # Detect GPU using lshw (more reliable than lspci for product names)
@@ -265,8 +297,8 @@ EOF
         fi
     fi
 fi
-apt-get update -y
-apt-get install -y $NVIDIA_PKGS docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin openssh-client
+apt_retry update -y
+apt_retry install -y $NVIDIA_PKGS docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin openssh-client
 # install Alibaba GPU driver via acs-plugin-manager when applicable (never fail the script)
 if [ -n "$ALIYUN_DRIVER_PLUGIN" ]; then
     acs-plugin-manager --remove --plugin "$ALIYUN_DRIVER_PLUGIN" >/dev/null 2>&1 || true
