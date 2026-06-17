@@ -245,9 +245,25 @@ compression_text = DockerTask(
     command="nice -n -20 python /usr/local/bin/compress.py",
 )
 
-bw_mem = DockerTask(
+membench = DockerTask(
     parallel=False,
     priority=6,
+    timeout=timedelta(minutes=40),
+    image="ghcr.io/sparecores/membench:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("membench"),
+    # run for 30 minutes max
+    command="-Hv -t 1800",
+    start_with_instance=True,
+    version_command="-V",
+    minimum_memory=0.9,
+    servers_exclude={
+        ("ovh", "r3-128"),
+    },
+)
+
+bw_mem = DockerTask(
+    parallel=False,
+    priority=7,
     timeout=timedelta(hours=1),
     image="ghcr.io/sparecores/benchmark:main",
     docker_opts=DOCKER_OPTS | tracker_docker_opts("bw_mem"),
@@ -261,7 +277,7 @@ bw_mem = DockerTask(
 
 static_web = DockerTask(
     parallel=False,
-    priority=7,
+    priority=8,
     image="ghcr.io/sparecores/benchmark-web:main",
     docker_opts=DOCKER_OPTS | tracker_docker_opts("static_web"),
     version_command="bash -c \"(binserve --version; wrk -v) | egrep -o '(binserve|wrk) [0-9.]+'\"",
@@ -271,7 +287,7 @@ static_web = DockerTask(
 
 redis = DockerTask(
     parallel=False,
-    priority=8,
+    priority=9,
     image="ghcr.io/sparecores/benchmark-redis:main",
     docker_opts=DOCKER_OPTS | tracker_docker_opts("redis"),
     version_command="redis-server -v",
@@ -282,7 +298,7 @@ redis = DockerTask(
 
 nvbandwidth = DockerTask(
     parallel=False,
-    priority=9,
+    priority=10,
     image="ghcr.io/sparecores/nvbandwidth:main",
     docker_opts=DOCKER_OPTS | tracker_docker_opts("nvbandwidth"),
     gpu=True,
@@ -298,7 +314,7 @@ passmark = DockerTask(
     parallel=False,
     # might be slow on some machines
     timeout=timedelta(hours=1),
-    priority=10,
+    priority=11,
     image="ghcr.io/sparecores/benchmark-passmark:main",
     docker_opts=DOCKER_OPTS | tracker_docker_opts("passmark"),
     command=None,
@@ -309,7 +325,7 @@ llm = DockerTask(
     # might be slow when testing large models
     timeout=timedelta(hours=1.5),
     minimum_memory=1,
-    priority=11,
+    priority=12,
     image="ghcr.io/sparecores/benchmark-llm:main",
     docker_opts=DOCKER_OPTS | tracker_docker_opts("llm"),
     command=None,
@@ -323,7 +339,7 @@ vllm = VllmDockerTask(
     parallel=False,
     timeout=timedelta(hours=3),
     minimum_memory=4,
-    priority=12,
+    priority=13,
     images=[
         "ghcr.io/sparecores/benchmark-vllm-gpu:main",
         "ghcr.io/sparecores/benchmark-vllm-cpu:main",
@@ -333,20 +349,4 @@ vllm = VllmDockerTask(
     command=None,
     version_command="--version",
     start_with_instance=True,
-)
-
-membench = DockerTask(
-    parallel=False,
-    priority=13,
-    timeout=timedelta(minutes=40),
-    image="ghcr.io/sparecores/membench:main",
-    docker_opts=DOCKER_OPTS | tracker_docker_opts("membench"),
-    # run for 30 minutes max
-    command="-Hv -t 1800",
-    start_with_instance=True,
-    version_command="-V",
-    minimum_memory=0.9,
-    servers_exclude={
-        ("ovh", "r3-128"),
-    },
 )
