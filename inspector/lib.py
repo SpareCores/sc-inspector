@@ -48,6 +48,10 @@ WAIT_SINCE_LAST_START = timedelta(hours=2)
 # fail if a job has already started, but didn't produce output
 FAIL_IF_NO_OUTPUT = timedelta(days=3)
 FAIL_ON_ERROR = timedelta(days=3)
+# stale no-output tasks may trigger a new instance this many times before giving up
+MAX_START_RETRIES = 3
+# task stopped triggering instance starts after MAX_START_RETRIES stale no-output generations
+EXIT_CODE_STALE_RETRIES_EXHAUSTED = -5
 # destroy the instance 15 mins after the last task has timed out
 DESTROY_AFTER = timedelta(minutes=15)
 # extra slack for slow cloud boot / user-data before inspect starts
@@ -100,6 +104,7 @@ class Meta(BaseModel):
     stdout_bytes: int | None = None
     stderr_bytes: int | None = None
     outputs: list[str] = []
+    start_retries: int = 0
 
 
 class Task(BaseModel):
@@ -233,6 +238,86 @@ def _server_in_servers_only(servers_only, vendor, instance, data_dir=None):
     return (vendor, instance) in servers_only
 
 
+def _task_matches_server_for_start(task: Task, srv, data_dir: str | os.PathLike) -> bool:
+    if task.gpu and not srv.gpu_count:
+        return False
+    if srv.memory_amount < task.minimum_memory * 1024:
+        return False
+    if task.servers_only and not _server_in_servers_only(
+        task.servers_only, srv.vendor_id, srv.api_reference, data_dir
+    ):
+        return False
+    if task.servers_exclude and (srv.vendor_id, srv.api_reference) in task.servers_exclude:
+        return False
+    if (crc32(srv.api_reference.encode("utf-8")) / 0xFFFFFFFF) > task.rollout:
+        return False
+    return True
+
+
+def _is_stale_no_output(meta: Meta) -> bool:
+    return bool(
+        meta.start
+        and (datetime.now() - meta.start) >= FAIL_IF_NO_OUTPUT
+        and (meta.end is None or meta.exit_code is None)
+    )
+
+
+def boot_meta_for_task(task: Task, data_dir: str | os.PathLike, **fields) -> Meta:
+    """Boot-time meta for a task, preserving start_retries from any prior meta."""
+    prior = load_task_meta(task, data_dir)
+    data = dict(start=datetime.now(), task_hash=task_hash(task), start_retries=prior.start_retries)
+    data.update(fields)
+    return Meta(**data)
+
+
+def reconcile_stale_start_retries(vendor: str, data_dir: str | os.PathLike, srv) -> bool:
+    """Reset or finalize tasks stuck with no output after FAIL_IF_NO_OUTPUT."""
+    candidates = [
+        task
+        for task in get_tasks(vendor)
+        if _task_matches_server_for_start(task, srv, data_dir)
+        and _is_stale_no_output(load_task_meta(task, data_dir))
+    ]
+    if not candidates:
+        return False
+    repo.pull()
+    changed = False
+    now = datetime.now()
+    for task in candidates:
+        meta = load_task_meta(task, data_dir)
+        if not _is_stale_no_output(meta):
+            continue
+        meta_path = os.path.join(data_dir, task.name, META_NAME)
+        if meta.start_retries >= MAX_START_RETRIES:
+            if meta.exit_code is not None:
+                continue
+            meta.end = now
+            meta.exit_code = EXIT_CODE_STALE_RETRIES_EXHAUSTED
+            meta.error_msg = (
+                f"No output after {FAIL_IF_NO_OUTPUT.days} days; "
+                f"exceeded {MAX_START_RETRIES} stale start retries"
+            )
+            logging.info(
+                f"Task {task.name} exhausted stale start retries ({meta.start_retries}), "
+                "will not trigger instance starts"
+            )
+        else:
+            meta.start_retries += 1
+            meta.start = None
+            meta.end = None
+            meta.exit_code = None
+            meta.error_msg = None
+            logging.info(
+                f"Task {task.name} stale with no output; "
+                f"retry {meta.start_retries}/{MAX_START_RETRIES}"
+            )
+        write_meta(meta, meta_path)
+        changed = True
+    if changed:
+        repo.push_path(data_dir, f"Stale start retry from {repo.gha_url()}")
+    return changed
+
+
 def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
     """Return True if we should start a server for this task."""
     if task.start_with_instance or task.always_run:
@@ -243,32 +328,28 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
         logging.info(f"Skipping task {task.name}, last start: {meta.start}")
         return False
     thash = task_hash(task)
-    if task.gpu and not srv.gpu_count:
-        # skip tasks which require GPUs on a server which doesn't have one
-        logging.info(f"Skipping task {task.name} because it requires GPU, but gpu_count is {srv.gpu_count}")
+    if not _task_matches_server_for_start(task, srv, data_dir):
+        if task.gpu and not srv.gpu_count:
+            logging.info(f"Skipping task {task.name} because it requires GPU, but gpu_count is {srv.gpu_count}")
+        elif srv.memory_amount < task.minimum_memory * 1024:
+            mem_gib = srv.memory_amount / 1024
+            logging.info(
+                f"Skipping task {task.name} because it requires {task.minimum_memory} GiB RAM, "
+                f"but this machine has only {mem_gib:.03}"
+            )
+        elif task.servers_only and not _server_in_servers_only(
+            task.servers_only, srv.vendor_id, srv.api_reference, data_dir
+        ):
+            logging.info(f"Skipping task {task.name} because it is not enabled for {srv.vendor_id}/{srv.api_reference}")
+        elif task.servers_exclude and (srv.vendor_id, srv.api_reference) in task.servers_exclude:
+            logging.info(f"Skipping task {task.name} because it is not enabled for {srv.vendor_id}/{srv.api_reference}")
+        else:
+            logging.info(
+                f"Skipping task {task.name} because not selected for rolling out yet ({task.rollout * 100}%)"
+            )
         return False
-    # srv.memory_amount is MiB, minimum_memory is GiB
-    if srv.memory_amount < task.minimum_memory * 1024:
-        mem_gib = srv.memory_amount / 1024
-        logging.info(f"Skipping task {task.name} because it requires {task.minimum_memory} GiB RAM, but this machine has only {mem_gib:.03}")
-        return False
-    if task.servers_only and not _server_in_servers_only(task.servers_only, srv.vendor_id, srv.api_reference, data_dir):
-        logging.info(f"Skipping task {task.name} because it is not enabled for {srv.vendor_id}/{srv.api_reference}")
-        return False
-    if task.servers_exclude and (srv.vendor_id, srv.api_reference) in task.servers_exclude:
-        logging.info(f"Skipping task {task.name} because it is not enabled for {srv.vendor_id}/{srv.api_reference}")
-        return False
-    # normalize api_reference-based hash to [0-1] and check if it's above the rollout threshold
-    if (crc32(srv.api_reference.encode("utf-8")) / 0xFFFFFFFF) > task.rollout:
-        logging.info(
-            f"Skipping task {task.name} because not selected for rolling out yet ({task.rollout * 100}%)"
-        )
-        return False
-
 
     if meta.start:
-        if (datetime.now() - meta.start) >= FAIL_IF_NO_OUTPUT and (meta.end is None or meta.exit_code is None):
-            raise RuntimeError(f"{task.name} was started at {meta.start}, but didn't produce output!")
         if (datetime.now() - meta.start) >= FAIL_ON_ERROR and meta.exit_code is not None and meta.exit_code > 0:
             raise RuntimeError(f"{task.name} was last started at {meta.start} and failed!")
     if meta.end and task.rerun and (datetime.now() - meta.end) >= task.rerun and meta.exit_code == 0:
@@ -729,6 +810,7 @@ def tasks_to_start(vendor: str, data_dir: str | os.PathLike, srv) -> list[Task]:
     Tasks with start_with_instance or always_run never start an instance on their own, but are
     added here when another task is already starting the machine.
     """
+    reconcile_stale_start_retries(vendor, data_dir, srv)
     tasks = [task for task in get_tasks(vendor) if should_start(task, data_dir, srv)]
     if not tasks:
         return []
@@ -755,7 +837,7 @@ def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> N
             task = q.get()
             if not task:
                 break
-            meta = Meta(start=datetime.now(), task_hash=task_hash(task), kernel_version=platform.release())
+            meta = boot_meta_for_task(task, data_dir, kernel_version=platform.release())
             failed = False
             task_dir = os.path.join(data_dir, task.name)
             os.makedirs(task_dir, exist_ok=True)
@@ -1288,7 +1370,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
     with lock:
         repo.pull()
         for task in tasks:
-            meta = Meta(start=datetime.now(), task_hash=task_hash(task))
+            meta = boot_meta_for_task(task, data_dir)
             write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
             sum_timeout += task.timeout
         repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
