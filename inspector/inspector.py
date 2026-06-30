@@ -723,9 +723,7 @@ def cleanup_sweep(ctx, threads, force, all_regions, lookback_mins, data_only, ve
             if all_regions:
                 regions = get_regions(vendor)
             elif vendor == "vultr":
-                from sc_runner.resources import vultr as vultr_resources
-
-                regions = vultr_resources.cleanup_regions(server, list(regions), disk_size=lib.VOLUME_SIZE)
+                regions = lib.vultr_cleanup_regions(server, list(regions))
             if vendor not in supported_vendors:
                 # sc-runner can't yet handle this vendor
                 continue

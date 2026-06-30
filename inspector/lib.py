@@ -1143,15 +1143,75 @@ def delayed_destroy(vendor, server, resource_opts):
         logging.exception("Failed to destroy")
 
 
-def custom_sort(lst, key):
-    """Shuffles a list, but always returns `key` as the first element."""
-    if key in lst:
-        lst.remove(key)
+def _order_location_candidates(candidates: set[str], *preference_lists: list[str]) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for preference in preference_lists:
+        for location in preference:
+            if location in candidates and location not in seen:
+                ordered.append(location)
+                seen.add(location)
+    for location in sorted(candidates - seen):
+        ordered.append(location)
+    return ordered
 
-    random.shuffle(lst)
-    lst.insert(0, key)
 
-    return lst
+def vultr_deployable_regions(server: str) -> list[str]:
+    """ACTIVE ONDEMAND regions for the deployable Vultr plan and its catalog instance."""
+    from sc_runner import data as sc_data
+    from sc_runner.resources import vultr as vultr_resources
+
+    plan = server if vultr_resources._is_bare_metal(server) else vultr_resources.resolve_plan(server, VOLUME_SIZE)
+    regions = sc_data.plan_regions("vultr", plan)
+    if plan != server:
+        regions = list(dict.fromkeys([*regions, *sc_data.plan_regions("vultr", server)]))
+    return regions
+
+
+def vultr_cleanup_regions(server: str, regions: list[str]) -> list[str]:
+    """Regions to scan when destroying Vultr stacks."""
+    return list(dict.fromkeys([*regions, *vultr_deployable_regions(server)]))
+
+
+def candidate_regions(vendor: str, server: str, regions: list[str]) -> list[str]:
+    """Return deployable regions for an instance, cheapest sc-data price first."""
+    from sc_runner import data as sc_data
+
+    candidates = list(regions)
+    if vendor == "vultr":
+        available = set(vultr_deployable_regions(server))
+        if available:
+            candidates = _order_location_candidates(available, candidates, list(available))
+    prices = sc_data.server_region_prices(vendor, server)
+    ordered = sc_data.sort_by_price(candidates, prices)
+    logging.info(f"Region order for {vendor}/{server}: {ordered}")
+    return ordered
+
+
+def candidate_zones(
+    vendor: str,
+    server: str,
+    zones: list[str],
+    zone_to_region: dict[str, str] | None = None,
+) -> list[str]:
+    """Return deployable zones for an instance, cheapest sc-data price first."""
+    from sc_runner import data as sc_data
+
+    prices = sc_data.server_zone_prices(vendor, server)
+    if vendor == "alicloud":
+        # Keep cn- zones as a last resort because of slow network connectivity.
+        ordered = sorted(
+            zones,
+            key=lambda zone: (
+                (zone_to_region or {}).get(zone, "").startswith("cn-"),
+                prices.get(zone, float("inf")),
+                zone,
+            ),
+        )
+    else:
+        ordered = sc_data.sort_by_price(zones, prices)
+    logging.info(f"Zone order for {vendor}/{server}: {ordered}")
+    return ordered
 
 
 # Pulumi engine logs instance creation as e.g. "aws:ec2:Instance m9g.large created (15s)".
@@ -1386,7 +1446,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
     if vendor in ("aws", "gcp", "hcloud", "upcloud", "ovh", "alicloud", "vultr"):
         # get the copy (so we don't modify the original) of the default instance opts for the vendor and add ours
         instance_opts = copy.deepcopy(default(getattr(sc_runner.resources, vendor).DEFAULTS, "instance_opts"))
-    if vendor in ["hcloud", "upcloud", "ovh", "vultr"]:
+    if vendor in ["hcloud", "upcloud", "ovh"]:
         resource_opts = dict(instance=server)
         if vendor == "hcloud":
             # allows only one key with the same fingerprint, so we need to use the already existing one
@@ -1394,18 +1454,11 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         if vendor == "ovh":
             # also reuse already existing SSH key
             instance_opts |= dict(ssh_key={"name": "spare-cores"})
-        if vendor in ("upcloud", "vultr"):
+        if vendor == "upcloud":
             # explicitly set SSH key from envvar
             resource_opts |= dict(public_key=os.environ.get("SSH_PUBLIC_KEY"))
-        if vendor == "upcloud":
             resource_opts |= dict(disk_size=VOLUME_SIZE)
-        if vendor == "vultr":
-            from sc_runner.resources import vultr as vultr_resources
-
-            resource_opts |= dict(disk_size=VOLUME_SIZE)
-            regions = vultr_resources.filter_regions(server, list(regions), disk_size=VOLUME_SIZE)
-        pulumi_output = []
-        for region in regions:
+        for region in candidate_regions(vendor, server, regions):
             logging.info(f"Trying {region}")
             resource_opts["region"] = region
             user_data, b64_user_data = build_inspector_user_data(
@@ -1414,6 +1467,38 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
             runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
+            pulumi_output = []
+            stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger, instance_timing, server)
+            try:
+                retry_locked(runner.create, vendor, {},
+                             resource_opts | dict(instance_opts=instance_opts, user_data=user_data),
+                             stack_opts=stack_opts, instance_timing=instance_timing)
+                # empty it if create succeeded, just in case
+                error_msgs = []
+                instance_started = True
+                break
+            except Exception as e:
+                # on failure, try the next one
+                logging.exception("Couldn't start instance")
+                if not error_msgs:
+                    error_msgs.append(str(e))
+
+    if vendor == "vultr":
+        resource_opts = dict(
+            public_key=os.environ.get("SSH_PUBLIC_KEY"),
+            instance=server,
+            disk_size=VOLUME_SIZE,
+        )
+        for region in candidate_regions(vendor, server, regions):
+            logging.info(f"Trying {region}")
+            resource_opts["region"] = region
+            user_data, b64_user_data = build_inspector_user_data(
+                vendor, server, srv_data, region, None, timeout_mins, ssh_deploy_key_b64, repo_url_ssh
+            )
+
+            # before starting, destroy everything to make sure the user-data will run (this is the first boot)
+            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
+            pulumi_output = []
             stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger, instance_timing, server)
             try:
                 retry_locked(runner.create, vendor, {},
@@ -1436,7 +1521,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             key_name="spare-cores",
             instance_initiated_shutdown_behavior="terminate",
         )
-        for region in custom_sort(regions, "us-west-2"):
+        for region in candidate_regions(vendor, server, regions):
             logging.info(f"Trying {region}")
             resource_opts["region"] = region
             user_data, b64_user_data = build_inspector_user_data(
@@ -1468,20 +1553,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             key_name="spare-cores",
         )
         done = False
-        # Alicloud instance availability differs by zone, not just region
-        # Sort zones: prefer eu, then us, then others, cn- zones as last resort
-        def zone_priority(z):
-            region = zone_to_region.get(z, "")
-            if region.startswith("eu-"):
-                return (0, z)  # eu zones first
-            elif region.startswith("us-"):
-                return (1, z)  # us zones second
-            elif not region.startswith("cn-"):
-                return (2, z)  # other non-cn zones third
-            else:
-                return (3, z)  # cn- zones last (fallback)
-        sorted_zones = sorted(zones, key=zone_priority)
-        for zone in sorted_zones:
+        for zone in candidate_zones(vendor, server, zones, zone_to_region):
             # Get region from the zone_to_region mapping (from database)
             region = zone_to_region.get(zone)
             if not region:
@@ -1544,8 +1616,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         if "arm" in srv_data.cpu_architecture:
             image_sku = "server-arm64"
         done = False
-        # we have larger quota in centralus, so prefer that
-        for region in custom_sort(regions, "centralus"):
+        for region in candidate_regions(vendor, server, regions):
             logging.info(f"Trying {region}")
             resource_opts["region"] = region
             user_data, b64_user_data = build_inspector_user_data(
@@ -1618,7 +1689,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                                   on_host_maintenance="TERMINATE" if is_preemptible else "MIGRATE"),
                               )
         # enable nested virtualization
-        for zone in zones:
+        for zone in candidate_zones(vendor, server, zones):
             logging.info(f"Trying {zone}")
             resource_opts["zone"] = zone
             user_data, b64_user_data = build_inspector_user_data(

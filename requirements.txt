@@ -10,6 +10,6 @@ requests
 boto3
 sparecores-crawler>=0.5
 sparecores-data
-sparecores-runner>=0.0.49
+sparecores-runner>=0.0.50
 sqlmodel
 wrapt
