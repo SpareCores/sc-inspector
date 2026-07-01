@@ -82,7 +82,15 @@ PULUMI_ERRORS = {
     re.compile(r"InvalidParameter\.NotMatch"),  # instance/image incompatibility
     re.compile(r"only supports some specific images"),  # same as above, message form
     re.compile(r"InvalidInstanceType\.NotSupportDiskCategory"),  # exact provider code form
+    re.compile(r"error creating server"),  # Vultr provider errors
+    re.compile(r"\* error"),  # Pulumi bullet-list error details
 }
+# Generic Pulumi summary lines that wrap real provider errors.
+PULUMI_ERROR_SUMMARY = re.compile(r"\d+\s+errors?\s+occurred:?\s*$", re.IGNORECASE)
+PULUMI_BORING_ERRORS = {
+    re.compile(r"^\s*error:\s*update failed\s*$", re.IGNORECASE),
+}
+_PROVIDER_JSON_ERROR = re.compile(r'\{"error":"([^"]+)"')
 # provision machines with storage (GiB)
 VOLUME_SIZE = 128
 
@@ -1304,11 +1312,37 @@ def pulumi_stack_opts(
     return dict(on_output=on_output, on_event=on_event)
 
 
+def is_pulumi_error_summary(message: str) -> bool:
+    stripped = message.strip()
+    if PULUMI_ERROR_SUMMARY.search(stripped):
+        return True
+    return any(regex.search(stripped) for regex in PULUMI_BORING_ERRORS)
+
+
+def best_pulumi_error(error_msgs: list[str]) -> str | None:
+    """Pick the most informative Pulumi/provider error from captured output."""
+    if not error_msgs:
+        return None
+    candidates = [msg for msg in error_msgs if not is_pulumi_error_summary(msg)]
+    if not candidates:
+        candidates = error_msgs
+    for msg in reversed(candidates):
+        if match := _PROVIDER_JSON_ERROR.search(msg):
+            return match.group(1)
+    detailed = [
+        msg for msg in candidates
+        if any(token in msg for token in ("sdk-v2/", "error creating", "Unable to create", "InsufficientInstanceCapacity"))
+    ]
+    if detailed:
+        return detailed[-1]
+    return candidates[-1]
+
+
 def record_instance_start_failure(lock, data_dir, tasks, error_msgs, fallback_msg=None):
     """Write exit_code=-1 to task meta when the cloud instance could not be started."""
     now = datetime.now()
     if error_msgs:
-        error_msg = remove_matches(FILTER_ERROR_MSG, error_msgs[-1])
+        error_msg = remove_matches(FILTER_ERROR_MSG, best_pulumi_error(error_msgs))
     elif fallback_msg:
         error_msg = fallback_msg
     else:
