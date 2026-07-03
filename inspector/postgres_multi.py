@@ -158,21 +158,25 @@ def pg_gucs(mem_gib: float, warehouses: int) -> list[str]:
     sb_gb = max(1, min(int(mem_gib * 0.25), int(schema_gib * 1.05) + 1))
     ecs = min(int(mem_gib * 0.75), sb_gb * 4)
     mpw = min(int(os.cpu_count() or 4), 32)
-    return [
-        f"-c shared_buffers={sb_gb}GB",
-        f"-c effective_cache_size={ecs}GB",
-        "-c max_connections=400",
-        f"-c max_parallel_workers={mpw}",
-        f"-c max_worker_processes={mpw}",
-        "-c max_parallel_workers_per_gather=2",
-        "-c wal_buffers=64MB",
-        "-c max_wal_size=8GB",
-        "-c min_wal_size=1GB",
-        "-c checkpoint_completion_target=0.9",
-        "-c random_page_cost=1.1",
-        "-c effective_io_concurrency=128",
-        "-c maintenance_work_mem=1GB",
+    settings = [
+        f"shared_buffers={sb_gb}GB",
+        f"effective_cache_size={ecs}GB",
+        "max_connections=400",
+        f"max_parallel_workers={mpw}",
+        f"max_worker_processes={mpw}",
+        "max_parallel_workers_per_gather=2",
+        "wal_buffers=64MB",
+        "max_wal_size=8GB",
+        "min_wal_size=1GB",
+        "checkpoint_completion_target=0.9",
+        "random_page_cost=1.1",
+        "effective_io_concurrency=128",
+        "maintenance_work_mem=1GB",
     ]
+    args: list[str] = []
+    for setting in settings:
+        args.extend(["-c", setting])
+    return args
 
 
 def _start_postgres(task, mem_gib: float, warehouses: int) -> docker.models.containers.Container:
@@ -208,15 +212,28 @@ def _start_postgres(task, mem_gib: float, warehouses: int) -> docker.models.cont
 
 def _wait_pg_ready(container, timeout: int = 120) -> None:
     deadline = time.monotonic() + timeout
+    last_err = None
     while time.monotonic() < deadline:
-        proc = container.exec_run(
-            ["psql", "-U", PG_USER, "-d", PG_DB, "-tA", "-c", "SELECT 1"],
-            environment={"PGPASSWORD": PG_PASSWORD},
-        )
+        container.reload()
+        if container.status != "running":
+            logs = container.logs(tail=30).decode("utf-8", errors="replace")
+            raise TimeoutError(
+                f"postgres container exited before ready (status={container.status}): {logs[-1500:]}"
+            )
+        try:
+            proc = container.exec_run(
+                ["psql", "-U", PG_USER, "-d", PG_DB, "-tA", "-c", "SELECT 1"],
+                environment={"PGPASSWORD": PG_PASSWORD},
+            )
+        except Exception as exc:
+            last_err = exc
+            time.sleep(2)
+            continue
         if proc.exit_code == 0:
             return
+        last_err = proc.output.decode("utf-8", errors="replace") if proc.output else proc.exit_code
         time.sleep(2)
-    raise TimeoutError("postgres did not become ready")
+    raise TimeoutError(f"postgres did not become ready: {last_err}")
 
 
 def _benchmark_env(task, db_host: str, workload) -> dict[str, str]:
