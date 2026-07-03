@@ -26,6 +26,18 @@ PG_IMAGE = "postgres:18"
 PG_USER = "postgres"
 PG_PASSWORD = "postgres"
 PG_DB = "bench"
+RESOURCE_TRACKER_HOST_BIN = os.environ.get(
+    "HOST_RESOURCE_TRACKER_BIN",
+    "/var/lib/sparecores-inspector/resource-tracker/resource-tracker",
+)
+POSTGRES_ENTRYPOINT = [
+    "nice",
+    "-n",
+    "-20",
+    "/usr/local/bin/resource-tracker",
+    "--",
+    "docker-entrypoint.sh",
+]
 
 
 class CompanionSession:
@@ -179,6 +191,15 @@ def pg_gucs(mem_gib: float, warehouses: int) -> list[str]:
     return args
 
 
+def _postgres_tracker_volumes() -> dict:
+    return {
+        RESOURCE_TRACKER_HOST_BIN: {
+            "bind": "/usr/local/bin/resource-tracker",
+            "mode": "ro",
+        }
+    }
+
+
 def _start_postgres(task, mem_gib: float, warehouses: int) -> docker.models.containers.Container:
     d = docker.from_env(timeout=1800)
     gucs = pg_gucs(mem_gib, warehouses)
@@ -188,16 +209,22 @@ def _start_postgres(task, mem_gib: float, warehouses: int) -> docker.models.cont
         "listen_addresses=*",
         *gucs,
     ]
+    image = d.images.pull(PG_IMAGE)
+    image_ref = next(iter(image.attrs.get("RepoDigests") or []), PG_IMAGE)
     tracker_env = {
         "TRACKER_PROJECT_NAME": "inspector",
         "TRACKER_JOB_NAME": f"{task.name}_postgres_server",
         "TRACKER_EXTERNAL_RUN_ID": os.environ.get("GITHUB_RUN_ID", ""),
+        "TRACKER_CONTAINER_IMAGE": image_ref,
+        "TRACKER_QUIET": "true",
         "SENTINEL_API_TOKEN": os.environ.get("SENTINEL_API_TOKEN", ""),
     }
     container = d.containers.run(
         PG_IMAGE,
         cmd,
         name=f"pg-{task.name}",
+        entrypoint=POSTGRES_ENTRYPOINT,
+        volumes=_postgres_tracker_volumes(),
         environment={
             "POSTGRES_PASSWORD": PG_PASSWORD,
             "POSTGRES_USER": PG_USER,

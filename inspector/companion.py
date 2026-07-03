@@ -15,8 +15,16 @@ from pathlib import Path
 import docker
 
 from companion_protocol import BenchmarkResult, Ping, Pong, RunBenchmark, Shutdown
+from lib import DOCKER_OPTS
 
 CONNECT_ACCEPT_DEADLINE_SEC = int(os.environ.get("MP_ACCEPT_DEADLINE_SEC", "600"))
+NICE_ENTRYPOINT = ["nice", "-n", "-20"]
+DEFAULT_BENCHMARK_COMMAND = [
+    "/usr/local/bin/resource-tracker",
+    "--",
+    "python3",
+    "/benchmark.py",
+]
 
 
 def _authkey() -> bytes:
@@ -45,12 +53,13 @@ def _benchmark_output_dirs() -> tuple[str, Path]:
     return host_dir, mount_dir
 
 
-def _benchmark_command(msg: RunBenchmark) -> str | list | None:
+def _benchmark_command(msg: RunBenchmark) -> tuple[list[str], list[str]]:
+    """Return docker (entrypoint, command) with highest scheduling priority."""
     if isinstance(msg.command, list):
-        return msg.command
+        return NICE_ENTRYPOINT, msg.command
     if msg.command:
-        return ["bash", "-lc", msg.command]
-    return None
+        return NICE_ENTRYPOINT, ["bash", "-lc", msg.command]
+    return NICE_ENTRYPOINT, DEFAULT_BENCHMARK_COMMAND
 
 
 def _docker_run(msg: RunBenchmark) -> BenchmarkResult:
@@ -61,7 +70,7 @@ def _docker_run(msg: RunBenchmark) -> BenchmarkResult:
     env.setdefault("TRACKER_EXTERNAL_RUN_ID", os.environ.get("GITHUB_RUN_ID", ""))
 
     host_out, metrics_dir = _benchmark_output_dirs()
-    command = _benchmark_command(msg)
+    entrypoint, command = _benchmark_command(msg)
     container = None
     try:
         d = docker.from_env(timeout=msg.timeout_sec + 120)
@@ -76,17 +85,12 @@ def _docker_run(msg: RunBenchmark) -> BenchmarkResult:
             env["TRACKER_CONTAINER_IMAGE"] = msg.image
 
         run_kwargs = {
-            "detach": True,
-            "privileged": True,
-            "network_mode": "host",
+            **DOCKER_OPTS,
             "environment": env,
             "volumes": {host_out: {"bind": "/output", "mode": "rw"}},
+            "entrypoint": entrypoint,
         }
-        container = (
-            d.containers.run(msg.image, command, **run_kwargs)
-            if command is not None
-            else d.containers.run(msg.image, **run_kwargs)
-        )
+        container = d.containers.run(msg.image, command, **run_kwargs)
 
         deadline = time.monotonic() + msg.timeout_sec
         while time.monotonic() < deadline:

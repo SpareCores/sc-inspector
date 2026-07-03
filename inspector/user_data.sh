@@ -404,6 +404,14 @@ apt-get autoremove -y $(dpkg-query -W -f='${Package}\n' \
 # on some machines docker initialization times out with a lot of GPUs. Enable persistence mode to overcome that.
 nvidia-smi -pm 1
 date -u +%Y-%m-%dT%H:%M:%SZ > "$TIMING_HOST_DIR/user_data_end"
+TRACKER_DIR=/var/lib/sparecores-inspector/resource-tracker
+mkdir -p "$TRACKER_DIR"
+if [ ! -x "$TRACKER_DIR/resource-tracker" ]; then
+    cid=$(docker create ghcr.io/sparecores/resource-tracker:main)
+    docker cp "$cid:/usr/local/bin/resource-tracker" "$TRACKER_DIR/resource-tracker"
+    docker rm "$cid"
+    chmod +x "$TRACKER_DIR/resource-tracker"
+fi
 set +e
 if [ "{INSPECTOR_ROLE}" = "client" ]; then
     BENCHMARK_OUTPUT_DIR=/var/lib/sparecores-inspector/benchmark-output
@@ -436,6 +444,7 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e MULTI_VM_CLIENT_CPU_ARCH={MULTI_VM_CLIENT_CPU_ARCH} \
     -e PROVISIONED_DISK_GIB={PROVISIONED_DISK_GIB} \
     -e CLIENT_DISK_GIB={CLIENT_DISK_GIB} \
+    -e HOST_RESOURCE_TRACKER_BIN="$TRACKER_DIR/resource-tracker" \
     ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT}
 inspect_exit=$?
 fi
