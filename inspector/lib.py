@@ -1191,7 +1191,7 @@ def sort_available_servers(available_servers: dict, data_dir, reverse=True, max_
     )
 
 
-def build_inspector_user_data(
+def inspector_user_data_replacements(
     vendor: str,
     server: str,
     srv_data,
@@ -1210,7 +1210,7 @@ def build_inspector_user_data(
     provisioned_disk_gib: int | None = None,
     client_disk_gib: int = 30,
     include_run_upload: bool | None = None,
-) -> tuple[str, str]:
+) -> dict[str, str]:
     import s3_runs
 
     if include_run_upload is None:
@@ -1219,7 +1219,7 @@ def build_inspector_user_data(
     if not include_run_upload:
         run_url = ""
     task_logs_post_b64 = s3_runs.presigned_task_logs_post_b64(vendor, server)
-    replacements = {
+    return {
         "SSH_DEPLOY_KEY_B64": ssh_deploy_key_b64,
         "REPO_URL": repo_url_ssh,
         "GITHUB_SERVER_URL": os.environ.get("GITHUB_SERVER_URL", ""),
@@ -1248,6 +1248,47 @@ def build_inspector_user_data(
         "PROVISIONED_DISK_GIB": str(provisioned_disk_gib or VOLUME_SIZE),
         "CLIENT_DISK_GIB": str(client_disk_gib),
     }
+
+
+def build_inspector_user_data(
+    vendor: str,
+    server: str,
+    srv_data,
+    region: str,
+    zone: str | None,
+    timeout_mins: int,
+    ssh_deploy_key_b64: str,
+    repo_url_ssh: str,
+    *,
+    role: str = "server",
+    mp_authkey_b64: str = "",
+    mp_port: int = 18765,
+    client_private_ip: str = "",
+    client_instance: str = "",
+    client_cpu_arch: str = "",
+    provisioned_disk_gib: int | None = None,
+    client_disk_gib: int = 30,
+    include_run_upload: bool | None = None,
+) -> tuple[str, str]:
+    replacements = inspector_user_data_replacements(
+        vendor,
+        server,
+        srv_data,
+        region,
+        zone,
+        timeout_mins,
+        ssh_deploy_key_b64,
+        repo_url_ssh,
+        role=role,
+        mp_authkey_b64=mp_authkey_b64,
+        mp_port=mp_port,
+        client_private_ip=client_private_ip,
+        client_instance=client_instance,
+        client_cpu_arch=client_cpu_arch,
+        provisioned_disk_gib=provisioned_disk_gib,
+        client_disk_gib=client_disk_gib,
+        include_run_upload=include_run_upload,
+    )
     user_data = user_data_pack.render_packed_user_data(USER_DATA, replacements, vendor=vendor)
     b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
     return user_data, b64_user_data
@@ -1271,7 +1312,7 @@ def build_server_user_data_replacements(
     client_disk_gib: int,
 ) -> dict:
     """Replacements for server user-data rendered inside Pulumi via Output.apply."""
-    user_data, _ = build_inspector_user_data(
+    replacements = inspector_user_data_replacements(
         vendor,
         server,
         srv_data,
@@ -1289,7 +1330,10 @@ def build_server_user_data_replacements(
         provisioned_disk_gib=provisioned_disk_gib,
         client_disk_gib=client_disk_gib,
     )
-    return {"USER_DATA_TEMPLATE": user_data}
+    # Unpacked template: sc-runner injects CLIENT_PRIVATE_IP after the client NIC exists.
+    return {
+        "USER_DATA_TEMPLATE": user_data_pack.apply_replacements(USER_DATA, replacements),
+    }
 
 
 def delayed_destroy(vendor, server, resource_opts):
