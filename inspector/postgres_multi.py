@@ -27,24 +27,10 @@ from lib import DOCKER_OPTS, Meta, container_remove
 
 CONNECT_DEADLINE_SEC = int(os.environ.get("MP_CONNECT_DEADLINE_SEC", "600"))
 CONNECT_RETRY_SEC = 5
-PG_IMAGE = "postgres:18"
+PG_IMAGE = "ghcr.io/sparecores/benchmark-postgres-server:main"
 PG_USER = "postgres"
 PG_PASSWORD = "postgres"
 PG_DB = "bench"
-RESOURCE_TRACKER_HOST_DIR = os.environ.get(
-    "HOST_RESOURCE_TRACKER_DIR",
-    "/opt/sparecores-inspector/resource-tracker",
-)
-RESOURCE_TRACKER_CONTAINER_DIR = "/opt/sparecores-tracker"
-RESOURCE_TRACKER_CONTAINER_BIN = f"{RESOURCE_TRACKER_CONTAINER_DIR}/resource-tracker"
-POSTGRES_ENTRYPOINT = [
-    "nice",
-    "-n",
-    "-20",
-    RESOURCE_TRACKER_CONTAINER_BIN,
-    "--",
-    "docker-entrypoint.sh",
-]
 
 
 class CompanionSession:
@@ -199,25 +185,7 @@ def pg_gucs(mem_gib: float, warehouses: int) -> list[str]:
     return args
 
 
-def _postgres_tracker_volumes() -> dict:
-    return {
-        RESOURCE_TRACKER_HOST_DIR: {
-            "bind": RESOURCE_TRACKER_CONTAINER_DIR,
-            "mode": "ro",
-        }
-    }
-
-
-def _require_resource_tracker() -> None:
-    host_bin = Path(RESOURCE_TRACKER_HOST_DIR) / "resource-tracker"
-    if not host_bin.is_file():
-        raise RuntimeError(f"resource-tracker missing at {host_bin}")
-    if not os.access(host_bin, os.X_OK):
-        raise RuntimeError(f"resource-tracker not executable at {host_bin}")
-
-
 def _start_postgres(task, mem_gib: float, warehouses: int) -> docker.models.containers.Container:
-    _require_resource_tracker()
     d = docker.from_env(timeout=1800)
     gucs = pg_gucs(mem_gib, warehouses)
     cmd = [
@@ -240,8 +208,6 @@ def _start_postgres(task, mem_gib: float, warehouses: int) -> docker.models.cont
         PG_IMAGE,
         cmd,
         name=f"pg-{task.name}",
-        entrypoint=POSTGRES_ENTRYPOINT,
-        volumes=_postgres_tracker_volumes(),
         environment={
             "POSTGRES_PASSWORD": PG_PASSWORD,
             "POSTGRES_USER": PG_USER,

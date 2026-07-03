@@ -404,18 +404,6 @@ apt-get autoremove -y $(dpkg-query -W -f='${Package}\n' \
 # on some machines docker initialization times out with a lot of GPUs. Enable persistence mode to overcome that.
 nvidia-smi -pm 1
 date -u +%Y-%m-%dT%H:%M:%SZ > "$TIMING_HOST_DIR/user_data_end"
-TRACKER_DIR=/opt/sparecores-inspector/resource-tracker
-mkdir -p "$TRACKER_DIR"
-if [ ! -x "$TRACKER_DIR/resource-tracker" ]; then
-    cid=$(docker create --entrypoint /usr/local/bin/resource-tracker ghcr.io/sparecores/resource-tracker:main /bin/true)
-    docker cp "$cid:/usr/local/bin/resource-tracker" "$TRACKER_DIR/resource-tracker"
-    docker rm "$cid"
-    chmod 755 "$TRACKER_DIR/resource-tracker"
-fi
-if [ ! -x "$TRACKER_DIR/resource-tracker" ]; then
-    echo "resource-tracker staging failed: $TRACKER_DIR/resource-tracker missing" >&2
-    exit 1
-fi
 set +e
 if [ "{INSPECTOR_ROLE}" = "client" ]; then
     BENCHMARK_OUTPUT_DIR=/var/lib/sparecores-inspector/benchmark-output
@@ -449,7 +437,6 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e MULTI_VM_CLIENT_VCPUS={MULTI_VM_CLIENT_VCPUS} \
     -e PROVISIONED_DISK_GIB={PROVISIONED_DISK_GIB} \
     -e CLIENT_DISK_GIB={CLIENT_DISK_GIB} \
-    -e HOST_RESOURCE_TRACKER_DIR="$TRACKER_DIR" \
     ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT}
 inspect_exit=$?
 fi
