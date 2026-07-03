@@ -7,16 +7,16 @@ import json
 import logging
 import os
 import socket
-import subprocess
 import sys
 import time
 from multiprocessing.connection import Listener
 from pathlib import Path
 
+import docker
+
 from companion_protocol import BenchmarkResult, Ping, Pong, RunBenchmark, Shutdown
 
 CONNECT_ACCEPT_DEADLINE_SEC = int(os.environ.get("MP_ACCEPT_DEADLINE_SEC", "600"))
-RUN_WITH_TRACKER = Path("/usr/local/bin/run-with-resource-tracker.sh")
 
 
 def _authkey() -> bytes:
@@ -36,49 +36,92 @@ def _poweroff(reason: str) -> None:
     sys.exit(0)
 
 
+def _benchmark_output_dirs() -> tuple[str, Path]:
+    """Return host bind path for nested containers and in-container metrics path."""
+    host_dir = os.environ.get("HOST_BENCHMARK_OUTPUT_DIR", "/tmp/benchmark-output")
+    mount_dir = Path(os.environ.get("BENCHMARK_OUTPUT_MOUNT", "/benchmark-output"))
+    if not mount_dir.is_dir():
+        mount_dir = Path(host_dir)
+    return host_dir, mount_dir
+
+
+def _benchmark_command(msg: RunBenchmark) -> str | list | None:
+    if isinstance(msg.command, list):
+        return msg.command
+    if msg.command:
+        return ["bash", "-lc", msg.command]
+    return None
+
+
 def _docker_run(msg: RunBenchmark) -> BenchmarkResult:
     env = dict(os.environ)
     env.update(msg.env)
     env.setdefault("TRACKER_PROJECT_NAME", "inspector")
     env.setdefault("TRACKER_JOB_NAME", msg.tracker_job_name)
     env.setdefault("TRACKER_EXTERNAL_RUN_ID", os.environ.get("GITHUB_RUN_ID", ""))
-    cmd = ["docker", "run", "--rm", "--network=host", "--privileged"]
-    for key, value in env.items():
-        if value is not None:
-            cmd.extend(["-e", f"{key}={value}"])
-    out_dir = Path("/tmp/benchmark-output")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    cmd.extend(["-v", f"{out_dir}:/output"])
-    image = msg.image
-    if isinstance(msg.command, list):
-        cmd.append(image)
-        cmd.extend(msg.command)
-    elif msg.command:
-        cmd.extend([image, "bash", "-lc", msg.command])
-    else:
-        cmd.append(image)
 
-    tracker_cmd = cmd
-    if RUN_WITH_TRACKER.is_file():
-        tracker_cmd = [str(RUN_WITH_TRACKER), *cmd]
+    host_out, metrics_dir = _benchmark_output_dirs()
+    command = _benchmark_command(msg)
+    container = None
+    try:
+        d = docker.from_env(timeout=msg.timeout_sec + 120)
+        try:
+            image = d.images.pull(msg.image)
+            env["TRACKER_CONTAINER_IMAGE"] = next(
+                iter(image.attrs.get("RepoDigests") or []),
+                msg.image,
+            )
+        except Exception:
+            logging.exception("Failed to pull %s", msg.image)
+            env["TRACKER_CONTAINER_IMAGE"] = msg.image
 
-    proc = subprocess.run(
-        tracker_cmd,
-        capture_output=True,
-        text=True,
-        timeout=msg.timeout_sec,
-    )
+        run_kwargs = {
+            "detach": True,
+            "privileged": True,
+            "network_mode": "host",
+            "environment": env,
+            "volumes": {host_out: {"bind": "/output", "mode": "rw"}},
+        }
+        container = (
+            d.containers.run(msg.image, command, **run_kwargs)
+            if command is not None
+            else d.containers.run(msg.image, **run_kwargs)
+        )
+
+        deadline = time.monotonic() + msg.timeout_sec
+        while time.monotonic() < deadline:
+            container.reload()
+            if container.status == "exited":
+                break
+            time.sleep(0.5)
+        else:
+            container.stop(timeout=10)
+
+        res = container.wait(timeout=60)
+        exit_code = int(res.get("StatusCode", 1))
+        stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
+        stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
+    except Exception as exc:
+        logging.exception("Benchmark container failed for %s", msg.task_name)
+        return BenchmarkResult(exit_code=1, stdout="", stderr=str(exc))
+    finally:
+        if container is not None:
+            try:
+                container.remove(force=True)
+            except Exception:
+                logging.exception("Failed to remove benchmark container")
+
     metrics: dict = {}
-    metrics_path = out_dir / "metrics.json"
+    metrics_path = metrics_dir / "metrics.json"
     if metrics_path.is_file():
         try:
             metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
         except Exception:
             logging.exception("Failed to parse metrics.json")
     return BenchmarkResult(
-        exit_code=proc.returncode,
-        stdout=proc.stdout,
-        stderr=proc.stderr,
+        exit_code=exit_code,
+        stdout=stdout,
+        stderr=stderr,
         metrics_json=metrics,
     )
 
@@ -93,7 +136,11 @@ def _handle(conn) -> None:
             conn.send(Pong())
         elif isinstance(msg, RunBenchmark):
             logging.info("RunBenchmark %s", msg.task_name)
-            result = _docker_run(msg)
+            try:
+                result = _docker_run(msg)
+            except Exception as exc:
+                logging.exception("RunBenchmark %s failed", msg.task_name)
+                result = BenchmarkResult(exit_code=1, stderr=str(exc))
             conn.send(result)
         elif isinstance(msg, Shutdown):
             logging.info("Shutdown: %s", msg.reason)

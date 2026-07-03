@@ -406,9 +406,14 @@ nvidia-smi -pm 1
 date -u +%Y-%m-%dT%H:%M:%SZ > "$TIMING_HOST_DIR/user_data_end"
 set +e
 if [ "{INSPECTOR_ROLE}" = "client" ]; then
+    BENCHMARK_OUTPUT_DIR=/var/lib/sparecores-inspector/benchmark-output
+    mkdir -p "$BENCHMARK_OUTPUT_DIR"
     docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/docker.sock \
+        -v "$BENCHMARK_OUTPUT_DIR:/benchmark-output" \
         -e VENDOR={VENDOR} -e INSTANCE={INSTANCE} \
         -e MP_AUTHKEY_B64={MP_AUTHKEY_B64} -e MP_PORT={MP_PORT} \
+        -e HOST_BENCHMARK_OUTPUT_DIR="$BENCHMARK_OUTPUT_DIR" \
+        -e BENCHMARK_OUTPUT_MOUNT=/benchmark-output \
         -e GITHUB_RUN_ID={GITHUB_RUN_ID} -e SENTINEL_API_TOKEN={SENTINEL_API_TOKEN} \
         -e HF_TOKEN={HF_TOKEN} \
         ghcr.io/sparecores/sc-inspector:main companion --vendor {VENDOR} --instance {INSTANCE} --listen-port {MP_PORT}
