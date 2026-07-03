@@ -964,11 +964,16 @@ def _finalize_multi_vm_band_if_done(
 ) -> None:
     """Power off the companion client after the last task in the multi-VM priority band."""
     priority = ordered_groups[group_index][0]
-    if math.floor(priority) != MultiVmDbTask.MULTI_VM_PRIORITY_BAND:
+    if not math.isfinite(priority) or math.floor(priority) != MultiVmDbTask.MULTI_VM_PRIORITY_BAND:
         return
-    next_floor = (
-        math.floor(ordered_groups[group_index + 1][0])
+    next_priority = (
+        ordered_groups[group_index + 1][0]
         if group_index + 1 < len(ordered_groups)
+        else None
+    )
+    next_floor = (
+        math.floor(next_priority)
+        if next_priority is not None and math.isfinite(next_priority)
         else None
     )
     if next_floor is not None and next_floor <= MultiVmDbTask.MULTI_VM_PRIORITY_BAND:
