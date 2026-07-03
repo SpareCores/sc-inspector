@@ -16,7 +16,7 @@ from typing import Any
 
 import docker
 
-from benchmark_tiers import WORKLOADS, workload_for_cache_tier
+from benchmark_tiers import WORKLOADS, benchbase_scalefactor, workload_for_cache_tier
 from companion_protocol import BenchmarkResult, Ping, Pong, RunBenchmark, Shutdown
 from lib import DOCKER_OPTS, Meta, container_remove
 
@@ -263,7 +263,7 @@ def _wait_pg_ready(container, timeout: int = 120) -> None:
     raise TimeoutError(f"postgres did not become ready: {last_err}")
 
 
-def _benchmark_env(task, db_host: str, workload) -> dict[str, str]:
+def _benchmark_env(task, db_host: str, workload, mem_gib: float) -> dict[str, str]:
     wl = WORKLOADS.get(task.workload_proxy, {})
     env = {
         "SC_DB_HOST": db_host,
@@ -280,7 +280,9 @@ def _benchmark_env(task, db_host: str, workload) -> dict[str, str]:
     if task.tool == "hammerdb":
         env["SC_WORKLOAD"] = wl.get("hammerdb", "tpcc")
     else:
-        env["SC_WORKLOAD"] = wl.get("benchmark", "wikipedia")
+        bench_name = wl.get("benchmark", "wikipedia")
+        env["SC_WORKLOAD"] = bench_name
+        env["SC_SCALEFACTOR"] = str(benchbase_scalefactor(bench_name, mem_gib))
     return env
 
 
@@ -315,7 +317,7 @@ def run_multi_vm_task(
     msg = RunBenchmark(
         task_name=task.name,
         image=task.image,
-        env=_benchmark_env(task, db_host, workload),
+        env=_benchmark_env(task, db_host, workload, mem_gib),
         command=task.command or "",
         timeout_sec=int(task.timeout.total_seconds()),
         tracker_job_name=f"{task.name}_benchmark_client",

@@ -70,6 +70,9 @@ def _docker_run(msg: RunBenchmark) -> BenchmarkResult:
     env.setdefault("TRACKER_EXTERNAL_RUN_ID", os.environ.get("GITHUB_RUN_ID", ""))
 
     host_out, metrics_dir = _benchmark_output_dirs()
+    metrics_path = metrics_dir / "metrics.json"
+    if metrics_path.is_file():
+        metrics_path.unlink()
     entrypoint, command = _benchmark_command(msg)
     container = None
     try:
@@ -116,12 +119,17 @@ def _docker_run(msg: RunBenchmark) -> BenchmarkResult:
                 logging.exception("Failed to remove benchmark container")
 
     metrics: dict = {}
-    metrics_path = metrics_dir / "metrics.json"
-    if metrics_path.is_file():
-        try:
-            metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-        except Exception:
-            logging.exception("Failed to parse metrics.json")
+    if exit_code == 0:
+        if stdout.strip():
+            try:
+                metrics = json.loads(stdout)
+            except Exception:
+                logging.exception("Failed to parse benchmark stdout JSON")
+        if not metrics and metrics_path.is_file():
+            try:
+                metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+            except Exception:
+                logging.exception("Failed to parse metrics.json")
     return BenchmarkResult(
         exit_code=exit_code,
         stdout=stdout,
