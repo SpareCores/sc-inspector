@@ -107,11 +107,19 @@ def _local_private_ip() -> str:
         return "127.0.0.1"
 
 
+def _ip_placeholder(value: str) -> bool:
+    return not value or "{" in value or "}" in value
+
+
 def load_or_write_infra(data_dir: str | os.PathLike) -> dict[str, Any]:
     path = Path(data_dir) / "infra.json"
+    infra: dict[str, Any] = {}
     if path.is_file():
-        return json.loads(path.read_text(encoding="utf-8"))
-    infra = {
+        infra = json.loads(path.read_text(encoding="utf-8"))
+
+    client_ip = os.environ.get("CLIENT_PRIVATE_IP", "").strip()
+    db_ip = _local_private_ip()
+    runtime = {
         "topology": "multi_vm",
         "vendor": os.environ.get("VENDOR", ""),
         "db_instance": os.environ.get("INSTANCE", ""),
@@ -120,13 +128,20 @@ def load_or_write_infra(data_dir: str | os.PathLike) -> dict[str, Any]:
         "client_cpu_architecture": os.environ.get("MULTI_VM_CLIENT_CPU_ARCH", ""),
         "region": os.environ.get("REGION", ""),
         "zone": os.environ.get("ZONE", ""),
-        "db_private_ip": _local_private_ip(),
-        "client_private_ip": os.environ.get("CLIENT_PRIVATE_IP", ""),
+        "db_private_ip": db_ip,
+        "client_private_ip": client_ip,
         "mp_port": int(os.environ.get("MP_PORT", "18765")),
         "provisioned_disk_gib": int(os.environ.get("PROVISIONED_DISK_GIB", "128")),
         "client_disk_gib": int(os.environ.get("CLIENT_DISK_GIB", "30")),
         "network_mode": "private_vpc",
     }
+    # Per-deployment private IPs can change between runs; always refresh from live host/env.
+    infra.update(runtime)
+    if _ip_placeholder(infra.get("client_private_ip", "")):
+        raise RuntimeError(
+            f"client_private_ip not configured (got {infra.get('client_private_ip')!r})"
+        )
+
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(infra, indent=2) + "\n", encoding="utf-8")
     return infra
@@ -302,5 +317,23 @@ def _mem_gib() -> float:
     return 16.0
 
 
+def shutdown_companion(data_dir: str | os.PathLike, reason: str) -> None:
+    session = get_session()
+    if session.connected:
+        session.shutdown(reason=reason)
+        return
+    infra = load_or_write_infra(data_dir)
+    host = infra["client_private_ip"]
+    port = int(infra.get("mp_port", 18765))
+    authkey = base64.b64decode(os.environ["MP_AUTHKEY_B64"])
+    try:
+        conn = Client((host, port), authkey=authkey)
+        conn.send(Shutdown(reason=reason))
+        conn.close()
+        logging.info("Companion shutdown sent to %s:%s", host, port)
+    except Exception:
+        logging.exception("Companion shutdown failed for %s:%s", host, port)
+
+
 def finalize_multi_vm(data_dir: str | os.PathLike) -> None:
-    get_session().shutdown(reason="inspect complete")
+    shutdown_companion(data_dir, reason="inspect complete")

@@ -6,6 +6,7 @@ import base64
 import json
 import logging
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -108,9 +109,12 @@ def run_companion(vendor: str, instance: str, listen_port: int | None = None) ->
     deadline = time.monotonic() + CONNECT_ACCEPT_DEADLINE_SEC
     logging.info("Companion listening on 0.0.0.0:%s for %s/%s", port, vendor, instance)
     with Listener(("0.0.0.0", port), authkey=authkey) as listener:
+        listener._listener._socket.settimeout(1.0)
         while time.monotonic() < deadline:
             try:
                 conn = listener.accept()
+            except socket.timeout:
+                continue
             except Exception:
                 time.sleep(1)
                 continue
