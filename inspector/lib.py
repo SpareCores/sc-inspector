@@ -168,6 +168,7 @@ class MultiVmDbTask(DockerTask):
     """Postgres benchmarks that use a companion client VM (priority band 1.x)."""
 
     MULTI_VM_PRIORITY_BAND: ClassVar[int] = 1
+    command: str | list | None = None
     needs_companion: bool = True
     topology: Literal["multi_vm"] = "multi_vm"
     benchmark_family: str = ""
