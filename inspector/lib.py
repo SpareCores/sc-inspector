@@ -1684,8 +1684,17 @@ def _try_start_multi_vm_inspect(
     if not multi_tasks:
         return False
 
-    client_req = merge_client_requirements([t.client_requirements(srv_data) for t in multi_tasks])
-    disk_need = max(t.disk_gib_required(srv_data) for t in multi_tasks)
+    # Size disk for every multi-VM task on this instance, not only those triggering this start.
+    planned_multi = [
+        t
+        for t in get_tasks(vendor)
+        if isinstance(t, MultiVmDbTask)
+        and (not t.servers_only or (vendor, server) in t.servers_only)
+        and (not t.servers_exclude or (vendor, server) not in t.servers_exclude)
+    ]
+    disk_sources = planned_multi or multi_tasks
+    client_req = merge_client_requirements([t.client_requirements(srv_data) for t in disk_sources])
+    disk_need = max(t.disk_gib_required(srv_data) for t in disk_sources)
     db_disk = int(effective_disk_gib(vendor, srv_data, disk_need))
     authkey = secrets.token_bytes(32)
     authkey_b64 = base64.b64encode(authkey).decode("ascii")

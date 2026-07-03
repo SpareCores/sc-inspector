@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from disk import DISK_USABLE_FRAC
+
 CACHE_TIERS = [1.0, 0.3]  # C100, C30
 BUFFER_FRAC = 0.25
 WH_SIZE_GIB = 0.095
@@ -122,7 +124,7 @@ def cache_tier_feasible(
         return False
     if BUFFER_FRAC * host_mem_gib + w.run_vus * 0.05 + OS_HEADROOM_GIB > host_mem_gib * 0.92:
         return False
-    if w.disk_gib > host_disk_gib * 0.85:
+    if w.disk_gib > host_disk_gib * DISK_USABLE_FRAC:
         return False
     return w.warehouses >= wh_per_vu_min(int(host_vcpus)) * w.run_vus
 
