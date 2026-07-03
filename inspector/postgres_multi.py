@@ -16,7 +16,12 @@ from typing import Any
 
 import docker
 
-from benchmark_tiers import WORKLOADS, benchbase_scalefactor, workload_for_cache_tier
+from benchmark_tiers import (
+    WH_SIZE_GIB,
+    WORKLOADS,
+    benchbase_scalefactor,
+    multi_vm_workload_params,
+)
 from companion_protocol import BenchmarkResult, Ping, Pong, RunBenchmark, Shutdown
 from lib import DOCKER_OPTS, Meta, container_remove
 
@@ -263,7 +268,7 @@ def _wait_pg_ready(container, timeout: int = 120) -> None:
     raise TimeoutError(f"postgres did not become ready: {last_err}")
 
 
-def _benchmark_env(task, db_host: str, workload, mem_gib: float) -> dict[str, str]:
+def _benchmark_env(task, db_host: str, params, mem_gib: float) -> dict[str, str]:
     wl = WORKLOADS.get(task.workload_proxy, {})
     env = {
         "SC_DB_HOST": db_host,
@@ -273,16 +278,16 @@ def _benchmark_env(task, db_host: str, workload, mem_gib: float) -> dict[str, st
         "SC_DB_NAME": PG_DB,
         "SC_CACHE_RATIO": str(task.cache_ratio),
         "SC_PROFILE": "1",
-        "SC_BUILD_VUS": str(workload.build_vus),
-        "SC_RUN_VUS": str(workload.run_vus),
-        "SC_WAREHOUSES": str(workload.warehouses),
+        "SC_BUILD_VUS": str(params.build_vus),
+        "SC_RUN_VUS": str(params.run_vus),
+        "SC_WAREHOUSES": str(params.scale_units),
     }
     if task.tool == "hammerdb":
         env["SC_WORKLOAD"] = wl.get("hammerdb", "tpcc")
     else:
         bench_name = wl.get("benchmark", "wikipedia")
         env["SC_WORKLOAD"] = bench_name
-        env["SC_SCALEFACTOR"] = str(benchbase_scalefactor(bench_name, mem_gib))
+        env["SC_SCALEFACTOR"] = str(benchbase_scalefactor(bench_name, mem_gib, task.cache_ratio))
     return env
 
 
@@ -303,11 +308,19 @@ def run_multi_vm_task(
         return None, b"", str(exc).encode()
 
     mem_gib = float(os.environ.get("MEM_GIB") or 0) or _mem_gib()
-    workload = workload_for_cache_tier(task.cache_ratio, int(os.cpu_count() or 4), mem_gib)
+    vcpus = int(os.cpu_count() or 4)
+    params = multi_vm_workload_params(
+        task.workload_proxy,
+        task.tool,
+        task.cache_ratio,
+        vcpus,
+        mem_gib,
+    )
     db_host = session.infra(data_dir)["db_private_ip"]
+    pg_wh = max(1, int(params.schema_gib / WH_SIZE_GIB))
 
     try:
-        pg_container = _start_postgres(task, mem_gib, workload.warehouses)
+        pg_container = _start_postgres(task, mem_gib, pg_wh)
     except Exception as exc:
         meta.error_msg = f"postgres start failed: {exc}"
         meta.end = datetime.now()
@@ -317,7 +330,7 @@ def run_multi_vm_task(
     msg = RunBenchmark(
         task_name=task.name,
         image=task.image,
-        env=_benchmark_env(task, db_host, workload, mem_gib),
+        env=_benchmark_env(task, db_host, params, mem_gib),
         command=task.command or "",
         timeout_sec=int(task.timeout.total_seconds()),
         tracker_job_name=f"{task.name}_benchmark_client",

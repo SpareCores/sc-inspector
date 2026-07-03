@@ -184,6 +184,32 @@ benchbase_postgres_multi_read_heavy_c100 = MultiVmDbTask(
     timeout=timedelta(minutes=60),
 )
 
+benchbase_postgres_multi_crud_simple_c100 = MultiVmDbTask(
+    parallel=False,
+    priority=1.3,
+    servers_only=POSTGRES_MULTI_ROLLOUT,
+    benchmark_family="benchbase_postgres_multi",
+    tool="benchbase",
+    workload_proxy="crud_simple",
+    cache_tier="c100",
+    cache_ratio=1.0,
+    image="ghcr.io/sparecores/benchmark-benchbase-postgres:main",
+    timeout=timedelta(minutes=60),
+)
+
+hammerdb_postgres_multi_olap_c100 = MultiVmDbTask(
+    parallel=False,
+    priority=1.4,
+    servers_only=POSTGRES_MULTI_ROLLOUT,
+    benchmark_family="hammerdb_postgres_multi",
+    tool="hammerdb",
+    workload_proxy="olap",
+    cache_tier="c100",
+    cache_ratio=1.0,
+    image="ghcr.io/sparecores/benchmark-hammerdb-postgres:main",
+    timeout=timedelta(minutes=90),
+)
+
 # We use this benchmark to determine the "SCore" of a given instance. This should represent the relative
 # performance of it, which can be used to compare the "speed" of measured machines.
 # After running all stress-ng `--cpu-method`s on a few selected instances (x86_64 and ARM, with and without

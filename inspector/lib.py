@@ -185,15 +185,46 @@ class MultiVmDbTask(DockerTask):
         return benchbase_client_req(srv, self.workload_proxy, self.cache_ratio)
 
     def disk_gib_required(self, srv) -> float:
-        from benchmark_tiers import workload_for_cache_tier
+        from benchmark_tiers import (
+            WORKLOADS,
+            benchbase_disk_gib_required,
+            hammerdb_disk_gib_required,
+        )
 
         mem_gib = srv.memory_amount / 1024
-        return workload_for_cache_tier(self.cache_ratio, srv.vcpus, mem_gib).disk_gib
+        wl = WORKLOADS.get(self.workload_proxy, {})
+        if self.tool == "benchbase":
+            return benchbase_disk_gib_required(self.workload_proxy, self.cache_ratio, mem_gib)
+        return hammerdb_disk_gib_required(
+            wl.get("hammerdb", "tpcc"),
+            self.cache_ratio,
+            int(srv.vcpus),
+            mem_gib,
+        )
 
     def feasible_on(self, vcpus: float, mem_gib: float, disk_gib: float | None) -> bool:
-        from benchmark_tiers import cache_tier_feasible
+        from benchmark_tiers import (
+            WORKLOADS,
+            benchbase_cache_tier_feasible,
+            hammerdb_cache_tier_feasible,
+        )
 
-        return cache_tier_feasible(self.cache_ratio, vcpus, mem_gib, disk_gib or 0)
+        wl = WORKLOADS.get(self.workload_proxy, {})
+        if self.tool == "benchbase":
+            return benchbase_cache_tier_feasible(
+                self.workload_proxy,
+                self.cache_ratio,
+                vcpus,
+                mem_gib,
+                disk_gib or 0,
+            )
+        return hammerdb_cache_tier_feasible(
+            wl.get("hammerdb", "tpcc"),
+            self.cache_ratio,
+            vcpus,
+            mem_gib,
+            disk_gib or 0,
+        )
 
 
 def _vllm_image_label(image: str) -> str:

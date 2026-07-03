@@ -27,10 +27,14 @@ BENCHBASE_CLIENT_MAX_VCPUS = 16
 WORKLOADS: dict[str, dict[str, Any]] = {
     "oltp_mixed": {"tool": "hammerdb", "hammerdb": "tpcc", "tiers": [1.0, 0.3]},
     "read_heavy": {"tool": "benchbase", "benchmark": "wikipedia", "tiers": [1.0]},
-    "oltp_financial": {"tool": "benchbase", "benchmark": "smallbank", "tiers": [1.0]},
     "crud_simple": {"tool": "benchbase", "benchmark": "ycsb", "tiers": [1.0]},
     "olap": {"tool": "hammerdb", "hammerdb": "tpch", "tiers": [1.0]},
 }
+
+# BenchBase wikipedia: ~8 GiB at scalefactor 50 (scratch calibration on F16-class hosts).
+WIKIPEDIA_GIB_PER_SF = 8.0 / 50
+# BenchBase ycsb: scalefactor * 1000 rows; default row layout is ~1 KiB.
+YCSB_ROW_KIB = 1.0
 
 
 @dataclass(frozen=True)
@@ -45,6 +49,16 @@ class Workload:
     disk_gib: float
     cpu_bound: bool = False
     ram_bound: bool = False
+
+
+@dataclass(frozen=True)
+class MultiVmWorkloadParams:
+    """Sizing passed to multi-VM postgres + benchmark containers."""
+
+    build_vus: int
+    run_vus: int
+    scale_units: int
+    schema_gib: float
 
 
 @dataclass(frozen=True)
@@ -129,14 +143,105 @@ def cache_tier_feasible(
     return w.warehouses >= wh_per_vu_min(int(host_vcpus)) * w.run_vus
 
 
-def benchbase_scalefactor(workload: str, mem_gib: float) -> int:
+def benchbase_scalefactor(workload: str, mem_gib: float, cache_ratio: float = 1.0) -> int:
+    schema_gib = BUFFER_FRAC * mem_gib / cache_ratio
     if workload == "wikipedia":
         return max(10, min(200, int(mem_gib / 2.5)))
-    if workload == "smallbank":
-        return max(100, min(100_000, int(mem_gib * 40)))
     if workload == "ycsb":
-        return max(100, min(10_000, int(mem_gib * 20)))
+        # BenchBase YCSB: scalefactor * 1000 rows (see sample_ycsb_config.xml).
+        return max(100, min(500_000, int(schema_gib * 1024)))
     raise ValueError(workload)
+
+
+def benchbase_schema_gib(benchmark: str, mem_gib: float, cache_ratio: float) -> float:
+    sf = benchbase_scalefactor(benchmark, mem_gib, cache_ratio)
+    if benchmark == "wikipedia":
+        return sf * WIKIPEDIA_GIB_PER_SF
+    if benchmark == "ycsb":
+        return (sf * 1000) * YCSB_ROW_KIB / (1024 * 1024)
+    raise ValueError(benchmark)
+
+
+def benchbase_disk_gib_required(workload_proxy: str, cache_ratio: float, mem_gib: float) -> float:
+    benchmark = WORKLOADS[workload_proxy]["benchmark"]
+    return benchbase_schema_gib(benchmark, mem_gib, cache_ratio) * DISK_SCHEMA_RATIO
+
+
+def benchbase_cache_tier_feasible(
+    workload_proxy: str,
+    cache_ratio: float,
+    host_vcpus: float,
+    host_mem_gib: float,
+    host_disk_gib: float,
+) -> bool:
+    benchmark = WORKLOADS[workload_proxy]["benchmark"]
+    schema_gib = benchbase_schema_gib(benchmark, host_mem_gib, cache_ratio)
+    disk_gib = schema_gib * DISK_SCHEMA_RATIO
+    peak_vus = profile_vu_upper_bound(int(host_vcpus))
+    if host_vcpus < 1 or host_mem_gib < 3:
+        return False
+    if schema_gib < 0.5:
+        return False
+    if BUFFER_FRAC * host_mem_gib + peak_vus * 0.05 + OS_HEADROOM_GIB > host_mem_gib * 0.92:
+        return False
+    if disk_gib > host_disk_gib * DISK_USABLE_FRAC:
+        return False
+    return True
+
+
+def hammerdb_disk_gib_required(
+    hammerdb_workload: str,
+    cache_ratio: float,
+    host_vcpus: int,
+    host_mem_gib: float,
+) -> float:
+    if hammerdb_workload == "tpch":
+        schema_gib = BUFFER_FRAC * host_mem_gib / cache_ratio
+        return schema_gib * DISK_SCHEMA_RATIO
+    return workload_for_cache_tier(cache_ratio, host_vcpus, host_mem_gib).disk_gib
+
+
+def hammerdb_cache_tier_feasible(
+    hammerdb_workload: str,
+    cache_ratio: float,
+    host_vcpus: float,
+    host_mem_gib: float,
+    host_disk_gib: float,
+) -> bool:
+    if hammerdb_workload == "tpch":
+        schema_gib = BUFFER_FRAC * host_mem_gib / cache_ratio
+        disk_gib = schema_gib * DISK_SCHEMA_RATIO
+        if host_vcpus < 1 or host_mem_gib < 3:
+            return False
+        return disk_gib <= host_disk_gib * DISK_USABLE_FRAC
+    return cache_tier_feasible(cache_ratio, host_vcpus, host_mem_gib, host_disk_gib)
+
+
+def multi_vm_workload_params(
+    workload_proxy: str,
+    tool: str,
+    cache_ratio: float,
+    vcpus: int,
+    mem_gib: float,
+) -> MultiVmWorkloadParams:
+    wl = WORKLOADS[workload_proxy]
+    if tool == "hammerdb":
+        hammer = wl["hammerdb"]
+        if hammer == "tpch":
+            schema_gib = BUFFER_FRAC * mem_gib / cache_ratio
+            scale_units = max(1, min(300, int(schema_gib)))
+            run_vus = min(vcpus, MAX_RUN_VUS)
+            build_vus = min(vcpus, BUILD_VU_CAP, scale_units)
+            return MultiVmWorkloadParams(build_vus, run_vus, scale_units, schema_gib)
+        w = workload_for_cache_tier(cache_ratio, vcpus, mem_gib)
+        return MultiVmWorkloadParams(w.build_vus, w.run_vus, w.warehouses, w.schema_gib)
+    benchmark = wl["benchmark"]
+    schema_gib = benchbase_schema_gib(benchmark, mem_gib, cache_ratio)
+    scale_units = benchbase_scalefactor(benchmark, mem_gib, cache_ratio)
+    peak_vus = profile_vu_upper_bound(vcpus)
+    run_vus = min(peak_vus, MAX_RUN_VUS)
+    build_vus = min(vcpus, BUILD_VU_CAP)
+    return MultiVmWorkloadParams(build_vus, run_vus, scale_units, schema_gib)
 
 
 def hammerdb_client_req(db_srv, cache_ratio: float) -> ClientRequirements:
