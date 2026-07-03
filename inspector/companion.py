@@ -30,12 +30,9 @@ def _mp_port() -> int:
 
 
 def _poweroff(reason: str) -> None:
-    logging.error("Companion shutting down: %s", reason)
-    try:
-        subprocess.run(["poweroff"], check=False)
-    except Exception:
-        logging.exception("poweroff failed")
-    sys.exit(1)
+    logging.info("Companion shutting down: %s", reason)
+    # user_data.sh powers off the host after this container exits.
+    sys.exit(0)
 
 
 def _docker_run(msg: RunBenchmark) -> BenchmarkResult:

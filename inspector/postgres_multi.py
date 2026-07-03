@@ -8,7 +8,6 @@ import logging
 import os
 import platform
 import socket
-import subprocess
 import time
 from datetime import datetime
 from multiprocessing.connection import Client
@@ -180,8 +179,6 @@ def _start_postgres(task, mem_gib: float, warehouses: int) -> docker.models.cont
         PG_IMAGE,
         cmd,
         name=f"pg-{task.name}",
-        detach=True,
-        network_mode="host",
         environment={
             "POSTGRES_PASSWORD": PG_PASSWORD,
             "POSTGRES_USER": PG_USER,
@@ -190,33 +187,18 @@ def _start_postgres(task, mem_gib: float, warehouses: int) -> docker.models.cont
         },
         **DOCKER_OPTS,
     )
-    _wait_pg_ready()
+    _wait_pg_ready(container)
     return container
 
 
-def _wait_pg_ready(timeout: int = 120) -> None:
-    env = os.environ.copy()
-    env["PGPASSWORD"] = PG_PASSWORD
+def _wait_pg_ready(container, timeout: int = 120) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        proc = subprocess.run(
-            [
-                "psql",
-                "-h",
-                "127.0.0.1",
-                "-U",
-                PG_USER,
-                "-d",
-                PG_DB,
-                "-tA",
-                "-c",
-                "SELECT 1",
-            ],
-            env=env,
-            capture_output=True,
-            text=True,
+        proc = container.exec_run(
+            ["psql", "-U", PG_USER, "-d", PG_DB, "-tA", "-c", "SELECT 1"],
+            environment={"PGPASSWORD": PG_PASSWORD},
         )
-        if proc.returncode == 0:
+        if proc.exit_code == 0:
             return
         time.sleep(2)
     raise TimeoutError("postgres did not become ready")
