@@ -331,18 +331,6 @@ def run_multi_vm_task(
         if pg_container is not None:
             container_remove(pg_container)
 
-    task_dir = Path(data_dir) / task.name
-    task_dir.mkdir(parents=True, exist_ok=True)
-    metrics = dict(result.metrics_json)
-    metrics.setdefault("topology", "multi_vm")
-    metrics.setdefault("client_rtt_ms", metrics.get("client_rtt_ms"))
-    metrics.setdefault("peak_concurrency", metrics.get("peak_concurrency"))
-    (task_dir / "metrics.json").write_text(json.dumps(metrics, indent=2) + "\n", encoding="utf-8")
-    if result.stdout:
-        (task_dir / "stdout.txt").write_text(result.stdout, encoding="utf-8")
-    if result.stderr:
-        (task_dir / "stderr.txt").write_text(result.stderr, encoding="utf-8")
-
     meta.end = datetime.now()
     meta.exit_code = result.exit_code
     meta.stdout_bytes = len(result.stdout.encode("utf-8"))
