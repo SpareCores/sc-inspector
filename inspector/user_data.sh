@@ -405,6 +405,15 @@ apt-get autoremove -y $(dpkg-query -W -f='${Package}\n' \
 nvidia-smi -pm 1
 date -u +%Y-%m-%dT%H:%M:%SZ > "$TIMING_HOST_DIR/user_data_end"
 set +e
+if [ "{INSPECTOR_ROLE}" = "client" ]; then
+    docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/docker.sock \
+        -e VENDOR={VENDOR} -e INSTANCE={INSTANCE} \
+        -e MP_AUTHKEY_B64={MP_AUTHKEY_B64} -e MP_PORT={MP_PORT} \
+        -e GITHUB_RUN_ID={GITHUB_RUN_ID} -e SENTINEL_API_TOKEN={SENTINEL_API_TOKEN} \
+        -e HF_TOKEN={HF_TOKEN} \
+        ghcr.io/sparecores/sc-inspector:main companion --vendor {VENDOR} --instance {INSTANCE} --listen-port {MP_PORT}
+    inspect_exit=$?
+else
 docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/docker.sock -v /root/.ssh:/root/.ssh \
     -v "$TIMING_HOST_DIR:/host-timing:ro" \
     -e REPO_URL={REPO_URL} \
@@ -416,8 +425,15 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e SENTINEL_API_TOKEN={SENTINEL_API_TOKEN} \
     -e HF_TOKEN={HF_TOKEN} \
     -e TASK_LOGS_S3_POST_B64={TASK_LOGS_S3_POST_B64} \
+    -e MP_AUTHKEY_B64={MP_AUTHKEY_B64} -e MP_PORT={MP_PORT} \
+    -e CLIENT_PRIVATE_IP={CLIENT_PRIVATE_IP} \
+    -e MULTI_VM_CLIENT_INSTANCE={MULTI_VM_CLIENT_INSTANCE} \
+    -e MULTI_VM_CLIENT_CPU_ARCH={MULTI_VM_CLIENT_CPU_ARCH} \
+    -e PROVISIONED_DISK_GIB={PROVISIONED_DISK_GIB} \
+    -e CLIENT_DISK_GIB={CLIENT_DISK_GIB} \
     ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT}
 inspect_exit=$?
+fi
 set -e
 finish_user_data "$inspect_exit"
 poweroff

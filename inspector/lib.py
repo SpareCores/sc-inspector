@@ -4,7 +4,7 @@ from functools import cache
 from itertools import chain
 from pydantic import BaseModel
 from queue import Queue
-from typing import Any, Callable
+from typing import Any, Callable, ClassVar, Literal
 import base64
 import copy
 import docker
@@ -42,7 +42,7 @@ HOST_TIMING_BASE = "/var/lib/sparecores-inspector/timing"
 HOST_TIMING_MOUNT = "/host-timing"
 # add options to the task hash, whose function is to signal any
 # changes in the tasks' runtime parameters, which might alter the output
-TASK_HASH_KEYS = {"command", "transform_output", "image"}
+TASK_HASH_KEYS = {"command", "transform_output", "image", "cache_ratio", "workload_proxy", "tool"}
 # don't start task if it has already been started less than 2 hours ago
 WAIT_SINCE_LAST_START = timedelta(hours=2)
 # fail if a job has already started, but didn't produce output
@@ -138,6 +138,9 @@ class Task(BaseModel):
     # Always run on inspect when the instance was started for any task; never starts an instance alone.
     always_run: bool = False
 
+    def feasible_on(self, vcpus: float, mem_gib: float, disk_gib: float | None) -> bool:
+        return True
+
 
 class DockerTask(Task):
     image: str
@@ -159,6 +162,37 @@ class VllmDockerTask(DockerTask):
 
     def model_post_init(self, __context: Any) -> None:
         object.__setattr__(self, "image", "|".join(self.images))
+
+
+class MultiVmDbTask(DockerTask):
+    """Postgres benchmarks that use a companion client VM (priority band 1.x)."""
+
+    MULTI_VM_PRIORITY_BAND: ClassVar[int] = 1
+    needs_companion: bool = True
+    topology: Literal["multi_vm"] = "multi_vm"
+    benchmark_family: str = ""
+    workload_proxy: str = ""
+    cache_tier: str = ""
+    cache_ratio: float = 1.0
+    tool: Literal["hammerdb", "benchbase"] = "hammerdb"
+
+    def client_requirements(self, srv):
+        from benchmark_tiers import benchbase_client_req, hammerdb_client_req
+
+        if self.tool == "hammerdb":
+            return hammerdb_client_req(srv, self.cache_ratio)
+        return benchbase_client_req(srv, self.workload_proxy, self.cache_ratio)
+
+    def disk_gib_required(self, srv) -> float:
+        from benchmark_tiers import workload_for_cache_tier
+
+        mem_gib = srv.memory_amount / 1024
+        return workload_for_cache_tier(self.cache_ratio, srv.vcpus, mem_gib).disk_gib
+
+    def feasible_on(self, vcpus: float, mem_gib: float, disk_gib: float | None) -> bool:
+        from benchmark_tiers import cache_tier_feasible
+
+        return cache_tier_feasible(self.cache_ratio, vcpus, mem_gib, disk_gib or 0)
 
 
 def _vllm_image_label(image: str) -> str:
@@ -225,7 +259,7 @@ def get_taskgroups(vendor: str) -> dict[tuple[float, bool], list[Task]]:
     import tasks
     taskgroups = defaultdict(list)
     for name, task in inspect.getmembers(tasks):
-        if isinstance(task, (Task, DockerTask, VllmDockerTask)):
+        if isinstance(task, (Task, DockerTask, VllmDockerTask, MultiVmDbTask)):
             # task name becomes the variable's name
             task.name = name.lower()
             # only add the task if vendor is listed in vendors_only or if it's empty
@@ -259,6 +293,12 @@ def _task_matches_server_for_start(task: Task, srv, data_dir: str | os.PathLike)
         return False
     if (crc32(srv.api_reference.encode("utf-8")) / 0xFFFFFFFF) > task.rollout:
         return False
+    if isinstance(task, MultiVmDbTask):
+        from disk import effective_disk_gib
+
+        disk_gib = effective_disk_gib(srv.vendor_id, srv, task.disk_gib_required(srv))
+        if not task.feasible_on(srv.vcpus, srv.memory_amount / 1024, disk_gib):
+            return False
     return True
 
 
@@ -411,6 +451,29 @@ def _task_resource_checks(
     if task.servers_exclude and (vendor, instance) in task.servers_exclude:
         logging.info(f"Skipping task {task.name} because it is not enabled for {vendor}/{instance}")
         return False
+    if isinstance(task, MultiVmDbTask):
+        from postgres_multi import multi_vm_supported
+
+        if not multi_vm_supported(vendor):
+            logging.info(f"Skipping task {task.name}: multi-VM not supported for {vendor}")
+            return False
+        provisioned = VOLUME_SIZE
+        infra_path = os.path.join(data_dir, "infra.json")
+        if os.path.isfile(infra_path):
+            try:
+                with open(infra_path) as f:
+                    provisioned = float(json.load(f).get("provisioned_disk_gib", provisioned))
+            except Exception:
+                pass
+        elif os.environ.get("PROVISIONED_DISK_GIB"):
+            provisioned = float(os.environ["PROVISIONED_DISK_GIB"])
+        if not task.feasible_on(
+            os.cpu_count() or 1,
+            mem_bytes / 1024**3,
+            provisioned,
+        ):
+            logging.info(f"Skipping task {task.name}: not feasible on live host")
+            return False
     return True
 
 
@@ -866,6 +929,12 @@ def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> N
                     ver, stdout, stderr = run_vllm_docker(
                         meta, task, os.path.join(data_dir, task.name), gpu_count
                     )
+                elif isinstance(task, MultiVmDbTask):
+                    from postgres_multi import run_multi_vm_task
+
+                    ver, stdout, stderr = run_multi_vm_task(
+                        meta, task, data_dir, gpu_count
+                    )
                 elif isinstance(task, DockerTask):
                     ver, stdout, stderr = run_docker(meta, task, os.path.join(data_dir, task.name), gpu_count)
                 else:
@@ -887,6 +956,30 @@ def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> N
             q.task_done()
 
 
+def _finalize_multi_vm_band_if_done(
+    ordered_groups: list[tuple[float, bool]],
+    group_index: int,
+    data_dir: str | os.PathLike,
+) -> None:
+    """Power off the companion client after the last task in the multi-VM priority band."""
+    priority = ordered_groups[group_index][0]
+    if math.floor(priority) != MultiVmDbTask.MULTI_VM_PRIORITY_BAND:
+        return
+    next_floor = (
+        math.floor(ordered_groups[group_index + 1][0])
+        if group_index + 1 < len(ordered_groups)
+        else None
+    )
+    if next_floor is not None and next_floor <= MultiVmDbTask.MULTI_VM_PRIORITY_BAND:
+        return
+    try:
+        from postgres_multi import finalize_multi_vm
+
+        finalize_multi_vm(data_dir)
+    except Exception:
+        logging.exception("multi-VM companion shutdown failed")
+
+
 def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: float = 0.0, nthreads: int = 8):
     taskgroups = get_taskgroups(vendor)
 
@@ -899,7 +992,8 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: flo
 
     # iterate over tasks, sorted by task key (running parallel tasks in a group first, then
     # non-parallel ones)
-    for taskgroup in sorted(taskgroups.keys()):
+    ordered_groups = sorted(taskgroups.keys())
+    for group_index, taskgroup in enumerate(ordered_groups):
         meta_changed = False
         for task in taskgroups[taskgroup]:
             meta = load_task_meta(task, data_dir)
@@ -943,6 +1037,7 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: flo
                     logging.exception("push failed")
                     if i < 2:  # Don't sleep on last attempt
                         time.sleep(random.randint(1, 10))
+        _finalize_multi_vm_band_if_done(ordered_groups, group_index, data_dir)
     q.join()
 
 
@@ -1104,10 +1199,24 @@ def build_inspector_user_data(
     timeout_mins: int,
     ssh_deploy_key_b64: str,
     repo_url_ssh: str,
+    *,
+    role: str = "server",
+    mp_authkey_b64: str = "",
+    mp_port: int = 18765,
+    client_private_ip: str = "",
+    client_instance: str = "",
+    client_cpu_arch: str = "",
+    provisioned_disk_gib: int | None = None,
+    client_disk_gib: int = 30,
+    include_run_upload: bool | None = None,
 ) -> tuple[str, str]:
     import s3_runs
 
+    if include_run_upload is None:
+        include_run_upload = role == "server"
     log_url, run_url = s3_runs.presigned_urls_for_instance(vendor, server)
+    if not include_run_upload:
+        run_url = ""
     task_logs_post_b64 = s3_runs.presigned_task_logs_post_b64(vendor, server)
     replacements = {
         "SSH_DEPLOY_KEY_B64": ssh_deploy_key_b64,
@@ -1129,10 +1238,57 @@ def build_inspector_user_data(
         "LOG_UPLOAD_URL": log_url,
         "RUN_UPLOAD_URL": run_url,
         "TASK_LOGS_S3_POST_B64": task_logs_post_b64,
+        "INSPECTOR_ROLE": role,
+        "MP_AUTHKEY_B64": mp_authkey_b64,
+        "MP_PORT": str(mp_port),
+        "CLIENT_PRIVATE_IP": client_private_ip,
+        "MULTI_VM_CLIENT_INSTANCE": client_instance,
+        "MULTI_VM_CLIENT_CPU_ARCH": client_cpu_arch,
+        "PROVISIONED_DISK_GIB": str(provisioned_disk_gib or VOLUME_SIZE),
+        "CLIENT_DISK_GIB": str(client_disk_gib),
     }
     user_data = user_data_pack.render_packed_user_data(USER_DATA, replacements, vendor=vendor)
     b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
     return user_data, b64_user_data
+
+
+def build_server_user_data_replacements(
+    vendor: str,
+    server: str,
+    srv_data,
+    region: str,
+    zone: str | None,
+    timeout_mins: int,
+    ssh_deploy_key_b64: str,
+    repo_url_ssh: str,
+    *,
+    mp_authkey_b64: str,
+    mp_port: int,
+    client_instance: str,
+    client_cpu_arch: str,
+    provisioned_disk_gib: int,
+    client_disk_gib: int,
+) -> dict:
+    """Replacements for server user-data rendered inside Pulumi via Output.apply."""
+    user_data, _ = build_inspector_user_data(
+        vendor,
+        server,
+        srv_data,
+        region,
+        zone,
+        timeout_mins,
+        ssh_deploy_key_b64,
+        repo_url_ssh,
+        role="server",
+        mp_authkey_b64=mp_authkey_b64,
+        mp_port=mp_port,
+        client_private_ip="{CLIENT_PRIVATE_IP}",
+        client_instance=client_instance,
+        client_cpu_arch=client_cpu_arch,
+        provisioned_disk_gib=provisioned_disk_gib,
+        client_disk_gib=client_disk_gib,
+    )
+    return {"USER_DATA_TEMPLATE": user_data}
 
 
 def delayed_destroy(vendor, server, resource_opts):
@@ -1447,6 +1603,152 @@ def retry_locked(func, *args, instance_timing: InstanceCreationTiming | None = N
             raise
 
 
+def _try_start_multi_vm_inspect(
+    executor,
+    lock,
+    data_dir,
+    vendor,
+    server,
+    tasks,
+    srv_data,
+    regions,
+    zones,
+    zone_to_region,
+    timeout_mins,
+    ssh_deploy_key_b64,
+    repo_url_ssh,
+    instance_logger,
+    instance_timing,
+    error_msgs,
+) -> bool:
+    """Provision a multi-VM stack when tasks need a companion client."""
+    import secrets
+
+    from benchmark_tiers import merge_client_requirements
+    from companion_picker import pick_client_instance
+    from disk import effective_disk_gib
+    from sc_runner import runner
+    from sc_runner.resources.multi_vm import MultiVmStackSpec
+
+    multi_tasks = [t for t in tasks if isinstance(t, MultiVmDbTask)]
+    if not multi_tasks:
+        return False
+
+    client_req = merge_client_requirements([t.client_requirements(srv_data) for t in multi_tasks])
+    disk_need = max(t.disk_gib_required(srv_data) for t in multi_tasks)
+    db_disk = int(effective_disk_gib(vendor, srv_data, disk_need))
+    authkey = secrets.token_bytes(32)
+    authkey_b64 = base64.b64encode(authkey).decode("ascii")
+    mp_port = 18765
+
+    def location_candidates():
+        if vendor == "gcp":
+            return [("zone", z) for z in candidate_zones(vendor, server, zones)]
+        if vendor == "alicloud":
+            return [
+                ("zone", z)
+                for z in candidate_zones(vendor, server, zones, zone_to_region)
+            ]
+        return [("region", r) for r in candidate_regions(vendor, server, regions)]
+
+    for kind, location in location_candidates():
+        if kind == "zone":
+            client = pick_client_instance(vendor, location, client_req)
+            region = (zone_to_region or {}).get(location, "")
+            zone = location
+        else:
+            client = pick_client_instance(vendor, location, client_req)
+            region = location
+            zone = None
+        if client is None:
+            logging.info(f"No companion client for {vendor}/{location}")
+            continue
+
+        logging.info(
+            f"Multi-VM: {vendor}/{server} + client {client.api_reference} in {location}"
+        )
+        _, client_ud_b64 = build_inspector_user_data(
+            vendor,
+            client.api_reference,
+            client,
+            region,
+            zone,
+            timeout_mins,
+            ssh_deploy_key_b64,
+            repo_url_ssh,
+            role="client",
+            mp_authkey_b64=authkey_b64,
+            mp_port=mp_port,
+            include_run_upload=False,
+        )
+        server_replacements = build_server_user_data_replacements(
+            vendor,
+            server,
+            srv_data,
+            region,
+            zone,
+            timeout_mins,
+            ssh_deploy_key_b64,
+            repo_url_ssh,
+            mp_authkey_b64=authkey_b64,
+            mp_port=mp_port,
+            client_instance=client.api_reference,
+            client_cpu_arch=client.cpu_architecture or "",
+            provisioned_disk_gib=db_disk,
+            client_disk_gib=30,
+        )
+        spec = MultiVmStackSpec.two_vm(
+            primary_instance=server,
+            client_instance=client.api_reference,
+            primary_disk_gib=db_disk,
+            client_disk_gib=30,
+            client_user_data_b64=client_ud_b64,
+            primary_user_data_template=server_replacements["USER_DATA_TEMPLATE"],
+            extra_exports={"mp_port": mp_port},
+        )
+        resource_opts = dict(
+            public_key=os.environ.get("SSH_PUBLIC_KEY", ""),
+            instance=server,
+            disk_size=db_disk,
+            multi_vm=spec,
+        )
+        if vendor == "azure":
+            resource_opts["region"] = region
+        elif vendor == "gcp":
+            resource_opts["zone"] = zone
+        elif vendor == "alicloud":
+            resource_opts["region"] = region
+            resource_opts["availability_zone"] = zone
+        else:
+            resource_opts["region"] = region
+
+        runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
+        pulumi_output = []
+        stack_opts = pulumi_stack_opts(
+            error_msgs, pulumi_output, instance_logger, instance_timing, server
+        )
+        extra = {}
+        if vendor == "azure":
+            image_sku = "server-arm64" if "arm" in srv_data.cpu_architecture else "server"
+            extra["image_sku"] = image_sku
+        try:
+            retry_locked(
+                runner.create,
+                vendor,
+                {},
+                resource_opts | extra,
+                stack_opts=stack_opts,
+                instance_timing=instance_timing,
+            )
+            return True
+        except Exception as exc:
+            logging.exception("Multi-VM create failed for %s", location)
+            if not error_msgs:
+                error_msgs.append(str(exc))
+            executor.submit(delayed_destroy, vendor, server, copy.deepcopy(resource_opts))
+    return False
+
+
 def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, regions, zones, zone_to_region=None):
     from sc_runner.resources import default
     from sc_runner import runner
@@ -1476,6 +1778,34 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
     # Base64 encode SSH key to avoid shell interpretation issues
     ssh_deploy_key = os.environ.get("SSH_DEPLOY_KEY", "")
     ssh_deploy_key_b64 = base64.b64encode(ssh_deploy_key.encode("utf-8")).decode("ascii") if ssh_deploy_key else ""
+    multi_tasks = [t for t in tasks if isinstance(t, MultiVmDbTask)]
+    if multi_tasks:
+        instance_started = _try_start_multi_vm_inspect(
+            executor,
+            lock,
+            data_dir,
+            vendor,
+            server,
+            tasks,
+            srv_data,
+            regions,
+            zones,
+            zone_to_region,
+            timeout_mins,
+            ssh_deploy_key_b64,
+            repo_url_ssh,
+            instance_logger,
+            instance_timing,
+            error_msgs,
+        )
+        if instance_started and instance_timing.complete() and any(task.always_run for task in tasks):
+            with lock:
+                repo.pull()
+                record_timing_api(data_dir, instance_timing.start, instance_timing.end)
+                repo.push_path(data_dir, f"Instance creation timing from {repo.gha_url()}")
+        if not instance_started:
+            record_instance_start_failure(lock, data_dir, tasks, error_msgs)
+        return
     # start instance
     if vendor in ("aws", "gcp", "hcloud", "upcloud", "ovh", "alicloud", "vultr"):
         # get the copy (so we don't modify the original) of the default instance opts for the vendor and add ours

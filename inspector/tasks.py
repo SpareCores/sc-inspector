@@ -4,7 +4,7 @@ from datetime import timedelta
 import parse
 import psutil
 import transform
-from lib import DOCKER_OPTS, DockerTask, Task, VllmDockerTask
+from lib import DOCKER_OPTS, DockerTask, MultiVmDbTask, Task, VllmDockerTask
 
 # vLLM CPU uses multiprocessing; default Docker /dev/shm (64 MiB) is too small.
 VLLM_DOCKER_OPTS = DOCKER_OPTS | {
@@ -142,6 +142,51 @@ virtualization = DockerTask(
     timeout=timedelta(minutes=5),
 )
 
+POSTGRES_MULTI_ROLLOUT = {("azure", "Standard_F16ams_v6")}
+
+# Multi-VM Postgres benchmarks: priority band 1 (1.0, 1.1, …). Companion powers off when band 1 ends.
+hammerdb_postgres_multi_oltp_mixed_c100 = MultiVmDbTask(
+    parallel=False,
+    priority=1.0,
+    rollout=0.05,
+    servers_only=POSTGRES_MULTI_ROLLOUT,
+    benchmark_family="hammerdb_postgres_multi",
+    tool="hammerdb",
+    workload_proxy="oltp_mixed",
+    cache_tier="c100",
+    cache_ratio=1.0,
+    image="ghcr.io/sparecores/benchmark-hammerdb-postgres:main",
+    timeout=timedelta(minutes=60),
+)
+
+hammerdb_postgres_multi_oltp_mixed_c30 = MultiVmDbTask(
+    parallel=False,
+    priority=1.1,
+    rollout=0.05,
+    servers_only=POSTGRES_MULTI_ROLLOUT,
+    benchmark_family="hammerdb_postgres_multi",
+    tool="hammerdb",
+    workload_proxy="oltp_mixed",
+    cache_tier="c30",
+    cache_ratio=0.3,
+    image="ghcr.io/sparecores/benchmark-hammerdb-postgres:main",
+    timeout=timedelta(minutes=120),
+)
+
+benchbase_postgres_multi_read_heavy_c100 = MultiVmDbTask(
+    parallel=False,
+    priority=1.2,
+    rollout=0.05,
+    servers_only=POSTGRES_MULTI_ROLLOUT,
+    benchmark_family="benchbase_postgres_multi",
+    tool="benchbase",
+    workload_proxy="read_heavy",
+    cache_tier="c100",
+    cache_ratio=1.0,
+    image="ghcr.io/sparecores/benchmark-benchbase-postgres:main",
+    timeout=timedelta(minutes=60),
+)
+
 # We use this benchmark to determine the "SCore" of a given instance. This should represent the relative
 # performance of it, which can be used to compare the "speed" of measured machines.
 # After running all stress-ng `--cpu-method`s on a few selected instances (x86_64 and ARM, with and without
@@ -152,7 +197,7 @@ virtualization = DockerTask(
 # on a 64 core machine) or very high (like ~130x on a 64/128 core/thread machine) scalability.
 stressngfull = DockerTask(
     parallel=False,
-    priority=1,
+    priority=2,
     image="ghcr.io/sparecores/stress-ng:main",
     docker_opts=DOCKER_OPTS | tracker_docker_opts("stressngfull"),
     version_docker_opts={},
@@ -165,13 +210,162 @@ stressngfull = DockerTask(
 # Runner runs each stressor with --metrics, parses bogo ops/s, emits one JSON; failed stressors → None.
 stressng_benchmarks = DockerTask(
     parallel=False,
-    priority=2,
+    priority=3,
     image="ghcr.io/sparecores/stress-ng:main",
     docker_opts=DOCKER_OPTS | tracker_docker_opts("stressng_benchmarks"),
     version_docker_opts={},
     version_command="-c \"stress-ng --version | awk '{print $3}'\"",
     command="-c 'nice -n -20 python3 /usr/local/bin/run_stressng_benchmarks.py'",
     timeout=timedelta(minutes=20),
+    start_with_instance=True,
+)
+
+openssl = DockerTask(
+    parallel=False,
+    priority=4,
+    image="ghcr.io/sparecores/benchmark:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("openssl"),
+    parse_output=[parse.openssl],
+    version_command="bash -c \"openssl version | awk '{print $2}'\"",
+    command="openssl.sh",
+    timeout=timedelta(hours=1),
+)
+
+geekbench = DockerTask(
+    parallel=False,
+    priority=5,
+    image="ghcr.io/sparecores/benchmark:main",
+    version_command="bash -c \"/usr/local/geekbench-$(uname -m)/geekbench6 --version | awk '{print $2}'\"",
+    docker_opts=DOCKER_OPTS
+    | tracker_docker_opts(
+        "geekbench",
+        BENCHMARK_SECRETS_PASSPHRASE=os.environ.get("BENCHMARK_SECRETS_PASSPHRASE"),
+    )
+    | dict(
+        mem_limit=int(mem_bytes * 0.85),
+        memswap_limit=int(mem_bytes * 0.85),
+        mem_swappiness=0,
+    ),
+    # geekbench struggles and give truncated results with less than 2GB of memory
+    minimum_memory=2.1,
+    transform_output=[transform.raw, transform.fetch_geekbench_results],
+    command="nice -n -20 geekbench.sh",
+    timeout=timedelta(hours=1),
+)
+
+compression_text = DockerTask(
+    parallel=False,
+    priority=6,
+    minimum_memory=1,
+    timeout=timedelta(hours=1),
+    image="ghcr.io/sparecores/benchmark:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("compression_text"),
+    command="nice -n -20 python /usr/local/bin/compress.py",
+)
+
+membench = DockerTask(
+    parallel=False,
+    priority=7,
+    timeout=timedelta(minutes=40),
+    image="ghcr.io/sparecores/membench:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("membench"),
+    # run for 30 minutes max
+    command="-Hv -t 1800",
+    start_with_instance=True,
+    version_command="-V",
+    minimum_memory=0.9,
+    servers_exclude={
+        ("ovh", "r3-128"),
+    },
+)
+
+bw_mem = DockerTask(
+    parallel=False,
+    priority=8,
+    timeout=timedelta(hours=1),
+    image="ghcr.io/sparecores/benchmark:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("bw_mem"),
+    command="bw_mem.sh",
+    # These machines either crash or hang when running this benchmark
+    servers_exclude={
+        ("ovh", "a10-180"),
+        ("ovh", "l4-360"),
+    },
+)
+
+static_web = DockerTask(
+    parallel=False,
+    priority=9,
+    image="ghcr.io/sparecores/benchmark-web:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("static_web"),
+    version_command="bash -c \"(binserve --version; wrk -v) | egrep -o '(binserve|wrk) [0-9.]+'\"",
+    command="nice -n -20 python /usr/local/bin/benchmark.py",
+    timeout=timedelta(minutes=30),
+)
+
+redis = DockerTask(
+    parallel=False,
+    priority=10,
+    image="ghcr.io/sparecores/benchmark-redis:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("redis"),
+    version_command="redis-server -v",
+    version_docker_opts=dict(entrypoint=""),
+    command="nice -n -20 python /usr/local/bin/benchmark.py",
+    timeout=timedelta(minutes=10),
+)
+
+nvbandwidth = DockerTask(
+    parallel=False,
+    priority=11,
+    image="ghcr.io/sparecores/nvbandwidth:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("nvbandwidth"),
+    gpu=True,
+    servers_exclude=GPU_EXCLUDE,
+    version_command="bash -c \"nvbandwidth --help | head -1 | egrep -o 'v[0-9.]+'\"",
+    command="nvbandwidth -j",
+    precheck_command="lshw -C display -json | jq -r '.[].vendor'",
+    precheck_regex="nvidia",
+    timeout=timedelta(minutes=30),
+)
+
+passmark = DockerTask(
+    parallel=False,
+    # might be slow on some machines
+    timeout=timedelta(hours=1),
+    priority=12,
+    image="ghcr.io/sparecores/benchmark-passmark:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("passmark"),
+    command=None,
+)
+
+llm = DockerTask(
+    parallel=False,
+    # might be slow when testing large models
+    timeout=timedelta(hours=1.5),
+    minimum_memory=1,
+    priority=13,
+    image="ghcr.io/sparecores/benchmark-llm:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("llm"),
+    command=None,
+    version_command="--version",
+)
+
+# Unified vLLM: probe GPU → Hub CPU → AVX2 CPU images, then GuideLLM benchmark on first probe success.
+# Output under data/.../vllm/ (no fallback after benchmark starts).
+
+vllm = VllmDockerTask(
+    parallel=False,
+    timeout=timedelta(hours=3),
+    minimum_memory=4,
+    priority=14,
+    images=[
+        "ghcr.io/sparecores/benchmark-vllm-gpu:main",
+        "ghcr.io/sparecores/benchmark-vllm-cpu:main",
+        "ghcr.io/sparecores/benchmark-vllm-cpu-avx2:main",
+    ],
+    docker_opts=VLLM_DOCKER_OPTS | tracker_docker_opts("vllm"),
+    command=None,
+    version_command="--version",
     start_with_instance=True,
 )
 
@@ -200,153 +394,4 @@ stressnglongrun = DockerTask(
     version_command="-c \"stress-ng --version | awk '{print $3}'\"",
     command="-c \"nice -n -20 sh -c 'for i in $(seq 1 1440); do SPM=$(($(($i / 60 + 1)) * 5)); SPM=$(( $SPM > 55 ? 55 : $SPM )); stress-ng --metrics --cpu $(nproc) --cpu-method div16 -t $SPM -Y /dev/stderr; sleep $((60 - $(date +%-S) )); done'\"",
     parse_output=[parse.stressnglongrun],
-)
-
-openssl = DockerTask(
-    parallel=False,
-    priority=3,
-    image="ghcr.io/sparecores/benchmark:main",
-    docker_opts=DOCKER_OPTS | tracker_docker_opts("openssl"),
-    parse_output=[parse.openssl],
-    version_command="bash -c \"openssl version | awk '{print $2}'\"",
-    command="openssl.sh",
-    timeout=timedelta(hours=1),
-)
-
-geekbench = DockerTask(
-    parallel=False,
-    priority=4,
-    image="ghcr.io/sparecores/benchmark:main",
-    version_command="bash -c \"/usr/local/geekbench-$(uname -m)/geekbench6 --version | awk '{print $2}'\"",
-    docker_opts=DOCKER_OPTS
-    | tracker_docker_opts(
-        "geekbench",
-        BENCHMARK_SECRETS_PASSPHRASE=os.environ.get("BENCHMARK_SECRETS_PASSPHRASE"),
-    )
-    | dict(
-        mem_limit=int(mem_bytes * 0.85),
-        memswap_limit=int(mem_bytes * 0.85),
-        mem_swappiness=0,
-    ),
-    # geekbench struggles and give truncated results with less than 2GB of memory
-    minimum_memory=2.1,
-    transform_output=[transform.raw, transform.fetch_geekbench_results],
-    command="nice -n -20 geekbench.sh",
-    timeout=timedelta(hours=1),
-)
-
-compression_text = DockerTask(
-    parallel=False,
-    priority=5,
-    minimum_memory=1,
-    timeout=timedelta(hours=1),
-    image="ghcr.io/sparecores/benchmark:main",
-    docker_opts=DOCKER_OPTS | tracker_docker_opts("compression_text"),
-    command="nice -n -20 python /usr/local/bin/compress.py",
-)
-
-membench = DockerTask(
-    parallel=False,
-    priority=6,
-    timeout=timedelta(minutes=40),
-    image="ghcr.io/sparecores/membench:main",
-    docker_opts=DOCKER_OPTS | tracker_docker_opts("membench"),
-    # run for 30 minutes max
-    command="-Hv -t 1800",
-    start_with_instance=True,
-    version_command="-V",
-    minimum_memory=0.9,
-    servers_exclude={
-        ("ovh", "r3-128"),
-    },
-)
-
-bw_mem = DockerTask(
-    parallel=False,
-    priority=7,
-    timeout=timedelta(hours=1),
-    image="ghcr.io/sparecores/benchmark:main",
-    docker_opts=DOCKER_OPTS | tracker_docker_opts("bw_mem"),
-    command="bw_mem.sh",
-    # These machines either crash or hang when running this benchmark
-    servers_exclude={
-        ("ovh", "a10-180"),
-        ("ovh", "l4-360"),
-    },
-)
-
-static_web = DockerTask(
-    parallel=False,
-    priority=8,
-    image="ghcr.io/sparecores/benchmark-web:main",
-    docker_opts=DOCKER_OPTS | tracker_docker_opts("static_web"),
-    version_command="bash -c \"(binserve --version; wrk -v) | egrep -o '(binserve|wrk) [0-9.]+'\"",
-    command="nice -n -20 python /usr/local/bin/benchmark.py",
-    timeout=timedelta(minutes=30),
-)
-
-redis = DockerTask(
-    parallel=False,
-    priority=9,
-    image="ghcr.io/sparecores/benchmark-redis:main",
-    docker_opts=DOCKER_OPTS | tracker_docker_opts("redis"),
-    version_command="redis-server -v",
-    version_docker_opts=dict(entrypoint=""),
-    command="nice -n -20 python /usr/local/bin/benchmark.py",
-    timeout=timedelta(minutes=10),
-)
-
-nvbandwidth = DockerTask(
-    parallel=False,
-    priority=10,
-    image="ghcr.io/sparecores/nvbandwidth:main",
-    docker_opts=DOCKER_OPTS | tracker_docker_opts("nvbandwidth"),
-    gpu=True,
-    servers_exclude=GPU_EXCLUDE,
-    version_command="bash -c \"nvbandwidth --help | head -1 | egrep -o 'v[0-9.]+'\"",
-    command="nvbandwidth -j",
-    precheck_command="lshw -C display -json | jq -r '.[].vendor'",
-    precheck_regex="nvidia",
-    timeout=timedelta(minutes=30),
-)
-
-passmark = DockerTask(
-    parallel=False,
-    # might be slow on some machines
-    timeout=timedelta(hours=1),
-    priority=11,
-    image="ghcr.io/sparecores/benchmark-passmark:main",
-    docker_opts=DOCKER_OPTS | tracker_docker_opts("passmark"),
-    command=None,
-)
-
-llm = DockerTask(
-    parallel=False,
-    # might be slow when testing large models
-    timeout=timedelta(hours=1.5),
-    minimum_memory=1,
-    priority=12,
-    image="ghcr.io/sparecores/benchmark-llm:main",
-    docker_opts=DOCKER_OPTS | tracker_docker_opts("llm"),
-    command=None,
-    version_command="--version",
-)
-
-# Unified vLLM: probe GPU → Hub CPU → AVX2 CPU images, then GuideLLM benchmark on first probe success.
-# Output under data/.../vllm/ (no fallback after benchmark starts).
-
-vllm = VllmDockerTask(
-    parallel=False,
-    timeout=timedelta(hours=3),
-    minimum_memory=4,
-    priority=13,
-    images=[
-        "ghcr.io/sparecores/benchmark-vllm-gpu:main",
-        "ghcr.io/sparecores/benchmark-vllm-cpu:main",
-        "ghcr.io/sparecores/benchmark-vllm-cpu-avx2:main",
-    ],
-    docker_opts=VLLM_DOCKER_OPTS | tracker_docker_opts("vllm"),
-    command=None,
-    version_command="--version",
-    start_with_instance=True,
 )

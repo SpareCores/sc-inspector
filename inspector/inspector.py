@@ -882,5 +882,16 @@ def inspect(ctx, vendor, instance, gpu_count, threads):
             logging.exception("Failed to push inspector timing")
 
 
+@cli.command()
+@click.option("--vendor", required=True, help="Vendor ID for this machine")
+@click.option("--instance", required=True, help="Instance ID for this machine")
+@click.option("--listen-port", default=18765, show_default=True, type=int, help="MP listen port")
+def companion(vendor, instance, listen_port):
+    """Run benchmark client daemon for multi-VM Postgres benchmarks."""
+    from companion import run_companion
+
+    run_companion(vendor, instance, listen_port)
+
+
 if __name__ == "__main__":
     cli()
