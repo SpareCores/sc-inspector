@@ -141,6 +141,7 @@ def load_or_write_infra(data_dir: str | os.PathLike) -> dict[str, Any]:
         "vendor": os.environ.get("VENDOR", ""),
         "db_instance": os.environ.get("INSTANCE", ""),
         "client_instance": os.environ.get("MULTI_VM_CLIENT_INSTANCE", ""),
+        "client_vcpus": int(os.environ.get("MULTI_VM_CLIENT_VCPUS") or 0),
         "db_cpu_architecture": platform.machine(),
         "client_cpu_architecture": os.environ.get("MULTI_VM_CLIENT_CPU_ARCH", ""),
         "region": os.environ.get("REGION", ""),
@@ -268,17 +269,20 @@ def _wait_pg_ready(container, timeout: int = 120) -> None:
     raise TimeoutError(f"postgres did not become ready: {last_err}")
 
 
-def _benchmark_env(task, db_host: str, params, mem_gib: float) -> dict[str, str]:
+def _benchmark_env(task, db_host: str, params, mem_gib: float, db_vcpus: int, client_vcpus: int) -> dict[str, str]:
     wl = WORKLOADS.get(task.workload_proxy, {})
+    build_vus = min(params.build_vus, client_vcpus)
     env = {
         "SC_DB_HOST": db_host,
         "SC_DB_PORT": "5432",
         "SC_DB_USER": PG_USER,
         "SC_DB_PASSWORD": PG_PASSWORD,
         "SC_DB_NAME": PG_DB,
+        "SC_DB_VCPUS": str(db_vcpus),
+        "SC_CLIENT_VCPUS": str(client_vcpus),
         "SC_CACHE_RATIO": str(task.cache_ratio),
         "SC_PROFILE": "1",
-        "SC_BUILD_VUS": str(params.build_vus),
+        "SC_BUILD_VUS": str(build_vus),
         "SC_RUN_VUS": str(params.run_vus),
         "SC_WAREHOUSES": str(params.scale_units),
     }
@@ -309,6 +313,8 @@ def run_multi_vm_task(
 
     mem_gib = float(os.environ.get("MEM_GIB") or 0) or _mem_gib()
     vcpus = int(os.cpu_count() or 4)
+    infra = session.infra(data_dir)
+    client_vcpus = int(infra.get("client_vcpus") or 0) or vcpus
     params = multi_vm_workload_params(
         task.workload_proxy,
         task.tool,
@@ -316,7 +322,7 @@ def run_multi_vm_task(
         vcpus,
         mem_gib,
     )
-    db_host = session.infra(data_dir)["db_private_ip"]
+    db_host = infra["db_private_ip"]
     pg_wh = max(1, int(params.schema_gib / WH_SIZE_GIB))
 
     try:
@@ -330,7 +336,7 @@ def run_multi_vm_task(
     msg = RunBenchmark(
         task_name=task.name,
         image=task.image,
-        env=_benchmark_env(task, db_host, params, mem_gib),
+        env=_benchmark_env(task, db_host, params, mem_gib, vcpus, client_vcpus),
         command=task.command or "",
         timeout_sec=int(task.timeout.total_seconds()),
         tracker_job_name=f"{task.name}_benchmark_client",

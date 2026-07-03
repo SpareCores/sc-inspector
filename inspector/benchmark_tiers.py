@@ -19,8 +19,10 @@ OS_HEADROOM_GIB = 2.0
 # Companion driver VM: threaded VUs do not need 1 vCPU each.
 CLIENT_MIN_VCPUS = 4
 CLIENT_VUS_PER_VCPU = 4
-# HammerDB clients mostly wait on the remote DB; keep companions small.
-HAMMERDB_CLIENT_MAX_VCPUS = 8
+# HammerDB TPROC-C stored-procs: ~2 VUs per client vCPU before the driver saturates
+# (F16 eval: 16 VUs on a 4-vCPU client pegged 3.6/4 CPUs).
+HAMMERDB_CLIENT_VUS_PER_VCPU = 2
+HAMMERDB_CLIENT_MAX_VCPUS = 32
 # BenchBase light mixes (twitter, ycsb, …) can be client-bound on fast DBs; scale higher.
 BENCHBASE_CLIENT_MAX_VCPUS = 16
 
@@ -88,10 +90,37 @@ def profile_vu_upper_bound(vcpus: int) -> int:
     return max(profile_points(vcpus))
 
 
-def client_vcpus_for_peak_vus(peak_vus: int, *, max_vcpus: int) -> int:
-    """Companion CPU floor from peak VUs/terminals (~CLIENT_VUS_PER_VCPU per core), capped."""
-    need = (peak_vus + CLIENT_VUS_PER_VCPU - 1) // CLIENT_VUS_PER_VCPU
+def client_vcpus_for_peak_vus(
+    peak_vus: int,
+    *,
+    max_vcpus: int,
+    vus_per_vcpu: int = CLIENT_VUS_PER_VCPU,
+) -> int:
+    """Companion CPU floor from peak VUs/terminals, capped."""
+    need = (peak_vus + vus_per_vcpu - 1) // vus_per_vcpu
     return max(CLIENT_MIN_VCPUS, min(max_vcpus, need))
+
+
+def hammerdb_client_max_vcpus(db_vcpus: int) -> int:
+    """HammerDB companion CPU ceiling: up to half the DB host."""
+    half = max(CLIENT_MIN_VCPUS, int(db_vcpus) // 2)
+    return min(HAMMERDB_CLIENT_MAX_VCPUS, half)
+
+
+def hammerdb_client_vcpus(peak_vus: int, build_vus: int, db_vcpus: int) -> int:
+    cap = hammerdb_client_max_vcpus(db_vcpus)
+    return max(
+        client_vcpus_for_peak_vus(
+            peak_vus,
+            max_vcpus=cap,
+            vus_per_vcpu=HAMMERDB_CLIENT_VUS_PER_VCPU,
+        ),
+        client_vcpus_for_peak_vus(
+            build_vus,
+            max_vcpus=cap,
+            vus_per_vcpu=HAMMERDB_CLIENT_VUS_PER_VCPU,
+        ),
+    )
 
 
 def workload_for_cache_tier(
@@ -248,12 +277,8 @@ def hammerdb_client_req(db_srv, cache_ratio: float) -> ClientRequirements:
     mem_gib = db_srv.memory_amount / 1024
     w = workload_for_cache_tier(cache_ratio, db_srv.vcpus, mem_gib)
     peak_vus = profile_vu_upper_bound(db_srv.vcpus)
-    min_vcpus = max(
-        client_vcpus_for_peak_vus(peak_vus, max_vcpus=HAMMERDB_CLIENT_MAX_VCPUS),
-        client_vcpus_for_peak_vus(w.build_vus, max_vcpus=HAMMERDB_CLIENT_MAX_VCPUS),
-    )
     return ClientRequirements(
-        min_vcpus=min_vcpus,
+        min_vcpus=hammerdb_client_vcpus(peak_vus, w.build_vus, db_srv.vcpus),
         min_memory_gib=2.0,
     )
 

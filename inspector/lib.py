@@ -1243,6 +1243,7 @@ def inspector_user_data_replacements(
     client_private_ip: str = "",
     client_instance: str = "",
     client_cpu_arch: str = "",
+    client_vcpus: int = 0,
     provisioned_disk_gib: int | None = None,
     client_disk_gib: int = 30,
     include_run_upload: bool | None = None,
@@ -1281,6 +1282,7 @@ def inspector_user_data_replacements(
         "CLIENT_PRIVATE_IP": client_private_ip,
         "MULTI_VM_CLIENT_INSTANCE": client_instance,
         "MULTI_VM_CLIENT_CPU_ARCH": client_cpu_arch,
+        "MULTI_VM_CLIENT_VCPUS": str(client_vcpus or ""),
         "PROVISIONED_DISK_GIB": str(provisioned_disk_gib or VOLUME_SIZE),
         "CLIENT_DISK_GIB": str(client_disk_gib),
     }
@@ -1302,6 +1304,7 @@ def build_inspector_user_data(
     client_private_ip: str = "",
     client_instance: str = "",
     client_cpu_arch: str = "",
+    client_vcpus: int = 0,
     provisioned_disk_gib: int | None = None,
     client_disk_gib: int = 30,
     include_run_upload: bool | None = None,
@@ -1321,6 +1324,7 @@ def build_inspector_user_data(
         client_private_ip=client_private_ip,
         client_instance=client_instance,
         client_cpu_arch=client_cpu_arch,
+        client_vcpus=client_vcpus,
         provisioned_disk_gib=provisioned_disk_gib,
         client_disk_gib=client_disk_gib,
         include_run_upload=include_run_upload,
@@ -1344,6 +1348,7 @@ def build_server_user_data_replacements(
     mp_port: int,
     client_instance: str,
     client_cpu_arch: str,
+    client_vcpus: int,
     provisioned_disk_gib: int,
     client_disk_gib: int,
 ) -> dict:
@@ -1363,6 +1368,7 @@ def build_server_user_data_replacements(
         client_private_ip="{CLIENT_PRIVATE_IP}",
         client_instance=client_instance,
         client_cpu_arch=client_cpu_arch,
+        client_vcpus=client_vcpus,
         provisioned_disk_gib=provisioned_disk_gib,
         client_disk_gib=client_disk_gib,
     )
@@ -1784,6 +1790,7 @@ def _try_start_multi_vm_inspect(
             mp_port=mp_port,
             client_instance=client.api_reference,
             client_cpu_arch=client.cpu_architecture or "",
+            client_vcpus=int(client.vcpus or 0),
             provisioned_disk_gib=db_disk,
             client_disk_gib=30,
         )
