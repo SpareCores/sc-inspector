@@ -1189,6 +1189,39 @@ def get_last_end(data_dir, vendor, server):
     return max(meta_ends)
 
 
+def _as_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def active_run_blocks_s3_cleanup(
+    vendor: str,
+    instance: str,
+    records: list[Any],
+    data_dir: str | os.PathLike,
+) -> str | None:
+    """Return a reason to skip S3-driven destroy when git shows a newer active run."""
+    terminated = [_as_utc(r.terminated_at) for r in records if r.terminated_at]
+    if not terminated:
+        return None
+    latest_terminated = max(terminated)
+    server_data_dir = os.path.join(data_dir, vendor, instance)
+    if not os.path.isdir(server_data_dir):
+        return None
+    for task in _applicable_tasks(vendor, instance):
+        meta = load_task_meta(task, data_dir=server_data_dir)
+        started = _as_utc(meta.start)
+        if started and meta.end is None and started > latest_terminated:
+            return (
+                f"{task.name} started at {meta.start} after stale run record(s) "
+                f"ended at {latest_terminated.isoformat()}"
+            )
+    return None
+
+
 def should_scan_for_cleanup(
     data_dir,
     vendor,

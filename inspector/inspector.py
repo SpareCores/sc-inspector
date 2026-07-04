@@ -603,7 +603,7 @@ def _resource_opts_for_record(vendor: str, record) -> dict:
     return resource_opts
 
 
-def cleanup_s3_stack(vendor: str, records: list) -> None:
+def cleanup_s3_stack(vendor: str, records: list, *, data_dir: str | None = None) -> None:
     """Clean up one Pulumi stack; delete S3 markers only after the instance is gone."""
     from sc_runner import runner
     import s3_runs
@@ -613,6 +613,21 @@ def cleanup_s3_stack(vendor: str, records: list) -> None:
     keys = [r.key for r in records]
     location = record.region or record.zone
     resource_opts = _resource_opts_for_record(vendor, record)
+
+    if data_dir:
+        block_reason = lib.active_run_blocks_s3_cleanup(
+            vendor, record.instance, records, data_dir
+        )
+        if block_reason:
+            logging.warning(
+                "Skipping destroy for %s/%s in %s; %s; retaining %d run record(s)",
+                vendor,
+                record.instance,
+                location,
+                block_reason,
+                len(keys),
+            )
+            return
 
     with tempfile.TemporaryDirectory() as tempdir:
         pulumi_opts = dict(work_dir=tempdir)
@@ -764,6 +779,10 @@ def cleanup(ctx, threads, vendor):
     import concurrent.futures
     import s3_runs
 
+    repo.get_repo()
+    repo.pull()
+    data_dir = os.path.join(ctx.parent.params["repo_path"], "data")
+
     records = s3_runs.list_completed_runs(vendor=vendor)
     logging.info(
         "Found %d completed S3 run record(s) to clean up%s",
@@ -784,7 +803,9 @@ def cleanup(ctx, threads, vendor):
     with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
         for group_records in stacks.values():
             stack_vendor = group_records[0].vendor
-            futures[executor.submit(cleanup_s3_stack, stack_vendor, group_records)] = group_records
+            futures[executor.submit(
+                cleanup_s3_stack, stack_vendor, group_records, data_dir=data_dir
+            )] = group_records
 
         failures: list[str] = []
         for future, group_records in futures.items():
