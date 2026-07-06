@@ -23,22 +23,12 @@ BUILD_VU_CAP = 64
 OS_HEADROOM_GIB = 2.0
 # Durable (disk-bound) profiling: extra VUs only queue on fsync, so cap the ladder low.
 DURABLE_PROFILE_VCPU_CAP = 16
-# Companion driver VM: threaded VUs do not need 1 vCPU each.
+# Companion driver VM on a separate host from Postgres.
 CLIENT_MIN_VCPUS = 4
-CLIENT_VUS_PER_VCPU = 4
-# HammerDB TPROC-C stored-procs: ~2 VUs per client vCPU before the Tcl driver
-# saturates (F16 eval: 16 VUs on a 4-vCPU client pegged 3.6/4 CPUs). The heaviest
-# client phases are schema build (parallel bulk load) and cache-resident C100 runs,
-# so we size for the busiest VU/terminal count and keep HEADROOM above the observed
-# saturation point — the DB, not the driver, must be the bottleneck at the top of
-# the profile ladder.
-HAMMERDB_CLIENT_VUS_PER_VCPU = 2
-HAMMERDB_CLIENT_HEADROOM = 1.5
-# Normal HammerDB client sizing tracks ~1.5x DB vCPUs for 2x-VU async peaks; absolute max is a typo guard.
-HAMMERDB_CLIENT_ABSOLUTE_MAX_VCPUS = 2048
-# BenchBase Java driver sustains more terminals per vCPU than HammerDB Tcl.
-BENCHBASE_CLIENT_VUS_PER_VCPU = 4
-BENCHBASE_CLIENT_ABSOLUTE_MAX_VCPUS = 2048
+CLIENT_ABSOLUTE_MAX_VCPUS = 2048
+# Multi-VM: Postgres is the bottleneck before HammerDB/BenchBase drivers saturate.
+# F16 measurement: ~6.5 client cores for both async and durable OLTP at 16 VUs.
+# Size to ~½ DB vCPUs with a small bump for parallel schema-build loaders.
 TPCH_SCALE_FACTORS = (1, 10, 30, 100, 300, 1000, 3000, 10000, 30000, 100000)
 TPCH_GIB_PER_SF = 1.0
 
@@ -227,53 +217,18 @@ def profile_vu_upper_bound(
     return max(ladder) if ladder else 1
 
 
-def client_vcpus_for_peak_vus(
-    peak_vus: int,
-    *,
-    max_vcpus: int,
-    vus_per_vcpu: int = CLIENT_VUS_PER_VCPU,
-) -> int:
-    """Companion CPU floor from peak VUs/terminals, capped."""
-    need = (peak_vus + vus_per_vcpu - 1) // vus_per_vcpu
-    return max(CLIENT_MIN_VCPUS, min(max_vcpus, need))
-
-
-def hammerdb_client_max_vcpus(db_vcpus: int, durability: str = "async") -> int:
-    """HammerDB companion CPU ceiling.
-
-    Durable runs rarely need more than a 1:1 match with the DB host. Async runs
-    may profile up to 2x DB vCPUs, so size the client for ~1.5x DB vCPUs so the
-    Tcl driver stays below saturation (HAMMERDB_CLIENT_VUS_PER_VCPU).
-    """
+def client_max_vcpus(db_vcpus: int) -> int:
+    """Companion CPU ceiling (never above the DB host)."""
     db_vcpus = max(CLIENT_MIN_VCPUS, int(db_vcpus))
-    if durability == "durable":
-        return min(HAMMERDB_CLIENT_ABSOLUTE_MAX_VCPUS, db_vcpus)
-    driver_cap = max(db_vcpus, (db_vcpus * 3 + 1) // 2)
-    return min(HAMMERDB_CLIENT_ABSOLUTE_MAX_VCPUS, driver_cap)
+    return min(CLIENT_ABSOLUTE_MAX_VCPUS, db_vcpus)
 
 
-def benchbase_client_max_vcpus(db_vcpus: int, durability: str = "async") -> int:
-    """BenchBase companion CPU ceiling (Java driver; more terminals per vCPU)."""
-    db_vcpus = max(CLIENT_MIN_VCPUS, int(db_vcpus))
-    if durability == "durable":
-        return min(BENCHBASE_CLIENT_ABSOLUTE_MAX_VCPUS, db_vcpus)
-    driver_cap = max(db_vcpus, (db_vcpus * 3 + 1) // 2)
-    return min(BENCHBASE_CLIENT_ABSOLUTE_MAX_VCPUS, driver_cap)
-
-
-def hammerdb_client_vcpus(
-    peak_vus: int,
-    build_vus: int,
-    db_vcpus: int,
-    durability: str = "async",
-) -> int:
-    cap = hammerdb_client_max_vcpus(db_vcpus, durability)
-    # Size for the busiest client phase (peak run VUs or parallel build loaders) and
-    # provision HEADROOM above the driver's saturation ratio so it stays below its
-    # limit while the DB reaches peak concurrency.
-    driver_vus = max(peak_vus, build_vus)
-    need = math.ceil(driver_vus * HAMMERDB_CLIENT_HEADROOM / HAMMERDB_CLIENT_VUS_PER_VCPU)
-    return max(CLIENT_MIN_VCPUS, min(cap, need))
+def companion_client_vcpus(build_vus: int, db_vcpus: int) -> int:
+    """Companion CPU floor from DB host size and parallel build loaders."""
+    cap = client_max_vcpus(db_vcpus)
+    db_floor = max(CLIENT_MIN_VCPUS, (int(db_vcpus) + 1) // 2)
+    build_need = (int(build_vus) + 3) // 4
+    return min(cap, max(db_floor, build_need))
 
 
 def workload_for_cache_tier(
@@ -438,34 +393,20 @@ def multi_vm_workload_params(
     return MultiVmWorkloadParams(build_vus, run_vus, scale_units, schema_gib)
 
 
-def hammerdb_client_req(
-    db_srv,
-    cache_ratio: float,
-    durability: str = "async",
-) -> ClientRequirements:
+def hammerdb_client_req(db_srv, cache_ratio: float) -> ClientRequirements:
     mem_gib = db_srv.memory_amount / 1024
-    w = workload_for_cache_tier(cache_ratio, db_srv.vcpus, mem_gib, durability=durability)
-    wh_cap = max_profile_vus_by_warehouses(w.warehouses, db_srv.vcpus)
-    peak_vus = profile_vu_upper_bound(db_srv.vcpus, durability, wh_cap)
+    w = workload_for_cache_tier(cache_ratio, db_srv.vcpus, mem_gib)
     return ClientRequirements(
-        min_vcpus=hammerdb_client_vcpus(peak_vus, w.build_vus, db_srv.vcpus, durability=durability),
+        min_vcpus=companion_client_vcpus(w.build_vus, db_srv.vcpus),
         min_memory_gib=2.0,
     )
 
 
-def benchbase_client_req(
-    db_srv,
-    workload: str,
-    cache_ratio: float,
-    durability: str = "durable",
-) -> ClientRequirements:
-    peak_vus = profile_vu_upper_bound(db_srv.vcpus, durability)
+def benchbase_client_req(db_srv, workload: str, cache_ratio: float) -> ClientRequirements:
+    del workload, cache_ratio
+    build_vus = min(int(db_srv.vcpus), BUILD_VU_CAP)
     return ClientRequirements(
-        min_vcpus=client_vcpus_for_peak_vus(
-            peak_vus,
-            max_vcpus=benchbase_client_max_vcpus(db_srv.vcpus, durability),
-            vus_per_vcpu=BENCHBASE_CLIENT_VUS_PER_VCPU,
-        ),
+        min_vcpus=companion_client_vcpus(build_vus, db_srv.vcpus),
         min_memory_gib=2.0,
     )
 

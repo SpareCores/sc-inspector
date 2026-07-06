@@ -5,10 +5,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "inspector"))
 
 from benchmark_tiers import (  # noqa: E402
     async_peak_vu_cap,
-    benchbase_client_max_vcpus,
+    client_max_vcpus,
+    companion_client_vcpus,
     concurrency_ladder,
-    hammerdb_client_max_vcpus,
-    hammerdb_client_vcpus,
     max_profile_vus_by_warehouses,
     multi_vm_workload_params,
     profile_vu_upper_bound,
@@ -78,13 +77,9 @@ def test_async_peak_vu_cap_scales_with_host():
     assert async_peak_vu_cap(800) == 1600
 
 
-def test_hammerdb_client_scales_for_huge_db():
-    assert hammerdb_client_max_vcpus(800, "async") == 1200
-    assert hammerdb_client_vcpus(1600, 64, 800, "async") == 1200
-
-
-def test_benchbase_client_scales_for_huge_db():
-    assert benchbase_client_max_vcpus(800, "async") == 1200
+def test_companion_client_scales_for_huge_db():
+    assert client_max_vcpus(800) == 800
+    assert companion_client_vcpus(64, 800) == 400
 
 
 def test_huge_host_durable_still_capped_low():
@@ -93,12 +88,10 @@ def test_huge_host_durable_still_capped_low():
     assert ladder == [1, 2, 4, 8, 16]
 
 
-def test_hammerdb_client_sizing_async_vs_durable():
-    assert hammerdb_client_max_vcpus(16, "durable") == 16
-    assert hammerdb_client_max_vcpus(16, "async") == 24
-    async_vcpus = hammerdb_client_vcpus(32, 16, 16, "async")
-    durable_vcpus = hammerdb_client_vcpus(16, 16, 16, "durable")
-    assert async_vcpus > durable_vcpus
+def test_companion_client_sizing_matches_multi_vm_measurements():
+    # F16 async/durable OLTP: ~6.5 client cores observed at 16 VUs → 8 vCPU floor.
+    assert client_max_vcpus(16) == 16
+    assert companion_client_vcpus(16, 16) == 8
 
 
 def test_multi_vm_params_thread_durability():

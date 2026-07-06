@@ -184,8 +184,8 @@ class MultiVmDbTask(DockerTask):
         from benchmark_tiers import benchbase_client_req, hammerdb_client_req
 
         if self.tool == "hammerdb":
-            return hammerdb_client_req(srv, self.cache_ratio, self.durability)
-        return benchbase_client_req(srv, self.workload_proxy, self.cache_ratio, self.durability)
+            return hammerdb_client_req(srv, self.cache_ratio)
+        return benchbase_client_req(srv, self.workload_proxy, self.cache_ratio)
 
     def disk_gib_required(self, srv) -> float:
         from benchmark_tiers import (
