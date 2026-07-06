@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import os
-import platform
 import socket
 import time
 from datetime import datetime
 from multiprocessing.connection import Client
 from pathlib import Path
-from typing import Any
 
 import docker
 
@@ -36,23 +33,16 @@ PG_DB = "bench"
 class CompanionSession:
     def __init__(self) -> None:
         self._conn = None
-        self._infra: dict[str, Any] | None = None
 
     @property
     def connected(self) -> bool:
         return self._conn is not None
 
-    def infra(self, data_dir: str | os.PathLike) -> dict[str, Any]:
-        if self._infra is None:
-            self._infra = load_or_write_infra(data_dir)
-        return self._infra
-
-    def connect(self, data_dir: str | os.PathLike) -> None:
+    def connect(self) -> None:
         if self._conn is not None:
             return
-        infra = self.infra(data_dir)
-        host = infra["client_private_ip"]
-        port = int(infra.get("mp_port", 18765))
+        host = _client_private_ip()
+        port = _mp_port()
         authkey = base64.b64decode(os.environ["MP_AUTHKEY_B64"])
         deadline = time.monotonic() + CONNECT_DEADLINE_SEC
         last_err = None
@@ -116,41 +106,22 @@ def _ip_placeholder(value: str) -> bool:
     return not value or "{" in value or "}" in value
 
 
-def load_or_write_infra(data_dir: str | os.PathLike) -> dict[str, Any]:
-    path = Path(data_dir) / "infra.json"
-    infra: dict[str, Any] = {}
-    if path.is_file():
-        infra = json.loads(path.read_text(encoding="utf-8"))
+def _mp_port() -> int:
+    return int(os.environ.get("MP_PORT", "18765"))
 
+
+def _client_private_ip() -> str:
     client_ip = os.environ.get("CLIENT_PRIVATE_IP", "").strip()
-    db_ip = _local_private_ip()
-    runtime = {
-        "topology": "multi_vm",
-        "vendor": os.environ.get("VENDOR", ""),
-        "db_instance": os.environ.get("INSTANCE", ""),
-        "client_instance": os.environ.get("MULTI_VM_CLIENT_INSTANCE", ""),
-        "client_vcpus": int(os.environ.get("MULTI_VM_CLIENT_VCPUS") or 0),
-        "db_cpu_architecture": platform.machine(),
-        "client_cpu_architecture": os.environ.get("MULTI_VM_CLIENT_CPU_ARCH", ""),
-        "region": os.environ.get("REGION", ""),
-        "zone": os.environ.get("ZONE", ""),
-        "db_private_ip": db_ip,
-        "client_private_ip": client_ip,
-        "mp_port": int(os.environ.get("MP_PORT", "18765")),
-        "provisioned_disk_gib": int(os.environ.get("PROVISIONED_DISK_GIB", "128")),
-        "client_disk_gib": int(os.environ.get("CLIENT_DISK_GIB", "30")),
-        "network_mode": "private_vpc",
-    }
-    # Per-deployment private IPs can change between runs; always refresh from live host/env.
-    infra.update(runtime)
-    if _ip_placeholder(infra.get("client_private_ip", "")):
-        raise RuntimeError(
-            f"client_private_ip not configured (got {infra.get('client_private_ip')!r})"
-        )
+    if _ip_placeholder(client_ip):
+        raise RuntimeError(f"client_private_ip not configured (got {client_ip!r})")
+    return client_ip
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(infra, indent=2) + "\n", encoding="utf-8")
-    return infra
+
+def _client_vcpus(db_vcpus: int) -> int:
+    raw = os.environ.get("MULTI_VM_CLIENT_VCPUS", "").strip()
+    if raw:
+        return max(1, int(raw))
+    return db_vcpus
 
 
 def multi_vm_supported(vendor: str) -> bool:
@@ -281,7 +252,7 @@ def run_multi_vm_task(
     session = get_session()
     pg_container = None
     try:
-        session.connect(data_dir)
+        session.connect()
     except Exception as exc:
         meta.error_msg = str(exc)
         meta.end = datetime.now()
@@ -290,8 +261,7 @@ def run_multi_vm_task(
 
     mem_gib = float(os.environ.get("MEM_GIB") or 0) or _mem_gib()
     vcpus = int(os.cpu_count() or 4)
-    infra = session.infra(data_dir)
-    client_vcpus = int(infra.get("client_vcpus") or 0) or vcpus
+    client_vcpus = _client_vcpus(vcpus)
     params = multi_vm_workload_params(
         task.workload_proxy,
         task.tool,
@@ -299,7 +269,7 @@ def run_multi_vm_task(
         vcpus,
         mem_gib,
     )
-    db_host = infra["db_private_ip"]
+    db_host = _local_private_ip()
     pg_wh = max(1, int(params.schema_gib / WH_SIZE_GIB))
 
     try:
@@ -347,14 +317,13 @@ def _mem_gib() -> float:
     return 16.0
 
 
-def shutdown_companion(data_dir: str | os.PathLike, reason: str) -> None:
+def shutdown_companion(reason: str) -> None:
     session = get_session()
     if session.connected:
         session.shutdown(reason=reason)
         return
-    infra = load_or_write_infra(data_dir)
-    host = infra["client_private_ip"]
-    port = int(infra.get("mp_port", 18765))
+    host = _client_private_ip()
+    port = _mp_port()
     authkey = base64.b64decode(os.environ["MP_AUTHKEY_B64"])
     try:
         conn = Client((host, port), authkey=authkey)
@@ -365,5 +334,5 @@ def shutdown_companion(data_dir: str | os.PathLike, reason: str) -> None:
         logging.exception("Companion shutdown failed for %s:%s", host, port)
 
 
-def finalize_multi_vm(data_dir: str | os.PathLike) -> None:
-    shutdown_companion(data_dir, reason="inspect complete")
+def finalize_multi_vm(_data_dir: str | os.PathLike) -> None:
+    shutdown_companion(reason="inspect complete")

@@ -490,14 +490,7 @@ def _task_resource_checks(
             logging.info(f"Skipping task {task.name}: multi-VM not supported for {vendor}")
             return False
         provisioned = VOLUME_SIZE
-        infra_path = os.path.join(data_dir, "infra.json")
-        if os.path.isfile(infra_path):
-            try:
-                with open(infra_path) as f:
-                    provisioned = float(json.load(f).get("provisioned_disk_gib", provisioned))
-            except Exception:
-                pass
-        elif os.environ.get("PROVISIONED_DISK_GIB"):
+        if os.environ.get("PROVISIONED_DISK_GIB"):
             provisioned = float(os.environ["PROVISIONED_DISK_GIB"])
         if not task.feasible_on(
             os.cpu_count() or 1,
