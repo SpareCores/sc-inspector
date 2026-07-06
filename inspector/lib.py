@@ -42,7 +42,7 @@ HOST_TIMING_BASE = "/var/lib/sparecores-inspector/timing"
 HOST_TIMING_MOUNT = "/host-timing"
 # add options to the task hash, whose function is to signal any
 # changes in the tasks' runtime parameters, which might alter the output
-TASK_HASH_KEYS = {"command", "transform_output", "image", "cache_ratio", "workload_proxy", "tool"}
+TASK_HASH_KEYS = {"command", "transform_output", "image", "cache_ratio", "workload_proxy", "tool", "durability"}
 # don't start task if it has already been started less than 2 hours ago
 WAIT_SINCE_LAST_START = timedelta(hours=2)
 # fail if a job has already started, but didn't produce output
@@ -176,6 +176,9 @@ class MultiVmDbTask(DockerTask):
     cache_tier: str = ""
     cache_ratio: float = 1.0
     tool: Literal["hammerdb", "benchbase"] = "hammerdb"
+    # "async" sets synchronous_commit=off (headline compute score, comparable across
+    # clouds); "durable" keeps synchronous_commit=on (disclosed, disk-dependent metric).
+    durability: Literal["durable", "async"] = "durable"
 
     def client_requirements(self, srv):
         from benchmark_tiers import benchbase_client_req, hammerdb_client_req
@@ -1737,7 +1740,7 @@ def _try_start_multi_vm_inspect(
     """Provision a multi-VM stack when tasks need a companion client."""
     import secrets
 
-    from benchmark_tiers import merge_client_requirements
+    from benchmark_tiers import db_disk_options, merge_client_requirements
     from companion_picker import pick_client_instance
     from disk import effective_disk_gib
     from sc_runner import runner
@@ -1759,6 +1762,7 @@ def _try_start_multi_vm_inspect(
     client_req = merge_client_requirements([t.client_requirements(srv_data) for t in disk_sources])
     disk_need = max(t.disk_gib_required(srv_data) for t in disk_sources)
     db_disk = int(effective_disk_gib(vendor, srv_data, disk_need))
+    db_disk_opts = db_disk_options(vendor)
     authkey = secrets.token_bytes(32)
     authkey_b64 = base64.b64encode(authkey).decode("ascii")
     mp_port = 18765
@@ -1825,6 +1829,9 @@ def _try_start_multi_vm_inspect(
             client_instance=client.api_reference,
             primary_disk_gib=db_disk,
             client_disk_gib=30,
+            primary_disk_type=db_disk_opts.get("disk_type"),
+            primary_disk_iops=db_disk_opts.get("disk_iops"),
+            primary_disk_throughput=db_disk_opts.get("disk_throughput"),
             client_user_data_b64=client_ud_b64,
             primary_user_data_template=server_replacements["USER_DATA_TEMPLATE"],
             extra_exports={"mp_port": mp_port},

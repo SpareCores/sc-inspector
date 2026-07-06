@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,9 +21,14 @@ OS_HEADROOM_GIB = 2.0
 # Companion driver VM: threaded VUs do not need 1 vCPU each.
 CLIENT_MIN_VCPUS = 4
 CLIENT_VUS_PER_VCPU = 4
-# HammerDB TPROC-C stored-procs: ~2 VUs per client vCPU before the driver saturates
-# (F16 eval: 16 VUs on a 4-vCPU client pegged 3.6/4 CPUs).
+# HammerDB TPROC-C stored-procs: ~2 VUs per client vCPU before the Tcl driver
+# saturates (F16 eval: 16 VUs on a 4-vCPU client pegged 3.6/4 CPUs). The heaviest
+# client phases are schema build (parallel bulk load) and cache-resident C100 runs,
+# so we size for the busiest VU/terminal count and keep HEADROOM above the observed
+# saturation point — the DB, not the driver, must be the bottleneck at the top of
+# the profile ladder.
 HAMMERDB_CLIENT_VUS_PER_VCPU = 2
+HAMMERDB_CLIENT_HEADROOM = 1.5
 HAMMERDB_CLIENT_MAX_VCPUS = 32
 # BenchBase light mixes (twitter, ycsb, …) can be client-bound on fast DBs; scale higher.
 BENCHBASE_CLIENT_MAX_VCPUS = 16
@@ -34,6 +41,40 @@ WORKLOADS: dict[str, dict[str, Any]] = {
     "crud_simple": {"tool": "benchbase", "benchmark": "ycsb", "tiers": [1.0]},
     "olap": {"tool": "hammerdb", "hammerdb": "tpch", "tiers": [1.0]},
 }
+
+# Storage tier for the multi-VM DB host. These benchmarks are commit-fsync bound, so
+# the DB host needs low-latency SSD-backed storage with enough provisioned IOPS/throughput
+# that the disclosed durable-commit metric is not throttled by the provider baseline.
+# Values are provider-native and passed straight through to sc-runner's generic per-VM
+# disk knobs; every override lives here on the sc-inspector side. Set the disk type to an
+# empty string to fall back to the provider default (cheapest) storage.
+DB_DISK_TIERS: dict[str, dict[str, Any]] = {
+    "azure": {"disk_type": "Premium_LRS"},
+    "gcp": {"disk_type": "pd-ssd"},
+    "aws": {"disk_type": "gp3", "disk_iops": 16000, "disk_throughput": 1000},
+}
+
+
+def db_disk_options(vendor: str) -> dict[str, Any]:
+    """Provider-native disk options for a multi-VM DB host, overridable via env vars.
+
+    Returns a dict with optional ``disk_type`` / ``disk_iops`` / ``disk_throughput``
+    keys. An empty (or absent) ``disk_type`` means: use the provider default storage.
+    """
+    opts = dict(DB_DISK_TIERS.get(vendor, {}))
+    disk_type = os.environ.get("MULTI_VM_DB_DISK_TYPE")
+    if disk_type is not None:
+        opts["disk_type"] = disk_type or None
+    disk_iops = os.environ.get("MULTI_VM_DB_DISK_IOPS")
+    if disk_iops:
+        opts["disk_iops"] = int(disk_iops)
+    disk_throughput = os.environ.get("MULTI_VM_DB_DISK_THROUGHPUT")
+    if disk_throughput:
+        opts["disk_throughput"] = int(disk_throughput)
+    if not opts.get("disk_type"):
+        return {}
+    return opts
+
 
 # BenchBase wikipedia: ~8 GiB at scalefactor 50 (scratch calibration on F16-class hosts).
 WIKIPEDIA_GIB_PER_SF = 8.0 / 50
@@ -112,25 +153,24 @@ def client_vcpus_for_peak_vus(
 
 
 def hammerdb_client_max_vcpus(db_vcpus: int) -> int:
-    """HammerDB companion CPU ceiling: up to half the DB host."""
-    half = max(CLIENT_MIN_VCPUS, int(db_vcpus) // 2)
-    return min(HAMMERDB_CLIENT_MAX_VCPUS, half)
+    """HammerDB companion CPU ceiling: up to a 1:1 match with the DB host.
+
+    The driver must keep the DB saturated at the top of the profile ladder, so the
+    companion may match (but not exceed) the DB vCPU count, bounded absolutely by
+    HAMMERDB_CLIENT_MAX_VCPUS. The old ``db_vcpus // 2`` ceiling left the driver with
+    zero headroom on smaller hosts (e.g. F16 sized to exactly 16 VUs on 8 vCPUs).
+    """
+    return min(HAMMERDB_CLIENT_MAX_VCPUS, max(CLIENT_MIN_VCPUS, int(db_vcpus)))
 
 
 def hammerdb_client_vcpus(peak_vus: int, build_vus: int, db_vcpus: int) -> int:
     cap = hammerdb_client_max_vcpus(db_vcpus)
-    return max(
-        client_vcpus_for_peak_vus(
-            peak_vus,
-            max_vcpus=cap,
-            vus_per_vcpu=HAMMERDB_CLIENT_VUS_PER_VCPU,
-        ),
-        client_vcpus_for_peak_vus(
-            build_vus,
-            max_vcpus=cap,
-            vus_per_vcpu=HAMMERDB_CLIENT_VUS_PER_VCPU,
-        ),
-    )
+    # Size for the busiest client phase (peak run VUs or parallel build loaders) and
+    # provision HEADROOM above the driver's saturation ratio so it stays below its
+    # limit while the DB reaches peak concurrency.
+    driver_vus = max(peak_vus, build_vus)
+    need = math.ceil(driver_vus * HAMMERDB_CLIENT_HEADROOM / HAMMERDB_CLIENT_VUS_PER_VCPU)
+    return max(CLIENT_MIN_VCPUS, min(cap, need))
 
 
 def workload_for_cache_tier(

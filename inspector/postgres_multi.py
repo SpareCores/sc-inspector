@@ -131,11 +131,17 @@ def multi_vm_supported(vendor: str) -> bool:
     return vendor in supported_vendors
 
 
-def pg_gucs(mem_gib: float, warehouses: int) -> list[str]:
+def pg_gucs(mem_gib: float, warehouses: int, durability: str = "durable") -> list[str]:
     schema_gib = warehouses * 0.095
     sb_gb = max(1, min(int(mem_gib * 0.25), int(schema_gib * 1.05) + 1))
     ecs = min(int(mem_gib * 0.75), sb_gb * 4)
     mpw = min(int(os.cpu_count() or 4), 32)
+    # "async" removes the per-commit WAL fsync wait (synchronous_commit=off): the
+    # OLTP score then reflects CPU/memory/lock scaling of the instance rather than
+    # the provisioned disk's fsync latency, and is comparable across clouds. fsync
+    # stays on, so the cluster is never at risk of corruption. "durable" keeps the
+    # production-default synchronous_commit=on for the disclosed secondary metric.
+    sync_commit = "off" if durability == "async" else "on"
     settings = [
         f"shared_buffers={sb_gb}GB",
         f"effective_cache_size={ecs}GB",
@@ -143,6 +149,7 @@ def pg_gucs(mem_gib: float, warehouses: int) -> list[str]:
         f"max_parallel_workers={mpw}",
         f"max_worker_processes={mpw}",
         "max_parallel_workers_per_gather=2",
+        f"synchronous_commit={sync_commit}",
         "wal_buffers=64MB",
         "max_wal_size=8GB",
         "min_wal_size=1GB",
@@ -159,7 +166,7 @@ def pg_gucs(mem_gib: float, warehouses: int) -> list[str]:
 
 def _start_postgres(task, mem_gib: float, warehouses: int) -> docker.models.containers.Container:
     d = docker.from_env(timeout=1800)
-    gucs = pg_gucs(mem_gib, warehouses)
+    gucs = pg_gucs(mem_gib, warehouses, durability=getattr(task, "durability", "durable"))
     cmd = [
         "postgres",
         "-c",
@@ -253,6 +260,7 @@ def _benchmark_env(task, db_host: str, params, mem_gib: float, db_vcpus: int, cl
         "SC_DB_VCPUS": str(db_vcpus),
         "SC_CLIENT_VCPUS": str(client_vcpus),
         "SC_CACHE_RATIO": str(task.cache_ratio),
+        "SC_DURABILITY": getattr(task, "durability", "durable"),
         "SC_PROFILE": "1",
         "SC_BUILD_VUS": str(build_vus),
         "SC_RUN_VUS": str(params.run_vus),

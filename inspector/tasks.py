@@ -145,6 +145,8 @@ virtualization = DockerTask(
 POSTGRES_MULTI_ROLLOUT = {("azure", "Standard_F16ams_v6")}
 
 # Multi-VM Postgres benchmarks: priority band 1 (1.0, 1.1, …). Companion powers off when band 1 ends.
+# Headline OLTP scores use synchronous_commit=off (async): CPU/memory/lock-bound and
+# comparable across clouds, not gated by the provisioned disk's fsync latency.
 hammerdb_postgres_multi_oltp_mixed_c100 = MultiVmDbTask(
     parallel=False,
     priority=1.0,
@@ -154,6 +156,7 @@ hammerdb_postgres_multi_oltp_mixed_c100 = MultiVmDbTask(
     workload_proxy="oltp_mixed",
     cache_tier="c100",
     cache_ratio=1.0,
+    durability="async",
     image="ghcr.io/sparecores/benchmark-hammerdb-postgres:main",
     timeout=timedelta(minutes=60),
 )
@@ -167,8 +170,26 @@ hammerdb_postgres_multi_oltp_mixed_c30 = MultiVmDbTask(
     workload_proxy="oltp_mixed",
     cache_tier="c30",
     cache_ratio=0.3,
+    durability="async",
     image="ghcr.io/sparecores/benchmark-hammerdb-postgres:main",
     timeout=timedelta(minutes=120),
+)
+
+# Secondary, disclosed metric: production-default synchronous_commit=on. This reflects
+# real-world durable-commit throughput on the instance's disk (fsync-latency bound), so
+# it is NOT used for the compute ranking — see sc-inspector-data README.
+hammerdb_postgres_multi_oltp_mixed_durable_c100 = MultiVmDbTask(
+    parallel=False,
+    priority=1.15,
+    servers_only=POSTGRES_MULTI_ROLLOUT,
+    benchmark_family="hammerdb_postgres_multi",
+    tool="hammerdb",
+    workload_proxy="oltp_mixed",
+    cache_tier="c100",
+    cache_ratio=1.0,
+    durability="durable",
+    image="ghcr.io/sparecores/benchmark-hammerdb-postgres:main",
+    timeout=timedelta(minutes=60),
 )
 
 benchbase_postgres_multi_read_heavy_c100 = MultiVmDbTask(
