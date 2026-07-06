@@ -25,6 +25,25 @@ DEFAULT_BENCHMARK_COMMAND = [
     "python3",
     "/benchmark.py",
 ]
+# Forward from the companion host into nested benchmark containers without passing
+# the full os.environ (that clobbers image PATH, e.g. BenchBase Java).
+_TRACKER_FORWARD_ENV = (
+    "SENTINEL_API_TOKEN",
+    "SENTINEL_API_BASE",
+    "SENTINEL_API_URL",
+)
+
+
+def _benchmark_container_env(msg: RunBenchmark) -> dict[str, str]:
+    env = dict(msg.env)
+    env.setdefault("TRACKER_PROJECT_NAME", "inspector")
+    env.setdefault("TRACKER_JOB_NAME", msg.tracker_job_name)
+    env.setdefault("TRACKER_EXTERNAL_RUN_ID", os.environ.get("GITHUB_RUN_ID", ""))
+    env.setdefault("TRACKER_QUIET", "true")
+    for key in _TRACKER_FORWARD_ENV:
+        if key in os.environ:
+            env.setdefault(key, os.environ[key])
+    return env
 
 
 def _authkey() -> bytes:
@@ -63,12 +82,9 @@ def _benchmark_command(msg: RunBenchmark) -> tuple[list[str], list[str]]:
 
 
 def _docker_run(msg: RunBenchmark) -> BenchmarkResult:
-    # Use only benchmark-specific env; passing host os.environ overwrites image PATH
-    # (e.g. BenchBase Java lives under /opt/java/openjdk/bin in the base image).
-    env = dict(msg.env)
-    env.setdefault("TRACKER_PROJECT_NAME", "inspector")
-    env.setdefault("TRACKER_JOB_NAME", msg.tracker_job_name)
-    env.setdefault("TRACKER_EXTERNAL_RUN_ID", os.environ.get("GITHUB_RUN_ID", ""))
+    # Use only benchmark-specific env plus explicit tracker forwarding; passing the
+    # full host os.environ overwrites image PATH (e.g. BenchBase Java).
+    env = _benchmark_container_env(msg)
 
     host_out, metrics_dir = _benchmark_output_dirs()
     metrics_path = metrics_dir / "metrics.json"
