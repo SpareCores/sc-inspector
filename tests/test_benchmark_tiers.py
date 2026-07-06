@@ -4,6 +4,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "inspector"))
 
 from benchmark_tiers import (  # noqa: E402
+    async_peak_vu_cap,
+    benchbase_client_max_vcpus,
     concurrency_ladder,
     hammerdb_client_max_vcpus,
     hammerdb_client_vcpus,
@@ -19,7 +21,7 @@ def test_async_f16_c30_ladder_includes_oversubscribe_rungs():
     wh_cap = max_profile_vus_by_warehouses(w.warehouses, 16)
     ladder = concurrency_ladder(16, wh_cap, "async")
     assert wh_cap >= 32
-    assert ladder == [1, 4, 8, 16, 24, 32]
+    assert ladder == [1, 2, 4, 8, 16, 24, 32]
 
 
 def test_async_f16_c100_ladder_capped_by_warehouses():
@@ -27,7 +29,7 @@ def test_async_f16_c100_ladder_capped_by_warehouses():
     wh_cap = max_profile_vus_by_warehouses(w.warehouses, 16)
     ladder = concurrency_ladder(16, wh_cap, "async")
     assert wh_cap == 16
-    assert ladder == [1, 4, 8, 16]
+    assert ladder == [1, 2, 4, 8, 16]
     assert profile_vu_upper_bound(16, "async", wh_cap) == 16
 
 
@@ -37,7 +39,7 @@ def test_durable_f16_ladder_stays_conservative():
     ladder = concurrency_ladder(16, wh_cap, "durable")
     assert 24 not in ladder
     assert 32 not in ladder
-    assert ladder == [1, 4, 8, 16]
+    assert ladder == [1, 2, 4, 8, 16]
     assert w.run_vus == 16
 
 
@@ -61,6 +63,34 @@ def test_durable_large_host_capped_at_sixteen():
     ladder = concurrency_ladder(64, 500, "durable")
     assert max(ladder) == 16
     assert 32 not in ladder
+
+
+def test_huge_host_ladder_is_geometric_and_reaches_2x_vcpus():
+    ladder = concurrency_ladder(800, 10_000, "async")
+    assert max(ladder) == 1600
+    assert 1200 in ladder
+    for prev, cur in zip(ladder, ladder[1:]):
+        assert cur <= prev * 2
+
+
+def test_async_peak_vu_cap_scales_with_host():
+    assert async_peak_vu_cap(16) == 32
+    assert async_peak_vu_cap(800) == 1600
+
+
+def test_hammerdb_client_scales_for_huge_db():
+    assert hammerdb_client_max_vcpus(800, "async") == 1200
+    assert hammerdb_client_vcpus(1600, 64, 800, "async") == 1200
+
+
+def test_benchbase_client_scales_for_huge_db():
+    assert benchbase_client_max_vcpus(800, "async") == 1200
+
+
+def test_huge_host_durable_still_capped_low():
+    ladder = concurrency_ladder(800, 10_000, "durable")
+    assert max(ladder) == 16
+    assert ladder == [1, 2, 4, 8, 16]
 
 
 def test_hammerdb_client_sizing_async_vs_durable():

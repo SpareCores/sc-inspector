@@ -15,7 +15,10 @@ WH_SIZE_GIB = 0.095
 WH_PER_VU_MIN = 5
 WH_PER_VU_MIN_LARGE = 20
 DISK_SCHEMA_RATIO = 2.0
-MAX_RUN_VUS = 500
+# Async OLTP/YCSB profiling targets up to 2x DB vCPUs when warehouses allow.
+ASYNC_PROFILE_VU_FACTOR = 2
+# Safety valve only — normal async cap is 2x vCPUs, not this constant.
+ASYNC_PROFILE_VU_ABSOLUTE_MAX = 4096
 BUILD_VU_CAP = 64
 OS_HEADROOM_GIB = 2.0
 # Durable (disk-bound) profiling: extra VUs only queue on fsync, so cap the ladder low.
@@ -31,9 +34,11 @@ CLIENT_VUS_PER_VCPU = 4
 # the profile ladder.
 HAMMERDB_CLIENT_VUS_PER_VCPU = 2
 HAMMERDB_CLIENT_HEADROOM = 1.5
-HAMMERDB_CLIENT_MAX_VCPUS = 32
-# BenchBase light mixes (twitter, ycsb, …) can be client-bound on fast DBs; scale higher.
-BENCHBASE_CLIENT_MAX_VCPUS = 16
+# Normal HammerDB client sizing tracks ~1.5x DB vCPUs for 2x-VU async peaks; absolute max is a typo guard.
+HAMMERDB_CLIENT_ABSOLUTE_MAX_VCPUS = 2048
+# BenchBase Java driver sustains more terminals per vCPU than HammerDB Tcl.
+BENCHBASE_CLIENT_VUS_PER_VCPU = 4
+BENCHBASE_CLIENT_ABSOLUTE_MAX_VCPUS = 2048
 TPCH_SCALE_FACTORS = (1, 10, 30, 100, 300, 1000, 3000, 10000, 30000, 100000)
 TPCH_GIB_PER_SF = 1.0
 
@@ -120,6 +125,23 @@ def wh_per_vu_min(vcpus: int) -> int:
     return WH_PER_VU_MIN_LARGE if vcpus >= 16 else WH_PER_VU_MIN
 
 
+def async_peak_vu_cap(vcpus: int) -> int:
+    """Upper async profiling VU count for a DB host (2x vCPUs, warehouse permitting)."""
+    vcpus = max(1, int(vcpus))
+    return min(ASYNC_PROFILE_VU_ABSOLUTE_MAX, vcpus * ASYNC_PROFILE_VU_FACTOR)
+
+
+def durable_peak_vu_cap(vcpus: int) -> int:
+    """Upper durable profiling VU count — disk-bound, does not scale past min(vcpus, 16)."""
+    return min(max(1, int(vcpus)), DURABLE_PROFILE_VCPU_CAP)
+
+
+def peak_vu_cap(vcpus: int, durability: str = "async") -> int:
+    if durability == "async":
+        return async_peak_vu_cap(vcpus)
+    return durable_peak_vu_cap(vcpus)
+
+
 def tpch_scale_factor(cache_ratio: float, mem_gib: float) -> int:
     """Largest HammerDB TPC-H scale factor that fits the cache-tier schema budget."""
     schema_gib = BUFFER_FRAC * mem_gib / max(cache_ratio, 0.05)
@@ -129,15 +151,20 @@ def tpch_scale_factor(cache_ratio: float, mem_gib: float) -> int:
 
 
 def _vcpu_ladder_rungs(vcpus: int) -> list[int]:
-    """Base concurrency rungs scaled to DB vCPU count (1:1 region and below)."""
+    """Base concurrency rungs, geometrically (2x) spaced up to the DB vCPU count.
+
+    A doubling ladder keeps the low-concurrency scaling curve dense while covering
+    the full range without a giant gap on large hosts — e.g. 800 vCPUs yields
+    1, 2, 4, …, 512, 800 (~11 rungs, ~log2(vcpus)) instead of jumping 32 -> 800.
+    """
     vcpus = max(1, int(vcpus))
-    if vcpus <= 2:
-        return [1, vcpus]
-    if vcpus <= 8:
-        return [1, 2, 4, vcpus]
-    if vcpus <= 32:
-        return [1, 4, 8, 16, vcpus]
-    return [1, 8, 16, 32, vcpus]
+    rungs = [1]
+    v = 2
+    while v < vcpus:
+        rungs.append(v)
+        v *= 2
+    rungs.append(vcpus)
+    return sorted(set(rungs))
 
 
 def _async_oversubscribe_rungs(vcpus: int) -> list[int]:
@@ -174,10 +201,11 @@ def concurrency_ladder(
     rungs = list(_vcpu_ladder_rungs(vcpus))
     if durability == "async":
         rungs.extend(_async_oversubscribe_rungs(vcpus))
-        cap = min(max_by_warehouses, MAX_RUN_VUS, max(vcpus, vcpus * 2))
+        cap = min(max_by_warehouses, async_peak_vu_cap(vcpus))
     else:
-        cap = min(max_by_warehouses, vcpus, DURABLE_PROFILE_VCPU_CAP)
-    return sorted({max(1, min(r, cap)) for r in rungs if r <= cap})
+        cap = min(max_by_warehouses, durable_peak_vu_cap(vcpus))
+    # Clamp (not drop) rungs above the cap so the ladder always reaches the ceiling.
+    return sorted({max(1, min(r, cap)) for r in rungs})
 
 
 def profile_points(vcpus: int) -> list[int]:
@@ -190,7 +218,11 @@ def profile_vu_upper_bound(
     durability: str = "async",
     max_by_warehouses: int | None = None,
 ) -> int:
-    wh_cap = max_by_warehouses if max_by_warehouses is not None else MAX_RUN_VUS
+    wh_cap = (
+        max_by_warehouses
+        if max_by_warehouses is not None
+        else peak_vu_cap(vcpus, durability)
+    )
     ladder = concurrency_ladder(vcpus, wh_cap, durability)
     return max(ladder) if ladder else 1
 
@@ -210,14 +242,23 @@ def hammerdb_client_max_vcpus(db_vcpus: int, durability: str = "async") -> int:
     """HammerDB companion CPU ceiling.
 
     Durable runs rarely need more than a 1:1 match with the DB host. Async runs
-    may profile up to 2x DB vCPUs in VUs, so allow ~1.5x client vCPUs for driver
-    headroom (HAMMERDB_CLIENT_VUS_PER_VCPU saturation ratio).
+    may profile up to 2x DB vCPUs, so size the client for ~1.5x DB vCPUs so the
+    Tcl driver stays below saturation (HAMMERDB_CLIENT_VUS_PER_VCPU).
     """
     db_vcpus = max(CLIENT_MIN_VCPUS, int(db_vcpus))
     if durability == "durable":
-        return min(HAMMERDB_CLIENT_MAX_VCPUS, db_vcpus)
+        return min(HAMMERDB_CLIENT_ABSOLUTE_MAX_VCPUS, db_vcpus)
     driver_cap = max(db_vcpus, (db_vcpus * 3 + 1) // 2)
-    return min(HAMMERDB_CLIENT_MAX_VCPUS, driver_cap)
+    return min(HAMMERDB_CLIENT_ABSOLUTE_MAX_VCPUS, driver_cap)
+
+
+def benchbase_client_max_vcpus(db_vcpus: int, durability: str = "async") -> int:
+    """BenchBase companion CPU ceiling (Java driver; more terminals per vCPU)."""
+    db_vcpus = max(CLIENT_MIN_VCPUS, int(db_vcpus))
+    if durability == "durable":
+        return min(BENCHBASE_CLIENT_ABSOLUTE_MAX_VCPUS, db_vcpus)
+    driver_cap = max(db_vcpus, (db_vcpus * 3 + 1) // 2)
+    return min(BENCHBASE_CLIENT_ABSOLUTE_MAX_VCPUS, driver_cap)
 
 
 def hammerdb_client_vcpus(
@@ -251,13 +292,13 @@ def workload_for_cache_tier(
     if peak_vu is not None:
         run_vus = peak_vu
     elif durability == "async":
-        run_vus = min(MAX_RUN_VUS, max_vu_by_wh, max(vcpus, vcpus * 2))
+        run_vus = min(async_peak_vu_cap(vcpus), max_vu_by_wh)
     else:
-        run_vus = max(1, min(vcpus, DURABLE_PROFILE_VCPU_CAP, MAX_RUN_VUS, max_vu_by_wh))
+        run_vus = max(1, min(durable_peak_vu_cap(vcpus), max_vu_by_wh))
     run_vus = min(run_vus, max_vu_by_wh)
     build_vus = min(vcpus, warehouses, BUILD_VU_CAP)
     disk_gib = schema_gib * DISK_SCHEMA_RATIO
-    ram_bound = run_vus < min(vcpus, MAX_RUN_VUS)
+    ram_bound = run_vus < min(vcpus, peak_vu_cap(vcpus, durability))
     return Workload(
         cache_ratio=cache_ratio,
         vcpus=vcpus,
@@ -383,7 +424,7 @@ def multi_vm_workload_params(
         if hammer == "tpch":
             scale_units = tpch_scale_factor(cache_ratio, mem_gib)
             schema_gib = scale_units * TPCH_GIB_PER_SF
-            run_vus = min(vcpus, MAX_RUN_VUS, max(1, scale_units // WH_PER_VU_MIN))
+            run_vus = min(vcpus, async_peak_vu_cap(vcpus), max(1, scale_units // WH_PER_VU_MIN))
             build_vus = min(vcpus, BUILD_VU_CAP)
             return MultiVmWorkloadParams(build_vus, run_vus, scale_units, schema_gib)
         w = workload_for_cache_tier(cache_ratio, vcpus, mem_gib, durability=durability)
@@ -392,7 +433,7 @@ def multi_vm_workload_params(
     schema_gib = benchbase_schema_gib(benchmark, mem_gib, cache_ratio)
     scale_units = benchbase_scalefactor(benchmark, mem_gib, cache_ratio)
     peak_vus = profile_vu_upper_bound(vcpus, durability)
-    run_vus = min(peak_vus, MAX_RUN_VUS)
+    run_vus = min(peak_vus, peak_vu_cap(vcpus, durability))
     build_vus = min(vcpus, BUILD_VU_CAP)
     return MultiVmWorkloadParams(build_vus, run_vus, scale_units, schema_gib)
 
@@ -419,10 +460,12 @@ def benchbase_client_req(
     durability: str = "durable",
 ) -> ClientRequirements:
     peak_vus = profile_vu_upper_bound(db_srv.vcpus, durability)
-    # Light BenchBase workloads may need more driver CPU than HammerDB on large DB hosts.
-    max_vcpus = min(BENCHBASE_CLIENT_MAX_VCPUS, max(8, int(db_srv.vcpus) // 2))
     return ClientRequirements(
-        min_vcpus=client_vcpus_for_peak_vus(peak_vus, max_vcpus=max_vcpus),
+        min_vcpus=client_vcpus_for_peak_vus(
+            peak_vus,
+            max_vcpus=benchbase_client_max_vcpus(db_srv.vcpus, durability),
+            vus_per_vcpu=BENCHBASE_CLIENT_VUS_PER_VCPU,
+        ),
         min_memory_gib=2.0,
     )
 
