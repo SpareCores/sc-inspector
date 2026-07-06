@@ -17,8 +17,7 @@ from benchmark_tiers import (
     WH_SIZE_GIB,
     WORKLOADS,
     benchbase_scalefactor,
-    concurrency_ladder,
-    max_profile_vus_by_warehouses,
+    multi_vm_profile_ladder,
     multi_vm_workload_params,
     wh_per_vu_min,
 )
@@ -134,11 +133,12 @@ def multi_vm_supported(vendor: str) -> bool:
     return vendor in supported_vendors
 
 
-def pg_gucs(mem_gib: float, warehouses: int, durability: str = "durable") -> list[str]:
+def pg_gucs(mem_gib: float, warehouses: int, durability: str = "durable", vcpus: int | None = None) -> list[str]:
     schema_gib = warehouses * 0.095
     sb_gb = max(1, min(int(mem_gib * 0.25), int(schema_gib * 1.05) + 1))
     ecs = min(int(mem_gib * 0.75), sb_gb * 4)
-    mpw = min(int(os.cpu_count() or 4), 32)
+    ncpu = max(1, int(vcpus if vcpus is not None else os.cpu_count() or 4))
+    mpw = min(ncpu, 128)
     # "async" removes the per-commit WAL fsync wait (synchronous_commit=off): the
     # OLTP score then reflects CPU/memory/lock scaling of the instance rather than
     # the provisioned disk's fsync latency, and is comparable across clouds. fsync
@@ -167,9 +167,9 @@ def pg_gucs(mem_gib: float, warehouses: int, durability: str = "durable") -> lis
     return args
 
 
-def _start_postgres(task, mem_gib: float, warehouses: int) -> docker.models.containers.Container:
+def _start_postgres(task, mem_gib: float, warehouses: int, vcpus: int) -> docker.models.containers.Container:
     d = docker.from_env(timeout=1800)
-    gucs = pg_gucs(mem_gib, warehouses, durability=getattr(task, "durability", "durable"))
+    gucs = pg_gucs(mem_gib, warehouses, durability=getattr(task, "durability", "durable"), vcpus=vcpus)
     cmd = [
         "postgres",
         "-c",
@@ -255,8 +255,13 @@ def _benchmark_env(task, db_host: str, params, mem_gib: float, db_vcpus: int, cl
     wl = WORKLOADS.get(task.workload_proxy, {})
     build_vus = min(params.build_vus, client_vcpus)
     durability = getattr(task, "durability", "durable")
-    wh_cap = max_profile_vus_by_warehouses(params.scale_units, db_vcpus)
-    profile_vus = concurrency_ladder(db_vcpus, wh_cap, durability)
+    profile_vus = multi_vm_profile_ladder(
+        db_vcpus,
+        params.scale_units,
+        task.tool,
+        task.workload_proxy,
+        durability,
+    )
     env = {
         "SC_DB_HOST": db_host,
         "SC_DB_PORT": "5432",
@@ -314,7 +319,7 @@ def run_multi_vm_task(
     pg_wh = max(1, int(params.schema_gib / WH_SIZE_GIB))
 
     try:
-        pg_container = _start_postgres(task, mem_gib, pg_wh)
+        pg_container = _start_postgres(task, mem_gib, pg_wh, vcpus)
         if task.tool == "benchbase":
             _ensure_database(pg_container, BENCHBASE_DB)
     except Exception as exc:

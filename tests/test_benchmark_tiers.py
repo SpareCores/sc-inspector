@@ -9,6 +9,8 @@ from benchmark_tiers import (  # noqa: E402
     companion_client_vcpus,
     concurrency_ladder,
     max_profile_vus_by_warehouses,
+    max_profile_vus_by_scalefactor,
+    multi_vm_profile_ladder,
     multi_vm_workload_params,
     profile_vu_upper_bound,
     workload_for_cache_tier,
@@ -92,6 +94,38 @@ def test_companion_client_sizing_matches_multi_vm_measurements():
     # F16 async/durable OLTP: ~6.5 client cores observed at 16 VUs → 8 vCPU floor.
     assert client_max_vcpus(16) == 16
     assert companion_client_vcpus(16, 16) == 8
+
+
+def test_companion_client_scales_down_on_small_db_host():
+    assert client_max_vcpus(1) == 1
+    assert companion_client_vcpus(1, 1) == 1
+
+
+def test_benchbase_read_heavy_profiles_from_scalefactor_not_warehouses():
+    params = multi_vm_workload_params("read_heavy", "benchbase", 1.0, 16, 125.0, "durable")
+    assert params.scale_units == 50
+    assert max_profile_vus_by_scalefactor(50) == 10
+    ladder = multi_vm_profile_ladder(16, params.scale_units, "benchbase", "read_heavy", "durable")
+    assert ladder == [1, 2, 4, 8, 10]
+
+
+def test_benchbase_crud_simple_f16_async_reaches_2x_vcpus():
+    params = multi_vm_workload_params("crud_simple", "benchbase", 1.0, 16, 125.0, "async")
+    ladder = multi_vm_profile_ladder(16, params.scale_units, "benchbase", "crud_simple", "async")
+    assert ladder == [1, 2, 4, 8, 16, 24, 32]
+
+
+def test_benchbase_small_host_scales_down():
+    params = multi_vm_workload_params("read_heavy", "benchbase", 1.0, 1, 4.0, "durable")
+    ladder = multi_vm_profile_ladder(1, params.scale_units, "benchbase", "read_heavy", "durable")
+    assert ladder == [1]
+
+
+def test_huge_host_benchbase_async_scales_to_2x_vcpus():
+    params = multi_vm_workload_params("crud_simple", "benchbase", 1.0, 1920, 32_000.0, "async")
+    ladder = multi_vm_profile_ladder(1920, params.scale_units, "benchbase", "crud_simple", "async")
+    assert max(ladder) == async_peak_vu_cap(1920)
+    assert 1920 in ladder
 
 
 def test_multi_vm_params_thread_durability():

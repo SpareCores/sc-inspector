@@ -73,6 +73,8 @@ def db_disk_options(vendor: str) -> dict[str, Any]:
     return opts
 
 
+# BenchBase: min scale units per terminal (matches benchmark-benchbase-postgres/benchmark.py).
+BENCHBASE_UNITS_PER_VU_MIN = 5
 # BenchBase wikipedia: ~8 GiB at scalefactor 50 (scratch calibration on F16-class hosts).
 WIKIPEDIA_GIB_PER_SF = 8.0 / 50
 # BenchBase ycsb: scalefactor * 1000 rows; default row layout is ~1 KiB.
@@ -173,6 +175,54 @@ def max_profile_vus_by_warehouses(warehouses: int, vcpus: int) -> int:
     return max(1, int(warehouses) // wh_per_vu_min(vcpus))
 
 
+def max_profile_vus_by_scalefactor(scalefactor: int) -> int:
+    """Upper terminal count allowed by BenchBase scale factor."""
+    return max(1, int(scalefactor) // BENCHBASE_UNITS_PER_VU_MIN)
+
+
+def profile_units_cap(
+    tool: str,
+    *,
+    hammerdb: str = "",
+    benchmark: str = "",
+    scale_units: int,
+    vcpus: int,
+) -> int:
+    """Workload-specific upper bound on profiling concurrency before vCPU/durability caps."""
+    scale_units = max(1, int(scale_units))
+    vcpus = max(1, int(vcpus))
+    if tool == "benchbase":
+        return max_profile_vus_by_scalefactor(scale_units)
+    if hammerdb == "tpch":
+        return max(1, scale_units // WH_PER_VU_MIN)
+    return max_profile_vus_by_warehouses(scale_units, vcpus)
+
+
+def multi_vm_profile_ladder(
+    vcpus: int,
+    scale_units: int,
+    tool: str,
+    workload_proxy: str,
+    durability: str = "durable",
+) -> list[int]:
+    wl = WORKLOADS[workload_proxy]
+    if tool == "hammerdb":
+        units_cap = profile_units_cap(
+            "hammerdb",
+            hammerdb=wl.get("hammerdb", "tpcc"),
+            scale_units=scale_units,
+            vcpus=vcpus,
+        )
+    else:
+        units_cap = profile_units_cap(
+            "benchbase",
+            benchmark=wl.get("benchmark", "wikipedia"),
+            scale_units=scale_units,
+            vcpus=vcpus,
+        )
+    return concurrency_ladder(vcpus, units_cap, durability)
+
+
 def concurrency_ladder(
     vcpus: int,
     max_by_warehouses: int,
@@ -219,14 +269,15 @@ def profile_vu_upper_bound(
 
 def client_max_vcpus(db_vcpus: int) -> int:
     """Companion CPU ceiling (never above the DB host)."""
-    db_vcpus = max(CLIENT_MIN_VCPUS, int(db_vcpus))
-    return min(CLIENT_ABSOLUTE_MAX_VCPUS, db_vcpus)
+    return min(CLIENT_ABSOLUTE_MAX_VCPUS, max(1, int(db_vcpus)))
 
 
 def companion_client_vcpus(build_vus: int, db_vcpus: int) -> int:
     """Companion CPU floor from DB host size and parallel build loaders."""
+    db_vcpus = max(1, int(db_vcpus))
     cap = client_max_vcpus(db_vcpus)
-    db_floor = max(CLIENT_MIN_VCPUS, (int(db_vcpus) + 1) // 2)
+    min_vcpus = min(CLIENT_MIN_VCPUS, db_vcpus)
+    db_floor = max(min_vcpus, (db_vcpus + 1) // 2)
     build_need = (int(build_vus) + 3) // 4
     return min(cap, max(db_floor, build_need))
 
@@ -322,7 +373,9 @@ def benchbase_cache_tier_feasible(
     benchmark = WORKLOADS[workload_proxy]["benchmark"]
     schema_gib = benchbase_schema_gib(benchmark, host_mem_gib, cache_ratio)
     disk_gib = schema_gib * DISK_SCHEMA_RATIO
-    peak_vus = profile_vu_upper_bound(int(host_vcpus), durability)
+    scale_units = benchbase_scalefactor(benchmark, host_mem_gib, cache_ratio)
+    units_cap = max_profile_vus_by_scalefactor(scale_units)
+    peak_vus = profile_vu_upper_bound(int(host_vcpus), durability, units_cap)
     if host_vcpus < 1 or host_mem_gib < 3:
         return False
     if schema_gib < 0.5:
@@ -387,7 +440,8 @@ def multi_vm_workload_params(
     benchmark = wl["benchmark"]
     schema_gib = benchbase_schema_gib(benchmark, mem_gib, cache_ratio)
     scale_units = benchbase_scalefactor(benchmark, mem_gib, cache_ratio)
-    peak_vus = profile_vu_upper_bound(vcpus, durability)
+    units_cap = max_profile_vus_by_scalefactor(scale_units)
+    peak_vus = profile_vu_upper_bound(vcpus, durability, units_cap)
     run_vus = min(peak_vus, peak_vu_cap(vcpus, durability))
     build_vus = min(vcpus, BUILD_VU_CAP)
     return MultiVmWorkloadParams(build_vus, run_vus, scale_units, schema_gib)
