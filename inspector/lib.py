@@ -176,8 +176,8 @@ class MultiVmDbTask(DockerTask):
     cache_tier: str = ""
     cache_ratio: float = 1.0
     tool: Literal["hammerdb", "benchbase"] = "hammerdb"
-    # "async" sets synchronous_commit=off (headline compute score, comparable across
-    # clouds); "durable" keeps synchronous_commit=on (disclosed, disk-dependent metric).
+    # "async" sets synchronous_commit=off for write-heavy headline scores (OLTP, ycsb);
+    # "durable" keeps synchronous_commit=on (default, or disclosed disk-dependent metric).
     durability: Literal["durable", "async"] = "durable"
 
     def client_requirements(self, srv):
