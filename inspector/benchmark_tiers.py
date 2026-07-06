@@ -25,6 +25,8 @@ HAMMERDB_CLIENT_VUS_PER_VCPU = 2
 HAMMERDB_CLIENT_MAX_VCPUS = 32
 # BenchBase light mixes (twitter, ycsb, …) can be client-bound on fast DBs; scale higher.
 BENCHBASE_CLIENT_MAX_VCPUS = 16
+TPCH_SCALE_FACTORS = (1, 10, 30, 100, 300, 1000, 3000, 10000, 30000, 100000)
+TPCH_GIB_PER_SF = 1.0
 
 WORKLOADS: dict[str, dict[str, Any]] = {
     "oltp_mixed": {"tool": "hammerdb", "hammerdb": "tpcc", "tiers": [1.0, 0.3]},
@@ -73,6 +75,14 @@ class ClientRequirements:
 
 def wh_per_vu_min(vcpus: int) -> int:
     return WH_PER_VU_MIN_LARGE if vcpus >= 16 else WH_PER_VU_MIN
+
+
+def tpch_scale_factor(cache_ratio: float, mem_gib: float) -> int:
+    """Largest HammerDB TPC-H scale factor that fits the cache-tier schema budget."""
+    schema_gib = BUFFER_FRAC * mem_gib / max(cache_ratio, 0.05)
+    target = schema_gib / TPCH_GIB_PER_SF
+    allowed = [sf for sf in TPCH_SCALE_FACTORS if sf <= max(target, 1)]
+    return max(allowed) if allowed else TPCH_SCALE_FACTORS[0]
 
 
 def profile_points(vcpus: int) -> list[int]:
@@ -225,8 +235,8 @@ def hammerdb_disk_gib_required(
     host_mem_gib: float,
 ) -> float:
     if hammerdb_workload == "tpch":
-        schema_gib = BUFFER_FRAC * host_mem_gib / cache_ratio
-        return schema_gib * DISK_SCHEMA_RATIO
+        sf = tpch_scale_factor(cache_ratio, host_mem_gib)
+        return sf * TPCH_GIB_PER_SF * DISK_SCHEMA_RATIO
     return workload_for_cache_tier(cache_ratio, host_vcpus, host_mem_gib).disk_gib
 
 
@@ -238,8 +248,8 @@ def hammerdb_cache_tier_feasible(
     host_disk_gib: float,
 ) -> bool:
     if hammerdb_workload == "tpch":
-        schema_gib = BUFFER_FRAC * host_mem_gib / cache_ratio
-        disk_gib = schema_gib * DISK_SCHEMA_RATIO
+        sf = tpch_scale_factor(cache_ratio, host_mem_gib)
+        disk_gib = sf * TPCH_GIB_PER_SF * DISK_SCHEMA_RATIO
         if host_vcpus < 1 or host_mem_gib < 3:
             return False
         return disk_gib <= host_disk_gib * DISK_USABLE_FRAC
@@ -257,10 +267,10 @@ def multi_vm_workload_params(
     if tool == "hammerdb":
         hammer = wl["hammerdb"]
         if hammer == "tpch":
-            schema_gib = BUFFER_FRAC * mem_gib / cache_ratio
-            scale_units = max(1, min(300, int(schema_gib)))
-            run_vus = min(vcpus, MAX_RUN_VUS)
-            build_vus = min(vcpus, BUILD_VU_CAP, scale_units)
+            scale_units = tpch_scale_factor(cache_ratio, mem_gib)
+            schema_gib = scale_units * TPCH_GIB_PER_SF
+            run_vus = min(vcpus, MAX_RUN_VUS, max(1, scale_units // WH_PER_VU_MIN))
+            build_vus = min(vcpus, BUILD_VU_CAP)
             return MultiVmWorkloadParams(build_vus, run_vus, scale_units, schema_gib)
         w = workload_for_cache_tier(cache_ratio, vcpus, mem_gib)
         return MultiVmWorkloadParams(w.build_vus, w.run_vus, w.warehouses, w.schema_gib)

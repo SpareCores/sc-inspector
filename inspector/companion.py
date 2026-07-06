@@ -63,8 +63,9 @@ def _benchmark_command(msg: RunBenchmark) -> tuple[list[str], list[str]]:
 
 
 def _docker_run(msg: RunBenchmark) -> BenchmarkResult:
-    env = dict(os.environ)
-    env.update(msg.env)
+    # Use only benchmark-specific env; passing host os.environ overwrites image PATH
+    # (e.g. BenchBase Java lives under /opt/java/openjdk/bin in the base image).
+    env = dict(msg.env)
     env.setdefault("TRACKER_PROJECT_NAME", "inspector")
     env.setdefault("TRACKER_JOB_NAME", msg.tracker_job_name)
     env.setdefault("TRACKER_EXTERNAL_RUN_ID", os.environ.get("GITHUB_RUN_ID", ""))
