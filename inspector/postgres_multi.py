@@ -17,7 +17,10 @@ from benchmark_tiers import (
     WH_SIZE_GIB,
     WORKLOADS,
     benchbase_scalefactor,
+    concurrency_ladder,
+    max_profile_vus_by_warehouses,
     multi_vm_workload_params,
+    wh_per_vu_min,
 )
 from companion_protocol import BenchmarkResult, Ping, Pong, RunBenchmark, Shutdown
 from lib import DOCKER_OPTS, Meta, container_remove
@@ -251,6 +254,9 @@ def _ensure_database(container, name: str) -> None:
 def _benchmark_env(task, db_host: str, params, mem_gib: float, db_vcpus: int, client_vcpus: int) -> dict[str, str]:
     wl = WORKLOADS.get(task.workload_proxy, {})
     build_vus = min(params.build_vus, client_vcpus)
+    durability = getattr(task, "durability", "durable")
+    wh_cap = max_profile_vus_by_warehouses(params.scale_units, db_vcpus)
+    profile_vus = concurrency_ladder(db_vcpus, wh_cap, durability)
     env = {
         "SC_DB_HOST": db_host,
         "SC_DB_PORT": "5432",
@@ -260,11 +266,13 @@ def _benchmark_env(task, db_host: str, params, mem_gib: float, db_vcpus: int, cl
         "SC_DB_VCPUS": str(db_vcpus),
         "SC_CLIENT_VCPUS": str(client_vcpus),
         "SC_CACHE_RATIO": str(task.cache_ratio),
-        "SC_DURABILITY": getattr(task, "durability", "durable"),
+        "SC_DURABILITY": durability,
         "SC_PROFILE": "1",
+        "SC_PROFILE_VUS": ",".join(str(v) for v in profile_vus),
         "SC_BUILD_VUS": str(build_vus),
         "SC_RUN_VUS": str(params.run_vus),
         "SC_WAREHOUSES": str(params.scale_units),
+        "SC_WH_PER_VU_MIN": str(wh_per_vu_min(db_vcpus)),
     }
     if task.tool == "hammerdb":
         env["SC_WORKLOAD"] = wl.get("hammerdb", "tpcc")
@@ -300,6 +308,7 @@ def run_multi_vm_task(
         task.cache_ratio,
         vcpus,
         mem_gib,
+        durability=getattr(task, "durability", "durable"),
     )
     db_host = _local_private_ip()
     pg_wh = max(1, int(params.schema_gib / WH_SIZE_GIB))
