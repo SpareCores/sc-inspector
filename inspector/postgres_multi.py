@@ -28,6 +28,7 @@ PG_IMAGE = "ghcr.io/sparecores/benchmark-postgres-server:main"
 PG_USER = "postgres"
 PG_PASSWORD = "postgres"
 PG_DB = "bench"
+BENCHBASE_DB = "benchbase"
 
 
 class CompanionSession:
@@ -217,6 +218,29 @@ def _wait_pg_ready(container, timeout: int = 120) -> None:
     raise TimeoutError(f"postgres did not become ready: {last_err}")
 
 
+def _ensure_database(container, name: str) -> None:
+    proc = container.exec_run(
+        [
+            "psql",
+            "-U",
+            PG_USER,
+            "-d",
+            PG_DB,
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            f"CREATE DATABASE {name}",
+        ],
+        environment={"PGPASSWORD": PG_PASSWORD},
+    )
+    if proc.exit_code == 0:
+        return
+    out = proc.output.decode("utf-8", errors="replace") if proc.output else ""
+    if "already exists" in out.lower():
+        return
+    raise RuntimeError(f"CREATE DATABASE {name} failed: {out}")
+
+
 def _benchmark_env(task, db_host: str, params, mem_gib: float, db_vcpus: int, client_vcpus: int) -> dict[str, str]:
     wl = WORKLOADS.get(task.workload_proxy, {})
     build_vus = min(params.build_vus, client_vcpus)
@@ -274,6 +298,8 @@ def run_multi_vm_task(
 
     try:
         pg_container = _start_postgres(task, mem_gib, pg_wh)
+        if task.tool == "benchbase":
+            _ensure_database(pg_container, BENCHBASE_DB)
     except Exception as exc:
         meta.error_msg = f"postgres start failed: {exc}"
         meta.end = datetime.now()
