@@ -83,7 +83,7 @@ def _task(cache_tier: str = "c100"):
 
 
 @patch("dbaas_start._try_provision_dbaas_stack")
-@patch("dbaas_start.check_dbaas_vm_quota")
+@patch("dbaas_start.filter_clients_by_vm_quota")
 @patch("dbaas_start.rank_client_instances")
 @patch("dbaas_start.check_dbaas_postgres_quota", return_value=(True, ""))
 @patch("dbaas_start.candidate_regions", return_value=["northeurope"])
@@ -100,7 +100,7 @@ def test_try_start_tries_next_client_after_vm_quota_skip(
     _mock_regions,
     _mock_pg_quota,
     mock_rank,
-    mock_vm_quota,
+    mock_filter,
     mock_provision,
 ):
     mock_target_stub.return_value = SimpleNamespace(
@@ -110,7 +110,7 @@ def test_try_start_tries_next_client_after_vm_quota_skip(
     )
     clients = [_client("Standard_B8als_v2"), _client("Standard_D4s_v3")]
     mock_rank.return_value = clients
-    mock_vm_quota.side_effect = [(False, "restricted"), (True, "")]
+    mock_filter.return_value = [_client("Standard_D4s_v3")]
     mock_provision.return_value = True
 
     started = try_start_dbaas_inspect(
@@ -137,7 +137,7 @@ def test_try_start_tries_next_client_after_vm_quota_skip(
 
 
 @patch("dbaas_start._try_provision_dbaas_stack")
-@patch("dbaas_start.check_dbaas_vm_quota", return_value=(True, ""))
+@patch("dbaas_start.filter_clients_by_vm_quota")
 @patch("dbaas_start.rank_client_instances")
 @patch("dbaas_start.check_dbaas_postgres_quota", return_value=(True, ""))
 @patch("dbaas_start.candidate_regions", return_value=["northeurope"])
@@ -151,7 +151,7 @@ def test_try_start_tries_next_client_after_create_failure(
     _mock_regions,
     _mock_pg_quota,
     mock_rank,
-    _mock_vm_quota,
+    mock_filter,
     mock_provision,
 ):
     mock_target_stub.return_value = SimpleNamespace(
@@ -161,6 +161,7 @@ def test_try_start_tries_next_client_after_create_failure(
     )
     clients = [_client("Standard_B8als_v2"), _client("Standard_D4s_v3")]
     mock_rank.return_value = clients
+    mock_filter.side_effect = lambda _vendor, _region, ranked: ranked
     mock_provision.side_effect = [False, True]
 
     started = try_start_dbaas_inspect(

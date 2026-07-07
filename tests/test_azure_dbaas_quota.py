@@ -188,15 +188,13 @@ def test_check_azure_postgres_region_offer_restricted(mock_caps):
 
 
 @patch("azure_dbaas_quota._catalog_server_family", side_effect=_mock_catalog)
-@patch(
-    "azure_dbaas_quota._compute_sku_info",
-    return_value=ComputeSkuInfo(
+@patch("azure_dbaas_quota._compute_sku_info")
+@patch("azure_dbaas_quota._vm_quotas")
+def test_check_azure_client_vm_region_sku_restricted(mock_vm_q, mock_sku_info, _mock_catalog):
+    mock_sku_info.return_value = ComputeSkuInfo(
         family="standardBasv2Family",
         restrictions=[{"reasonCode": "NotAvailableForSubscription"}],
-    ),
-)
-@patch("azure_dbaas_quota._vm_quotas")
-def test_check_azure_client_vm_region_sku_restricted(mock_vm_q, _mock_sku_info, _mock_catalog):
+    )
     mock_vm_q.return_value = {
         "cores": QuotaEntry("cores", 0, 64),
         "standardBasv2Family": QuotaEntry("standardBasv2Family", 0, 64),
@@ -209,6 +207,43 @@ def test_check_azure_client_vm_region_sku_restricted(mock_vm_q, _mock_sku_info, 
     )
     assert not ok
     assert "Standard_B8als_v2" in reason
+
+
+def test_filter_clients_by_vm_quota_uses_region_index():
+    from types import SimpleNamespace
+
+    clients = [
+        SimpleNamespace(api_reference="Standard_B8als_v2", vcpus=8),
+        SimpleNamespace(api_reference="Standard_D4s_v3", vcpus=4),
+    ]
+    sku_index = {
+        "Standard_B8als_v2": ComputeSkuInfo(
+            family="standardBasv2Family",
+            restrictions=[{"reasonCode": "NotAvailableForSubscription"}],
+        ),
+        "Standard_D4s_v3": ComputeSkuInfo(family="standardDSv3Family", restrictions=[]),
+    }
+    vm_quotas = {
+        "cores": QuotaEntry("cores", 0, 64),
+        "standardBasv2Family": QuotaEntry("standardBasv2Family", 0, 64),
+        "standardDSv3Family": QuotaEntry("standardDSv3Family", 0, 64),
+    }
+
+    with patch("azure_dbaas_quota._subscription_id", return_value="sub"), patch(
+        "azure_dbaas_quota._vm_quotas",
+        return_value=vm_quotas,
+    ), patch(
+        "azure_dbaas_quota._region_compute_sku_index",
+        return_value=sku_index,
+    ), patch(
+        "azure_dbaas_quota._catalog_server_family",
+        side_effect=_mock_catalog,
+    ):
+        from azure_dbaas_quota import filter_clients_by_vm_quota
+
+        eligible = filter_clients_by_vm_quota("azure", "northeurope", clients)
+
+    assert [c.api_reference for c in eligible] == ["Standard_D4s_v3"]
 
 
 if __name__ == "__main__":
@@ -224,6 +259,7 @@ if __name__ == "__main__":
         test_check_azure_dbaas_region_offer_restricted,
         test_check_azure_postgres_region_offer_restricted,
         test_check_azure_client_vm_region_sku_restricted,
+        test_filter_clients_by_vm_quota_uses_region_index,
     ]
     for fn in tests:
         fn()

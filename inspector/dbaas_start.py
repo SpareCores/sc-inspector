@@ -9,7 +9,7 @@ import os
 import threading
 from datetime import timedelta
 
-from azure_dbaas_quota import check_dbaas_postgres_quota, check_dbaas_vm_quota
+from azure_dbaas_quota import check_dbaas_postgres_quota, filter_clients_by_vm_quota
 from benchmark_tiers import merge_client_requirements
 from companion_picker import rank_client_instances
 from dbaas_catalog import ManagedDbTarget
@@ -263,25 +263,12 @@ def try_start_dbaas_inspect(
             if not clients:
                 logging.info("No DBaaS client for %s/%s", vendor, region)
                 continue
+            clients = filter_clients_by_vm_quota(vendor, region, clients)
+            if not clients:
+                continue
             zone = None
 
             for client in clients:
-                vm_ok, vm_reason = check_dbaas_vm_quota(
-                    vendor,
-                    region,
-                    client.api_reference,
-                    int(client.vcpus),
-                )
-                if not vm_ok:
-                    logging.info(
-                        "Skipping DBaaS client %s in %s/%s: %s",
-                        client.api_reference,
-                        vendor,
-                        region,
-                        vm_reason,
-                    )
-                    continue
-
                 if _try_provision_dbaas_stack(
                     vendor,
                     target,

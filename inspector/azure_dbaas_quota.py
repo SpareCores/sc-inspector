@@ -100,6 +100,27 @@ def _arm_get(url: str, *, params: dict[str, str] | None = None) -> dict[str, Any
     return response.json()
 
 
+def _arm_get_url(url: str) -> dict[str, Any]:
+    token = _credential().get_token("https://management.azure.com/.default")
+    response = requests.get(
+        url,
+        headers={"Authorization": f"Bearer {token.token}"},
+        timeout=60,
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def _parse_compute_sku_item(item: dict[str, Any]) -> ComputeSkuInfo | None:
+    name = item.get("name")
+    if not name:
+        return None
+    return ComputeSkuInfo(
+        family=item.get("family"),
+        restrictions=list(item.get("restrictions") or []),
+    )
+
+
 def _parse_quota_entries(payload: dict[str, Any]) -> dict[str, QuotaEntry]:
     out: dict[str, QuotaEntry] = {}
     for item in payload.get("value", []):
@@ -197,12 +218,39 @@ def _vm_quotas(subscription_id: str, region: str) -> dict[str, QuotaEntry]:
     return _parse_quota_entries(_arm_get(url, params={"api-version": COMPUTE_USAGES_API}))
 
 
+@lru_cache(maxsize=64)
+def _region_compute_sku_index(
+    subscription_id: str,
+    region: str,
+) -> dict[str, ComputeSkuInfo]:
+    """All virtualMachines SKUs in a region (one paginated ARM list, cached)."""
+    url = f"{ARM_BASE}/subscriptions/{subscription_id}/providers/Microsoft.Compute/skus"
+    filt = f"location eq '{region}' and resourceType eq 'virtualMachines'"
+    params = {"api-version": COMPUTE_SKUS_API, "$filter": filt}
+    index: dict[str, ComputeSkuInfo] = {}
+    next_url: str | None = url
+    while next_url:
+        payload = _arm_get(next_url, params=params if next_url == url else None)
+        params = None
+        for item in payload.get("value", []):
+            parsed = _parse_compute_sku_item(item)
+            if parsed is not None:
+                index[item["name"]] = parsed
+        next_url = payload.get("nextLink")
+        if next_url:
+            next_url = str(next_url)
+    return index
+
+
 @lru_cache(maxsize=256)
 def _compute_sku_info(
     subscription_id: str,
     region: str,
     sku: str,
 ) -> ComputeSkuInfo:
+    index = _region_compute_sku_index(subscription_id, region)
+    if sku in index:
+        return index[sku]
     url = f"{ARM_BASE}/subscriptions/{subscription_id}/providers/Microsoft.Compute/skus"
     filt = f"location eq '{region}' and name eq '{sku}'"
     payload = _arm_get(
@@ -212,8 +260,11 @@ def _compute_sku_info(
     family: str | None = None
     restrictions: list[dict[str, Any]] = []
     for item in payload.get("value", []):
-        family = item.get("family") or family
-        restrictions.extend(item.get("restrictions") or [])
+        parsed = _parse_compute_sku_item(item)
+        if parsed is None:
+            continue
+        family = parsed.family or family
+        restrictions.extend(parsed.restrictions)
     return ComputeSkuInfo(family=family, restrictions=restrictions)
 
 
@@ -272,6 +323,47 @@ def check_azure_postgres_region(
         return True, ""
 
 
+def _evaluate_client_vm_quota(
+    region: str,
+    *,
+    vm_sku: str,
+    vm_vcpus: int,
+    subscription_id: str,
+    vm_quotas: dict[str, QuotaEntry] | None = None,
+    sku_info: ComputeSkuInfo | None = None,
+    sku_index: dict[str, ComputeSkuInfo] | None = None,
+) -> tuple[bool, str]:
+    if sku_index is not None:
+        sku_info = sku_index.get(vm_sku)
+        if sku_info is None:
+            return False, f"client vm SKU {vm_sku} not offered in {region}"
+    elif sku_info is None:
+        sku_info = _compute_sku_info(subscription_id, region, vm_sku)
+    vm_family = sku_family_quota_name(
+        vm_sku,
+        subscription_id=subscription_id,
+        region=region,
+    ) or sku_info.family
+    quotas = vm_quotas if vm_quotas is not None else _vm_quotas(subscription_id, region)
+    ok, reason = _quota_headroom(
+        quotas,
+        label="client vm",
+        family=vm_family,
+        vcpus=vm_vcpus,
+    )
+    if not ok:
+        return False, reason
+    if sku_info.restrictions:
+        codes = sorted(
+            {
+                str(r.get("reasonCode") or r.get("type") or "restricted")
+                for r in sku_info.restrictions
+            }
+        )
+        return False, f"client vm SKU {vm_sku} restricted in {region}: {', '.join(codes)}"
+    return True, ""
+
+
 def check_azure_client_vm_region(
     region: str,
     *,
@@ -286,29 +378,12 @@ def check_azure_client_vm_region(
         return True, ""
 
     try:
-        sku_info = _compute_sku_info(sub, region, vm_sku)
-        vm_family = sku_family_quota_name(
-            vm_sku,
+        return _evaluate_client_vm_quota(
+            region,
+            vm_sku=vm_sku,
+            vm_vcpus=vm_vcpus,
             subscription_id=sub,
-            region=region,
-        ) or sku_info.family
-        ok, reason = _quota_headroom(
-            _vm_quotas(sub, region),
-            label="client vm",
-            family=vm_family,
-            vcpus=vm_vcpus,
         )
-        if not ok:
-            return False, reason
-
-        if sku_info.restrictions:
-            codes = sorted(
-                {
-                    str(r.get("reasonCode") or r.get("type") or "restricted")
-                    for r in sku_info.restrictions
-                }
-            )
-            return False, f"client vm SKU {vm_sku} restricted in {region}: {', '.join(codes)}"
     except requests.HTTPError as exc:
         logging.warning("DBaaS VM quota check failed for %s/%s: %s", region, vm_sku, exc)
         return True, ""
@@ -359,6 +434,46 @@ def check_dbaas_postgres_quota(
         pg_sku=pg_sku,
         pg_vcpus=pg_vcpus,
     )
+
+
+def filter_clients_by_vm_quota(vendor: str, region: str, clients) -> list:
+    """Return ranked clients that pass VM quota and SKU restriction checks."""
+    if _skip_quota_check() or vendor != "azure" or not clients:
+        return list(clients)
+    sub = _subscription_id()
+    if not sub:
+        return list(clients)
+    try:
+        vm_quotas = _vm_quotas(sub, region)
+        sku_index = _region_compute_sku_index(sub, region)
+        eligible = []
+        for client in clients:
+            sku = client.api_reference
+            ok, reason = _evaluate_client_vm_quota(
+                region,
+                vm_sku=sku,
+                vm_vcpus=int(client.vcpus),
+                subscription_id=sub,
+                vm_quotas=vm_quotas,
+                sku_index=sku_index,
+            )
+            if ok:
+                eligible.append(client)
+            else:
+                logging.info(
+                    "Skipping DBaaS client %s in %s/%s: %s",
+                    sku,
+                    vendor,
+                    region,
+                    reason,
+                )
+        return eligible
+    except requests.HTTPError as exc:
+        logging.warning("DBaaS VM quota batch check failed for %s: %s", region, exc)
+        return list(clients)
+    except Exception as exc:
+        logging.warning("DBaaS VM quota batch check failed for %s: %s", region, exc)
+        return list(clients)
 
 
 def check_dbaas_vm_quota(
