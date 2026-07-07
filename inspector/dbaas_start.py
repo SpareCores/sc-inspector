@@ -84,7 +84,7 @@ def _dbaas_user_data_replacements(
             "SC_PROVISION_ZONE": zone or "",
             "SC_PROVISION_NETWORK_MODE": "private_vnet",
             "SC_PROVISION_CACHE_TIER": provision["cache_tier"],
-            "SC_PROVISION_STACK_SLUG": slug,
+            "SC_PROVISION_STACK_SLUG": stack_slug(target, provision["cache_tier"]),
             "SC_PROVISION_SYNC_COMMIT_SETTABLE": "",
             "USER_DATA_TEMPLATE": USER_DATA,
         }

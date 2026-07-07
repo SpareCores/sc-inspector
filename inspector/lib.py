@@ -411,6 +411,8 @@ def _task_matches_target_for_start(task: Task, target, data_dir: str | os.PathLi
 
 
 def _task_matches_server_for_start(task: Task, srv, data_dir: str | os.PathLike) -> bool:
+    if isinstance(task, DbaasDbTask):
+        return False
     if task.gpu and not srv.gpu_count:
         return False
     if srv.memory_amount < task.minimum_memory * 1024:
@@ -498,6 +500,8 @@ def reconcile_stale_start_retries(vendor: str, data_dir: str | os.PathLike, srv)
 
 def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
     """Return True if we should start a server for this task."""
+    if isinstance(task, DbaasDbTask):
+        return False
     if task.start_with_instance or task.always_run:
         logging.info(f"Skipping task {task.name}, does not trigger an instance start on its own")
         return False
@@ -630,6 +634,8 @@ def _task_resource_checks(
 
 def should_run(task: Task, data_dir: str | os.PathLike, vendor: str, instance: str, gpu_count: float) -> bool:
     """Return True if we should run a task."""
+    if isinstance(task, DbaasDbTask) and os.environ.get("TOPOLOGY") != "dbaas":
+        return False
     import psutil  # lazy load
 
     mem_bytes = psutil.virtual_memory().available
@@ -1079,6 +1085,8 @@ def tasks_to_start(vendor: str, data_dir: str | os.PathLike, srv) -> list[Task]:
     for task in get_tasks(vendor):
         if id(task) in started:
             continue
+        if isinstance(task, DbaasDbTask):
+            continue
         if task.always_run:
             logging.info(f"Adding {task.name} (always_run) for co-start")
             tasks.append(task)
@@ -1350,7 +1358,8 @@ def finalize_task_metas(
 def _applicable_tasks(vendor: str, server: str):
     return [
         task for task in get_tasks(vendor)
-        if not (task.servers_only and (vendor, server) not in task.servers_only)
+        if not isinstance(task, DbaasDbTask)
+        and not (task.servers_only and (vendor, server) not in task.servers_only)
         and not (task.servers_exclude and (vendor, server) in task.servers_exclude)
     ]
 
