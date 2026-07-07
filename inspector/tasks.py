@@ -219,8 +219,7 @@ benchbase_postgres_multi_crud_simple_c100 = MultiVmDbTask(
     timeout=timedelta(minutes=60),
 )
 
-# TPCH schema build (SF~30 on F16) can consume most of a 90m window before profiling;
-# companion kills the client container at task timeout (exit 137).
+# TPCH: parallel build (pg_num_tpch_threads) + query profiling; 120m budget on F16-class hosts.
 hammerdb_postgres_multi_olap_c100 = MultiVmDbTask(
     parallel=False,
     priority=1.4,
@@ -231,7 +230,7 @@ hammerdb_postgres_multi_olap_c100 = MultiVmDbTask(
     cache_tier="c100",
     cache_ratio=1.0,
     image="ghcr.io/sparecores/benchmark-hammerdb-postgres:main",
-    timeout=timedelta(minutes=180),
+    timeout=timedelta(minutes=120),
 )
 
 # We use this benchmark to determine the "SCore" of a given instance. This should represent the relative
