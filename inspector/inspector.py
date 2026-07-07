@@ -412,7 +412,7 @@ def start(ctx, exclude, start_only, vendor):
         f = executor.submit(lib.start_inspect, executor, lock, data_dir, vnd, server, tasks, srv_data, regions, zones, zone_to_region)
         futures[f] = (vnd, server)
         count += 1
-        limit = 8 if vnd in {"alicloud", "aws", "upcloud", "vultr", "azure"} else 1
+        limit = 8 if vnd in {"alicloud", "aws", "upcloud", "vultr", "azure", "gcp"} else 1
         if count == limit:
             break
     for f in concurrent.futures.as_completed(futures):
