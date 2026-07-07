@@ -30,6 +30,7 @@ def test_provision_spec_c100_c30():
     assert c100["storage_gib"] == 128
     assert c30["storage_gib"] == 251
     assert c100["iops_tier"] == "P30"
+    assert c30["iops_tier"] == "P20"
 
 
 def test_async_tasks_skipped_on_azure_target():
