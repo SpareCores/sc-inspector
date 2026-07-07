@@ -501,18 +501,22 @@ def start_dbaas(ctx, vendor, instance_key):
                 zone_to_region,
             )
         ] = (vnd, key)
+    error_occurred = False
     for f in concurrent.futures.as_completed(futures):
         vnd, key = futures[f]
         try:
             f.result()
         except Exception:
             logging.exception("DBaaS start failed for %s/%s", vnd, key)
+            error_occurred = True
     executor.shutdown(wait=False)
     lib.thread_monitor(executor)
     repo.push_path(
         os.path.join(ctx.parent.params["repo_path"], "dbaas"),
         f"DBaaS start finished {repo.gha_url()}",
     )
+    if error_occurred:
+        raise RuntimeError("DBaaS start failed for one or more targets")
 
 
 @cli.command("cleanup-dbaas")

@@ -7,6 +7,7 @@ import copy
 import logging
 import os
 import threading
+from datetime import timedelta
 
 from benchmark_tiers import merge_client_requirements
 from companion_picker import pick_client_instance
@@ -244,7 +245,9 @@ def start_dbaas_inspect(
 
     error_msgs = []
     instance_timing = InstanceCreationTiming()
-    sum_timeout = sum(t.timeout for t in tasks)
+    sum_timeout = timedelta()
+    for task in tasks:
+        sum_timeout += task.timeout
     with lock:
         repo.pull()
         for task in tasks:
