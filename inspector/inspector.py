@@ -455,6 +455,88 @@ def start(ctx, exclude, start_only, vendor):
         raise exception
 
 
+@cli.command("start-dbaas")
+@click.pass_context
+@click.option("--vendor", type=str, default="azure", help="Only start DBaaS targets for the specified vendor")
+@click.option(
+    "--instance-key",
+    type=str,
+    default=None,
+    help="Only start this managed DB instance key (e.g. Standard_E16ds_v5/postgres/18/standalone)",
+)
+def start_dbaas(ctx, vendor, instance_key):
+    """Start managed Postgres benchmark stacks (DBaaS PoC)."""
+    from dbaas_catalog import available_managed_dbs
+    from dbaas_selector import dbaas_data_dir
+    from dbaas_start import start_dbaas_inspect
+    import concurrent.futures
+    import threading
+    import traceback
+
+    threading.current_thread().name = "main"
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+    lock = threading.Lock()
+    futures = {}
+    for (vnd, key), (target, regions, zones, zone_to_region) in available_managed_dbs(
+        vendor=vendor
+    ).items():
+        if instance_key and key != instance_key:
+            continue
+        data_dir = dbaas_data_dir(ctx.parent.params["repo_path"], vnd, key)
+        tasks = lib.tasks_to_start_dbaas(vnd, data_dir, target)
+        if not tasks:
+            logging.info("No DBaaS tasks for %s/%s", vnd, key)
+            continue
+        futures[
+            executor.submit(
+                start_dbaas_inspect,
+                executor,
+                lock,
+                data_dir,
+                vnd,
+                target,
+                tasks,
+                regions,
+                zones,
+                zone_to_region,
+            )
+        ] = (vnd, key)
+    for f in concurrent.futures.as_completed(futures):
+        vnd, key = futures[f]
+        try:
+            f.result()
+        except Exception:
+            logging.exception("DBaaS start failed for %s/%s", vnd, key)
+    executor.shutdown(wait=False)
+    lib.thread_monitor(executor)
+    repo.push_path(
+        os.path.join(ctx.parent.params["repo_path"], "dbaas"),
+        f"DBaaS start finished {repo.gha_url()}",
+    )
+
+
+@cli.command("cleanup-dbaas")
+@click.pass_context
+@click.option("--threads", type=int, default=32, show_default=True)
+@click.option("--vendor", type=str, default=None, help="Vendor to clean up DBaaS stacks for")
+def cleanup_dbaas(ctx, threads, vendor):
+    """S3 run-record driven cleanup for DBaaS stacks."""
+    from sc_runner.resources import supported_vendors
+
+    repo_path = ctx.parent.params["repo_path"]
+    catalog = _dbaas_catalog_for_cleanup(vendor, os.path.join(repo_path, "dbaas"))
+    catalog = {k: v for k, v in catalog.items() if k[0] in supported_vendors}
+    records = _dbaas_run_records_for_catalog(catalog)
+    if not records:
+        logging.info("No completed DBaaS run records for catalog%s", f" vendor={vendor}" if vendor else "")
+        return
+    try:
+        _run_dbaas_s3_cleanup(repo_path, records, threads=threads)
+    except Exception:
+        logging.exception("DBaaS cleanup failed")
+        raise
+
+
 def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
     """
     Some vendors support creating resources in regions, without explicitly specifying the zone, some don't,
@@ -592,6 +674,8 @@ def stack_key_for_record(record) -> tuple:
 
 def _resource_opts_for_record(vendor: str, record) -> dict:
     resource_opts = {"instance": record.instance}
+    if getattr(record, "topology", "") == "dbaas" and getattr(record, "dbaas_slug", ""):
+        resource_opts["dbaas_slug"] = record.dbaas_slug
     if vendor == "gcp":
         if not record.zone:
             raise RuntimeError(f"missing zone for GCP cleanup ({record.key})")
@@ -601,6 +685,74 @@ def _resource_opts_for_record(vendor: str, record) -> dict:
             raise RuntimeError(f"missing region for cleanup ({record.key})")
         resource_opts["region"] = record.region
     return resource_opts
+
+
+def _dbaas_catalog_for_cleanup(
+    vendor: str | None,
+    repo_dbaas: str,
+    *,
+    lookback_mins: int | None = None,
+    data_only: bool = False,
+    require_scan: bool = False,
+) -> dict:
+    from dbaas_catalog import available_managed_dbs
+
+    catalog = available_managed_dbs(vendor=vendor)
+    if not require_scan:
+        return catalog
+    return {
+        k: v
+        for k, v in catalog.items()
+        if lib.should_scan_dbaas_for_cleanup(
+            repo_dbaas, k[0], k[1], lookback_mins=lookback_mins, data_only=data_only
+        )
+    }
+
+
+def _dbaas_run_records_for_catalog(catalog: dict) -> list:
+    import s3_runs
+
+    if not catalog:
+        return []
+    catalog_keys = set(catalog)
+    records = []
+    for vnd in {k[0] for k in catalog_keys}:
+        for record in s3_runs.list_completed_runs(vendor=vnd):
+            if record.topology != "dbaas":
+                continue
+            if (record.vendor, record.instance_key) not in catalog_keys:
+                continue
+            records.append(record)
+    return records
+
+
+def _run_dbaas_s3_cleanup(repo_path: str, records: list, *, threads: int) -> None:
+    import concurrent.futures
+
+    if not records:
+        return
+    groups: dict[tuple, list] = {}
+    for record in records:
+        groups.setdefault(stack_key_for_record(record), []).append(record)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
+        futures = []
+        for _key, group_records in groups.items():
+            record = group_records[0]
+            data_dir = None
+            if record.instance_key:
+                data_dir = os.path.join(
+                    repo_path, "dbaas", record.vendor, record.instance_key
+                )
+            futures.append(
+                executor.submit(
+                    cleanup_s3_stack,
+                    record.vendor,
+                    group_records,
+                    data_dir=data_dir,
+                )
+            )
+        for future in concurrent.futures.as_completed(futures):
+            future.result()
 
 
 def cleanup_s3_stack(vendor: str, records: list, *, data_dir: str | None = None) -> None:
@@ -766,6 +918,26 @@ def cleanup_sweep(ctx, threads, force, all_regions, lookback_mins, data_only, ve
         if error_occurred:
             raise Exception("Errors occurred during cleanup")
 
+    repo_path = ctx.parent.params["repo_path"]
+    repo_dbaas = os.path.join(repo_path, "dbaas")
+    dbaas_catalog = _dbaas_catalog_for_cleanup(
+        vendor,
+        repo_dbaas,
+        lookback_mins=lookback_mins,
+        data_only=data_only,
+        require_scan=True,
+    )
+    dbaas_catalog = {k: v for k, v in dbaas_catalog.items() if k[0] in supported_vendors}
+    try:
+        _run_dbaas_s3_cleanup(
+            repo_path,
+            _dbaas_run_records_for_catalog(dbaas_catalog),
+            threads=threads,
+        )
+    except Exception:
+        logging.exception("DBaaS cleanup sweep failed")
+        raise
+
 
 @cli.command()
 @click.pass_context
@@ -857,7 +1029,12 @@ def parse(ctx):
 @click.option("--instance", required=True, help="Instance ID for this machine")
 @click.option("--gpu-count", default=0.0, type=float, help="Number of GPUs")
 @click.option("--threads", default=8, show_default=True, help="Parallelism in a given task group")
-def inspect(ctx, vendor, instance, gpu_count, threads):
+@click.option(
+    "--dbaas-instance-key",
+    default=None,
+    help="Managed DB instance key for DBaaS sparse checkout (under dbaas/<vendor>/)",
+)
+def inspect(ctx, vendor, instance, gpu_count, threads, dbaas_instance_key):
     """Run inspection on this machine."""
     # Disable OOM killer for this task as Linux tends to kill this instead of benchmarks, like bw_mem
     pid = os.getpid()
@@ -870,9 +1047,15 @@ def inspect(ctx, vendor, instance, gpu_count, threads):
 
     logging.info("Updating the git repo")
     # we must clone the repo before writing anything to it
-    sparse = (f"data/{vendor}/{instance}",)
+    if dbaas_instance_key:
+        sparse = (f"dbaas/{vendor}/{dbaas_instance_key}",)
+        data_dir = os.path.join(
+            ctx.parent.params["repo_path"], "dbaas", vendor, dbaas_instance_key
+        )
+    else:
+        sparse = (f"data/{vendor}/{instance}",)
+        data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, instance)
     repo.get_repo(sparse_paths=sparse)
-    data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, instance)
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
     lib.record_timing_inspector_start(data_dir)
@@ -880,6 +1063,10 @@ def inspect(ctx, vendor, instance, gpu_count, threads):
         repo.push_path(lib.timing_dir(data_dir), f"Inspector started from {repo.gha_url()}")
     except Exception:
         logging.exception("Failed to push inspector timing")
+    if dbaas_instance_key:
+        from postgres_dbaas import wait_db_ready
+
+        wait_db_ready()
     try:
         lib.run_tasks(
             vendor,

@@ -232,6 +232,72 @@ class MultiVmDbTask(DockerTask):
         )
 
 
+class DbaasDbTask(DockerTask):
+    """Postgres benchmarks against a vendor-managed database (priority band 1.x)."""
+
+    MULTI_VM_PRIORITY_BAND: ClassVar[int] = 1
+    command: str | list | None = None
+    topology: Literal["dbaas"] = "dbaas"
+    benchmark_family: str = ""
+    workload_proxy: str = ""
+    cache_tier: str = ""
+    cache_ratio: float = 1.0
+    tool: Literal["hammerdb", "benchbase"] = "hammerdb"
+    durability: Literal["durable", "async"] = "durable"
+    dbaas_only: set[tuple[str, str]] = set()
+
+    def client_requirements(self, target):
+        from benchmark_tiers import benchbase_client_req, hammerdb_client_req
+
+        if self.tool == "hammerdb":
+            return hammerdb_client_req(target, self.cache_ratio)
+        return benchbase_client_req(target, self.workload_proxy, self.cache_ratio)
+
+    def disk_gib_required(self, target) -> float:
+        from dbaas_tiers import provision_spec
+
+        return float(provision_spec(target, self.cache_tier)["disk_gib_required"])
+
+    def feasible_on(self, vcpus: float, mem_gib: float, disk_gib: float | None) -> bool:
+        from benchmark_tiers import (
+            WORKLOADS,
+            benchbase_cache_tier_feasible,
+            hammerdb_cache_tier_feasible,
+        )
+
+        wl = WORKLOADS.get(self.workload_proxy, {})
+        if self.tool == "benchbase":
+            return benchbase_cache_tier_feasible(
+                self.workload_proxy,
+                self.cache_ratio,
+                vcpus,
+                mem_gib,
+                disk_gib or 0,
+                durability=self.durability,
+            )
+        return hammerdb_cache_tier_feasible(
+            wl.get("hammerdb", "tpcc"),
+            self.cache_ratio,
+            vcpus,
+            mem_gib,
+            disk_gib or 0,
+            durability=self.durability,
+        )
+
+    def supported_on_target(self, target) -> bool:
+        """False when this task's durability mode is unavailable on the managed DB."""
+        if self.durability == "async" and target.sync_commit_session_settable is False:
+            return False
+        return True
+
+    def supported_on_runtime(self) -> bool:
+        """False when precheck/env shows async durability is unavailable."""
+        if self.durability != "async":
+            return True
+        raw = os.environ.get("SC_PROVISION_SYNC_COMMIT_SETTABLE", "").strip().lower()
+        return raw != "false"
+
+
 def _vllm_image_label(image: str) -> str:
     """Short label for logs (image name without registry/tag)."""
     name = image.rsplit("/", 1)[-1]
@@ -303,6 +369,13 @@ def get_taskgroups(vendor: str) -> dict[tuple[float, bool], list[Task]]:
             if vendor in task.vendors_only or not task.vendors_only:
                 # execute parallel tasks first by negating the parallel option, so it gets forward during sorting
                 taskgroups[(task.priority, not task.parallel)].append(task)
+    import dbaas_tasks as dbaas_tasks_mod
+
+    for name, task in inspect.getmembers(dbaas_tasks_mod):
+        if isinstance(task, DbaasDbTask):
+            task.name = name.lower()
+            if vendor in task.vendors_only or not task.vendors_only:
+                taskgroups[(task.priority, not task.parallel)].append(task)
     return taskgroups
 
 
@@ -315,6 +388,26 @@ def get_tasks(vendor: str) -> list[Task]:
 def _server_in_servers_only(servers_only, vendor, instance, data_dir=None):
     """Check if (vendor, instance) is in servers_only."""
     return (vendor, instance) in servers_only
+
+
+def _target_in_dbaas_only(dbaas_only, vendor, instance_key):
+    return (vendor, instance_key) in dbaas_only
+
+
+def _task_matches_target_for_start(task: Task, target, data_dir: str | os.PathLike) -> bool:
+    if target.memory_gib < task.minimum_memory:
+        return False
+    if isinstance(task, DbaasDbTask):
+        if task.dbaas_only and not _target_in_dbaas_only(
+            task.dbaas_only, target.vendor_id, target.instance_key
+        ):
+            return False
+        disk_gib = task.disk_gib_required(target)
+        if not task.feasible_on(target.cpu_count, target.memory_gib, disk_gib):
+            return False
+        if not task.supported_on_target(target):
+            return False
+    return True
 
 
 def _task_matches_server_for_start(task: Task, srv, data_dir: str | os.PathLike) -> bool:
@@ -503,6 +596,34 @@ def _task_resource_checks(
             provisioned,
         ):
             logging.info(f"Skipping task {task.name}: not feasible on live host")
+            return False
+    if isinstance(task, DbaasDbTask):
+        mem_gib = float(os.environ.get("MEM_GIB") or mem_bytes / 1024**3)
+        db_vcpus = float(os.environ.get("SC_PROVISION_CPU_COUNT", os.cpu_count() or 1))
+        if os.environ.get("SC_PROVISION_STORAGE_GIB"):
+            storage = float(os.environ["SC_PROVISION_STORAGE_GIB"])
+        else:
+            from dbaas_catalog import ManagedDbTarget
+            from dbaas_tiers import provision_spec
+
+            stub = ManagedDbTarget(
+                vendor_id=vendor,
+                engine="postgres",
+                native_id=os.environ.get("SC_PROVISION_NATIVE_ID", instance),
+                sku_id="",
+                engine_version=os.environ.get("SC_PROVISION_ENGINE_VERSION", "18"),
+                ha_mode="standalone",
+                cpu_count=db_vcpus,
+                memory_gib=mem_gib,
+            )
+            storage = float(provision_spec(stub, task.cache_tier)["storage_gib"])
+        if not task.feasible_on(db_vcpus, mem_gib, storage):
+            logging.info(f"Skipping task {task.name}: not feasible on DBaaS host")
+            return False
+        if not task.supported_on_runtime():
+            logging.info(
+                f"Skipping task {task.name}: async durability not supported on this managed DB"
+            )
             return False
     return True
 
@@ -971,6 +1092,49 @@ def tasks_to_start(vendor: str, data_dir: str | os.PathLike, srv) -> list[Task]:
     return tasks
 
 
+def should_start_dbaas(task: Task, data_dir: str | os.PathLike, target) -> bool:
+    """Return True if we should start a DBaaS stack for this task."""
+    if not isinstance(task, DbaasDbTask):
+        return False
+    if task.start_with_instance or task.always_run:
+        return False
+    meta = load_task_meta(task, data_dir)
+    if meta.start and (datetime.now() - meta.start) <= WAIT_SINCE_LAST_START:
+        return False
+    if not _task_matches_target_for_start(task, target, data_dir):
+        return False
+    thash = task_hash(task)
+    if meta.end and task.rerun and (datetime.now() - meta.end) >= task.rerun and meta.exit_code == 0:
+        return True
+    if meta.task_hash != thash:
+        return True
+    if meta.exit_code is None or meta.exit_code != 0:
+        return True
+    if _is_stale_no_output(meta):
+        return True
+    return False
+
+
+def tasks_to_start_dbaas(vendor: str, data_dir: str | os.PathLike, target) -> list[Task]:
+    """DBaaS tasks that should trigger starting a managed DB + client stack."""
+    tasks = [task for task in get_tasks(vendor) if should_start_dbaas(task, data_dir, target)]
+    if not tasks:
+        return []
+    started = {id(task) for task in tasks}
+    for task in get_tasks(vendor):
+        if id(task) in started:
+            continue
+        if isinstance(task, DbaasDbTask) and task.always_run:
+            tasks.append(task)
+            started.add(id(task))
+        elif isinstance(task, DbaasDbTask) and task.start_with_instance and should_run(
+            task, data_dir, vendor, target.native_id, 0.0
+        ):
+            tasks.append(task)
+            started.add(id(task))
+    return tasks
+
+
 def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> None:
     while True:
         try:
@@ -1002,6 +1166,12 @@ def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> N
                     from postgres_multi import run_multi_vm_task
 
                     ver, stdout, stderr = run_multi_vm_task(
+                        meta, task, data_dir, gpu_count
+                    )
+                elif isinstance(task, DbaasDbTask):
+                    from postgres_dbaas import run_dbaas_task
+
+                    ver, stdout, stderr = run_dbaas_task(
                         meta, task, data_dir, gpu_count
                     )
                 elif isinstance(task, DockerTask):
@@ -1185,6 +1355,28 @@ def _applicable_tasks(vendor: str, server: str):
     ]
 
 
+def _applicable_dbaas_tasks(vendor: str, instance_key: str):
+    return [
+        task
+        for task in get_tasks(vendor)
+        if isinstance(task, DbaasDbTask)
+        and (not task.dbaas_only or (vendor, instance_key) in task.dbaas_only)
+    ]
+
+
+def max_dbaas_runtime(vendor: str, instance_key: str) -> timedelta:
+    """Upper bound on DBaaS inspect wall time for one managed DB instance_key."""
+    from collections import defaultdict
+
+    taskgroups = defaultdict(list)
+    for task in _applicable_dbaas_tasks(vendor, instance_key):
+        taskgroups[task.priority].append(task)
+    runtime = timedelta()
+    for priority in sorted(taskgroups):
+        runtime += max((task.timeout for task in taskgroups[priority]), default=timedelta())
+    return runtime
+
+
 def max_server_runtime(vendor: str, server: str) -> timedelta:
     """Upper bound on inspect wall time: sum of per-priority max task timeouts."""
     from collections import defaultdict
@@ -1219,6 +1411,30 @@ def get_last_end(data_dir, vendor, server):
     meta_ends = [
         load_task_meta(task, data_dir=server_data_dir).end
         for task in _applicable_tasks(vendor, server)
+    ]
+    meta_ends = [end for end in meta_ends if end]
+    if not meta_ends:
+        return None
+    return max(meta_ends)
+
+
+def get_last_start_dbaas(data_dir, vendor, instance_key):
+    instance_data_dir = os.path.join(data_dir, vendor, instance_key)
+    tasks = _applicable_dbaas_tasks(vendor, instance_key)
+    if not tasks:
+        return datetime.min
+    meta_starts = [load_task_meta(task, data_dir=instance_data_dir).start for task in tasks]
+    meta_starts = [start for start in meta_starts if start]
+    if not meta_starts:
+        return datetime.min
+    return max(meta_starts)
+
+
+def get_last_end_dbaas(data_dir, vendor, instance_key):
+    instance_data_dir = os.path.join(data_dir, vendor, instance_key)
+    meta_ends = [
+        load_task_meta(task, data_dir=instance_data_dir).end
+        for task in _applicable_dbaas_tasks(vendor, instance_key)
     ]
     meta_ends = [end for end in meta_ends if end]
     if not meta_ends:
@@ -1282,6 +1498,47 @@ def should_scan_for_cleanup(
     if last_end:
         return now <= max(active_deadline, last_end + CLEANUP_DESTROY_RETRY)
     return now <= active_deadline
+
+
+def should_scan_dbaas_for_cleanup(
+    data_dir,
+    vendor,
+    instance_key,
+    *,
+    lookback_mins: int | None = None,
+    data_only: bool = False,
+) -> bool:
+    """Return True if this managed DB instance_key should be checked by cleanup-sweep."""
+    instance_data_dir = os.path.join(data_dir, vendor, instance_key)
+    if data_only and not os.path.isdir(instance_data_dir):
+        return False
+    last_start = get_last_start_dbaas(data_dir, vendor, instance_key)
+    if last_start == datetime.min:
+        return False
+    now = datetime.now()
+    if lookback_mins is not None:
+        return last_start >= now - timedelta(minutes=lookback_mins)
+    last_end = get_last_end_dbaas(data_dir, vendor, instance_key)
+    active_deadline = (
+        last_start + max_dbaas_runtime(vendor, instance_key) + DESTROY_AFTER + CLEANUP_BOOT_SLACK
+    )
+    if last_end:
+        return now <= max(active_deadline, last_end + CLEANUP_DESTROY_RETRY)
+    return now <= active_deadline
+
+
+def sort_available_managed_dbs(available_managed_dbs: dict, data_dir, reverse=True, max_start=None):
+    if max_start:
+        available_managed_dbs = {
+            k: v
+            for k, v in available_managed_dbs.items()
+            if get_last_start_dbaas(data_dir, k[0], k[1]) >= max_start
+        }
+    return sorted(
+        available_managed_dbs.items(),
+        key=lambda item: get_last_start_dbaas(data_dir, item[0][0], item[0][1]),
+        reverse=reverse,
+    )
 
 
 def sort_available_servers(available_servers: dict, data_dir, reverse=True, max_start=None):
@@ -1355,6 +1612,14 @@ def inspector_user_data_replacements(
         "MULTI_VM_CLIENT_VCPUS": str(client_vcpus or ""),
         "PROVISIONED_DISK_GIB": str(provisioned_disk_gib or VOLUME_SIZE),
         "CLIENT_DISK_GIB": str(client_disk_gib),
+        "TOPOLOGY": "multi_vm" if role != "dbaas_client" else "dbaas",
+        "MANAGED_DB_INSTANCE_KEY": "",
+        "SC_DB_HOST": "",
+        "SC_DB_PORT": "5432",
+        "SC_DB_USER": "",
+        "SC_DB_PASSWORD": "",
+        "SC_DB_NAME": "bench",
+        "DB_WAIT_TIMEOUT_SEC": os.environ.get("DB_WAIT_TIMEOUT_SEC", "1200"),
     }
 
 

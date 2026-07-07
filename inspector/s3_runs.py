@@ -184,6 +184,9 @@ class RunRecord:
     terminated_at: datetime | None
     success: bool | None
     exit_code: int | None
+    topology: str = ""
+    instance_key: str = ""
+    dbaas_slug: str = ""
 
 
 def _parse_run_record(key: str, body: bytes) -> RunRecord | None:
@@ -209,6 +212,9 @@ def _parse_run_record(key: str, body: bytes) -> RunRecord | None:
         terminated_at=terminated_at,
         success=data.get("success"),
         exit_code=data.get("exit_code"),
+        topology=data.get("topology", ""),
+        instance_key=data.get("instance_key", ""),
+        dbaas_slug=data.get("dbaas_slug", ""),
     )
 
 

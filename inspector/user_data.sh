@@ -20,7 +20,7 @@ upload_run_status() {
     fi
     terminated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     cat <<EOF | curl -sfS -X PUT -H "Content-Type: application/json" --data-binary @- "$url"
-{"vendor":"{VENDOR}","instance":"{INSTANCE}","region":"{REGION}","zone":"{ZONE}","workflow":"{GITHUB_WORKFLOW}","run_id":"{GITHUB_RUN_ID}","terminated_at":"$terminated_at","success":$success,"exit_code":$exit_code}
+{"vendor":"{VENDOR}","instance":"{INSTANCE}","region":"{REGION}","zone":"{ZONE}","workflow":"{GITHUB_WORKFLOW}","run_id":"{GITHUB_RUN_ID}","topology":"{TOPOLOGY}","instance_key":"{MANAGED_DB_INSTANCE_KEY}","dbaas_slug":"{SC_PROVISION_STACK_SLUG}","terminated_at":"$terminated_at","success":$success,"exit_code":$exit_code}
 EOF
 }
 
@@ -418,6 +418,39 @@ if [ "{INSPECTOR_ROLE}" = "client" ]; then
         -e HF_TOKEN={HF_TOKEN} \
         ghcr.io/sparecores/sc-inspector:main companion --vendor {VENDOR} --instance {INSTANCE} --listen-port {MP_PORT}
     inspect_exit=$?
+elif [ "{TOPOLOGY}" = "dbaas" ]; then
+docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/docker.sock -v /root/.ssh:/root/.ssh \
+    -v "$TIMING_HOST_DIR:/host-timing:ro" \
+    -e REPO_URL={REPO_URL} \
+    -e GITHUB_SERVER_URL={GITHUB_SERVER_URL} \
+    -e GITHUB_REPOSITORY={GITHUB_REPOSITORY} \
+    -e GITHUB_RUN_ID={GITHUB_RUN_ID} \
+    -e HOST_TIMING_DIR="$TIMING_HOST_DIR" \
+    -e BENCHMARK_SECRETS_PASSPHRASE={BENCHMARK_SECRETS_PASSPHRASE} \
+    -e SENTINEL_API_TOKEN={SENTINEL_API_TOKEN} \
+    -e HF_TOKEN={HF_TOKEN} \
+    -e TASK_LOGS_S3_POST_B64={TASK_LOGS_S3_POST_B64} \
+    -e MEM_GIB={SC_PROVISION_MEMORY_GIB} \
+    -e SC_DB_HOST={SC_DB_HOST} -e SC_DB_PORT={SC_DB_PORT} \
+    -e SC_DB_USER={SC_DB_USER} -e SC_DB_PASSWORD={SC_DB_PASSWORD} -e SC_DB_NAME={SC_DB_NAME} \
+    -e DB_WAIT_TIMEOUT_SEC={DB_WAIT_TIMEOUT_SEC} \
+    -e SC_PROVISION_VENDOR_ID={SC_PROVISION_VENDOR_ID} \
+    -e SC_PROVISION_NATIVE_ID={SC_PROVISION_NATIVE_ID} \
+    -e SC_PROVISION_ENGINE_VERSION={SC_PROVISION_ENGINE_VERSION} \
+    -e SC_PROVISION_HA_MODE={SC_PROVISION_HA_MODE} \
+    -e SC_PROVISION_SKU_ID={SC_PROVISION_SKU_ID} \
+    -e SC_PROVISION_CPU_COUNT={SC_PROVISION_CPU_COUNT} \
+    -e SC_PROVISION_MEMORY_GIB={SC_PROVISION_MEMORY_GIB} \
+    -e SC_PROVISION_STORAGE_GIB={SC_PROVISION_STORAGE_GIB} \
+    -e SC_PROVISION_STORAGE_EDITION={SC_PROVISION_STORAGE_EDITION} \
+    -e SC_PROVISION_IOPS_TIER={SC_PROVISION_IOPS_TIER} \
+    -e SC_PROVISION_CLIENT_INSTANCE={SC_PROVISION_CLIENT_INSTANCE} \
+    -e SC_PROVISION_REGION={SC_PROVISION_REGION} \
+    -e SC_PROVISION_ZONE={SC_PROVISION_ZONE} \
+    -e SC_PROVISION_NETWORK_MODE={SC_PROVISION_NETWORK_MODE} \
+    -e SC_PROVISION_CACHE_TIER={SC_PROVISION_CACHE_TIER} \
+    ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT} --dbaas-instance-key {MANAGED_DB_INSTANCE_KEY}
+inspect_exit=$?
 else
 docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/docker.sock -v /root/.ssh:/root/.ssh \
     -v "$TIMING_HOST_DIR:/host-timing:ro" \

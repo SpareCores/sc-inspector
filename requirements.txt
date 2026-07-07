@@ -3,6 +3,7 @@ dateparser
 dmiparser
 docker
 fastnumbers
+psycopg2-binary
 lxml
 pulumi
 psutil
