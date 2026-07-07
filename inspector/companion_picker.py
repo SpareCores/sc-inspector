@@ -162,26 +162,42 @@ def _eligible_servers_with_prices(
     return list(best.values())
 
 
-def pick_client_instance(vendor: str, location: str, req: ClientRequirements):
-    """Return catalog Server row or None."""
+def _rank_client_candidates(
+    candidates: list[tuple[Any, float]],
+    scores: dict[int, float],
+) -> list[Any]:
+    return [
+        server
+        for server, _price in sorted(
+            candidates,
+            key=lambda item: (
+                -scores.get(item[0].server_id, 0.0),
+                item[1],
+                item[0].api_reference,
+            ),
+        )
+    ]
+
+
+def rank_client_instances(vendor: str, location: str, req: ClientRequirements) -> list[Any]:
+    """Return catalog client servers in preference order (stress-ng score, then price)."""
     candidates = _eligible_servers_with_prices(vendor, location, req)
     if not candidates:
-        logging.info(f"No client candidates in {vendor}/{location} for {req}")
-        return None
-
+        return []
     server_ids = [s.server_id for s, _ in candidates]
     scores = _stressng_best1_scores(vendor, server_ids)
+    return _rank_client_candidates(candidates, scores)
 
-    server, _price = min(
-        candidates,
-        key=lambda item: (
-            -scores.get(item[0].server_id, 0.0),
-            item[1],
-            item[0].api_reference,
-        ),
-    )
+
+def pick_client_instance(vendor: str, location: str, req: ClientRequirements):
+    """Return best catalog Server row or None."""
+    ranked = rank_client_instances(vendor, location, req)
+    if not ranked:
+        logging.info(f"No client candidates in {vendor}/{location} for {req}")
+        return None
+    server = ranked[0]
     logging.info(
         f"Picked client {vendor}/{server.api_reference} in {location} "
-        f"(score={scores.get(server.server_id, 0.0)})"
+        f"({len(ranked)} candidate(s))"
     )
     return server

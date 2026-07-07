@@ -46,7 +46,7 @@ def provision_spec(target: ManagedDbTarget, cache_tier: str) -> dict[str, Any]:
     return {
         "storage_gib": storage_gib,
         "storage_edition": "ManagedDiskV2",
-        "storage_type": "ManagedDiskV2",
+        "storage_type": "PremiumV2_LRS",
         "iops_tier": iops_tier,
         "cache_tier": cache_tier,
         "cache_ratio": cache_ratio,

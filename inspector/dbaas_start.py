@@ -9,8 +9,9 @@ import os
 import threading
 from datetime import timedelta
 
+from azure_dbaas_quota import check_dbaas_postgres_quota, check_dbaas_vm_quota
 from benchmark_tiers import merge_client_requirements
-from companion_picker import pick_client_instance
+from companion_picker import rank_client_instances
 from dbaas_catalog import ManagedDbTarget
 from dbaas_selector import stack_slug, target_sizing_stub
 from dbaas_tiers import provision_spec
@@ -99,6 +100,115 @@ def _group_tasks_by_cache_tier(tasks) -> dict[str, list]:
     return groups
 
 
+def _try_provision_dbaas_stack(
+    vendor: str,
+    target: ManagedDbTarget,
+    client,
+    region: str,
+    zone: str | None,
+    cache_tier: str,
+    provision: dict,
+    slug: str,
+    timeout_mins: int,
+    ssh_deploy_key_b64: str,
+    repo_url_ssh: str,
+    executor,
+    instance_logger,
+    instance_timing,
+    error_msgs,
+) -> bool:
+    logging.info(
+        "DBaaS: %s/%s tier=%s + client %s in %s",
+        vendor,
+        target.instance_key,
+        cache_tier,
+        client.api_reference,
+        region,
+    )
+
+    repl = _dbaas_user_data_replacements(
+        vendor,
+        target,
+        client,
+        region,
+        zone,
+        timeout_mins,
+        ssh_deploy_key_b64,
+        repo_url_ssh,
+        provision,
+    )
+
+    md_spec = ManagedDbSpec(
+        engine=target.engine,
+        engine_version=target.engine_version,
+        native_id=target.native_id,
+        sku_name=provision["sku_name"],
+        sku_tier=provision["sku_tier"],
+        ha_mode=target.ha_mode,
+        storage_gib=provision["storage_gib"],
+        storage_type=provision["storage_type"],
+        storage_edition=provision["storage_edition"],
+        storage_iops_tier=provision["iops_tier"],
+    )
+    stack_spec = DbaasStackSpec(
+        managed_db=md_spec,
+        client_instance=client.api_reference,
+        client_disk_gib=30,
+        client_user_data_template=repl["USER_DATA_TEMPLATE"],
+        client_user_data_static={
+            k: v for k, v in repl.items() if k != "USER_DATA_TEMPLATE"
+        },
+        instance_key_slug=slug,
+        extra_exports={
+            "instance_key": target.instance_key,
+            "cache_tier": cache_tier,
+            "topology": "dbaas",
+        },
+    )
+
+    resource_opts = dict(
+        public_key=os.environ.get("SSH_PUBLIC_KEY", ""),
+        instance=client.api_reference,
+        dbaas_slug=slug,
+        region=region,
+        dbaas=stack_spec,
+    )
+    runner.destroy(
+        vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info)
+    )
+    pulumi_output = []
+    stack_opts = pulumi_stack_opts(
+        error_msgs, pulumi_output, instance_logger, instance_timing, client.api_reference
+    )
+    arch = client.cpu_architecture or "x86_64"
+    extra = {"image_sku": "server-arm64" if "arm" in arch.lower() else "server"}
+    try:
+        retry_locked(
+            runner.create,
+            vendor,
+            {},
+            resource_opts | extra,
+            stack_opts=stack_opts,
+            instance_timing=instance_timing,
+        )
+        return True
+    except Exception as exc:
+        logging.exception(
+            "DBaaS create failed for %s with client %s",
+            region,
+            client.api_reference,
+        )
+        if not error_msgs:
+            error_msgs.append(str(exc))
+        executor.submit(
+            delayed_destroy,
+            vendor,
+            client.api_reference,
+            copy.deepcopy(resource_opts),
+        )
+        return False
+
+
 def try_start_dbaas_inspect(
     executor,
     lock,
@@ -134,96 +244,62 @@ def try_start_dbaas_inspect(
         slug = stack_slug(target, cache_tier)
 
         for region in candidate_regions(vendor, target.native_id, regions):
-            client = pick_client_instance(vendor, region, client_req)
-            if client is None:
+            pg_ok, pg_reason = check_dbaas_postgres_quota(
+                vendor,
+                region,
+                provision["sku_name"],
+                int(target.cpu_count),
+            )
+            if not pg_ok:
+                logging.info(
+                    "Skipping DBaaS %s/%s: %s",
+                    vendor,
+                    region,
+                    pg_reason,
+                )
+                continue
+
+            clients = rank_client_instances(vendor, region, client_req)
+            if not clients:
                 logging.info("No DBaaS client for %s/%s", vendor, region)
                 continue
             zone = None
 
-            logging.info(
-                "DBaaS: %s/%s tier=%s + client %s in %s",
-                vendor,
-                target.instance_key,
-                cache_tier,
-                client.api_reference,
-                region,
-            )
-
-            repl = _dbaas_user_data_replacements(
-                vendor,
-                target,
-                client,
-                region,
-                zone,
-                timeout_mins,
-                ssh_deploy_key_b64,
-                repo_url_ssh,
-                provision,
-            )
-
-            md_spec = ManagedDbSpec(
-                engine=target.engine,
-                engine_version=target.engine_version,
-                native_id=target.native_id,
-                sku_name=provision["sku_name"],
-                sku_tier=provision["sku_tier"],
-                ha_mode=target.ha_mode,
-                storage_gib=provision["storage_gib"],
-                storage_type=provision["storage_type"],
-                storage_iops_tier=provision["iops_tier"],
-            )
-            stack_spec = DbaasStackSpec(
-                managed_db=md_spec,
-                client_instance=client.api_reference,
-                client_disk_gib=30,
-                client_user_data_template=repl["USER_DATA_TEMPLATE"],
-                client_user_data_static={
-                    k: v for k, v in repl.items() if k != "USER_DATA_TEMPLATE"
-                },
-                instance_key_slug=slug,
-                extra_exports={
-                    "instance_key": target.instance_key,
-                    "cache_tier": cache_tier,
-                    "topology": "dbaas",
-                },
-            )
-
-            resource_opts = dict(
-                public_key=os.environ.get("SSH_PUBLIC_KEY", ""),
-                instance=client.api_reference,
-                dbaas_slug=slug,
-                region=region,
-                dbaas=stack_spec,
-            )
-            runner.destroy(
-                vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info)
-            )
-            pulumi_output = []
-            stack_opts = pulumi_stack_opts(
-                error_msgs, pulumi_output, instance_logger, instance_timing, client.api_reference
-            )
-            arch = client.cpu_architecture or "x86_64"
-            extra = {"image_sku": "server-arm64" if "arm" in arch.lower() else "server"}
-            try:
-                retry_locked(
-                    runner.create,
+            for client in clients:
+                vm_ok, vm_reason = check_dbaas_vm_quota(
                     vendor,
-                    {},
-                    resource_opts | extra,
-                    stack_opts=stack_opts,
-                    instance_timing=instance_timing,
-                )
-                return True
-            except Exception as exc:
-                logging.exception("DBaaS create failed for %s", region)
-                if not error_msgs:
-                    error_msgs.append(str(exc))
-                executor.submit(
-                    delayed_destroy,
-                    vendor,
+                    region,
                     client.api_reference,
-                    copy.deepcopy(resource_opts),
+                    int(client.vcpus),
                 )
+                if not vm_ok:
+                    logging.info(
+                        "Skipping DBaaS client %s in %s/%s: %s",
+                        client.api_reference,
+                        vendor,
+                        region,
+                        vm_reason,
+                    )
+                    continue
+
+                if _try_provision_dbaas_stack(
+                    vendor,
+                    target,
+                    client,
+                    region,
+                    zone,
+                    cache_tier,
+                    provision,
+                    slug,
+                    timeout_mins,
+                    ssh_deploy_key_b64,
+                    repo_url_ssh,
+                    executor,
+                    instance_logger,
+                    instance_timing,
+                    error_msgs,
+                ):
+                    return True
     return False
 
 
@@ -287,3 +363,6 @@ def start_dbaas_inspect(
             repo.push_path(data_dir, f"DBaaS creation timing from {repo.gha_url()}")
     if not started:
         record_instance_start_failure(lock, data_dir, tasks, error_msgs)
+        raise RuntimeError(
+            error_msgs[0] if error_msgs else "DBaaS stack was not provisioned in any region"
+        )
