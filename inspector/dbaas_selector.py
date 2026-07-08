@@ -24,7 +24,13 @@ def dbaas_sparse_path(vendor: str, instance_key: str) -> str:
 
 def stack_slug(target: ManagedDbTarget, cache_tier: str) -> str:
     """Short Pulumi stack slug including cache tier (operational, not in git path)."""
-    native = target.native_id.lower().replace("_", "").replace("standard", "")
+    native = target.native_id.lower().replace("_", "")
+    if native.startswith("db-perf-optimized-"):
+        native = "perfopt" + native.removeprefix("db-perf-optimized-").replace("-", "")
+    elif native.startswith("db-custom-"):
+        native = "dbc" + native.removeprefix("db-custom-").replace("-", "")
+    else:
+        native = native.replace("standard", "")
     return f"{native}-pg{target.engine_version}-{cache_tier}"
 
 

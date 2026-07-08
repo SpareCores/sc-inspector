@@ -64,10 +64,7 @@ def _iops_tier_for_gib(storage_gib: int) -> str:
     return "P80"
 
 
-def provision_spec(target: ManagedDbTarget, cache_tier: str) -> dict[str, Any]:
-    """Return provision parameters for a managed DB at the given cache tier."""
-    cache_ratio = 1.0 if cache_tier == "c100" else 0.3
-    storage_gib = _disk_gib_for_cache_tier(target.memory_gib, cache_ratio)
+def _provision_spec_azure(target: ManagedDbTarget, cache_tier: str, cache_ratio: float, storage_gib: int) -> dict[str, Any]:
     iops_tier = _iops_tier_for_gib(storage_gib)
     min_tier = _CACHE_TIER_MIN_IOPS.get(cache_tier)
     if min_tier:
@@ -86,3 +83,31 @@ def provision_spec(target: ManagedDbTarget, cache_tier: str) -> dict[str, Any]:
         "schema_gib": (BUFFER_FRAC * target.memory_gib) / cache_ratio,
         "disk_gib_required": storage_gib,
     }
+
+
+def _provision_spec_gcp(target: ManagedDbTarget, cache_tier: str, cache_ratio: float, storage_gib: int) -> dict[str, Any]:
+    iops_tier = _iops_tier_for_gib(storage_gib)
+    min_tier = _CACHE_TIER_MIN_IOPS.get(cache_tier)
+    if min_tier:
+        iops_tier = _max_iops_tier(iops_tier, min_tier)
+    return {
+        "storage_gib": storage_gib,
+        "storage_edition": "PD_SSD",
+        "storage_type": "PD_SSD",
+        "iops_tier": iops_tier,
+        "cache_tier": cache_tier,
+        "cache_ratio": cache_ratio,
+        "sku_name": target.native_id,
+        "sku_tier": target.edition or "Enterprise",
+        "schema_gib": (BUFFER_FRAC * target.memory_gib) / cache_ratio,
+        "disk_gib_required": storage_gib,
+    }
+
+
+def provision_spec(target: ManagedDbTarget, cache_tier: str) -> dict[str, Any]:
+    """Return provision parameters for a managed DB at the given cache tier."""
+    cache_ratio = 1.0 if cache_tier == "c100" else 0.3
+    storage_gib = _disk_gib_for_cache_tier(target.memory_gib, cache_ratio)
+    if target.vendor_id == "gcp":
+        return _provision_spec_gcp(target, cache_tier, cache_ratio, storage_gib)
+    return _provision_spec_azure(target, cache_tier, cache_ratio, storage_gib)

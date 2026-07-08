@@ -81,7 +81,7 @@ def _dbaas_user_data_replacements(
             "SC_PROVISION_CLIENT_INSTANCE": client.api_reference,
             "SC_PROVISION_REGION": region,
             "SC_PROVISION_ZONE": zone or "",
-            "SC_PROVISION_NETWORK_MODE": "private_vnet",
+            "SC_PROVISION_NETWORK_MODE": "private_vpc" if vendor == "gcp" else "private_vnet",
             "SC_PROVISION_CACHE_TIER": provision["cache_tier"],
             "SC_PROVISION_STACK_SLUG": stack_slug(target, provision["cache_tier"]),
             "SC_PROVISION_SYNC_COMMIT_SETTABLE": "",
@@ -100,18 +100,43 @@ def _group_tasks_by_cache_tier(tasks) -> dict[str, list]:
 
 def _build_dbaas_resource_opts(
     *,
+    vendor: str,
     client,
     region: str,
+    zone: str | None,
     slug: str,
     stack_spec: DbaasStackSpec,
 ) -> dict:
-    return dict(
+    opts = dict(
         public_key=os.environ.get("SSH_PUBLIC_KEY", ""),
         instance=client.api_reference,
         dbaas_slug=slug,
-        region=region,
         dbaas=stack_spec,
     )
+    if vendor == "gcp":
+        if not zone:
+            raise ValueError("GCP DBaaS requires a zone")
+        opts["zone"] = zone
+    else:
+        opts["region"] = region
+    return opts
+
+
+def _dbaas_location_candidates(
+    vendor: str,
+    target: ManagedDbTarget,
+    regions: list[str],
+    zones: list[str],
+    zone_to_region: dict[str, str | None] | None,
+):
+    from lib import candidate_regions, candidate_zones
+
+    if vendor == "gcp" and zones:
+        return [
+            ("zone", z)
+            for z in candidate_zones(vendor, target.native_id, zones, zone_to_region)
+        ]
+    return [("region", r) for r in candidate_regions(vendor, target.native_id, regions)]
 
 
 def _destroy_dbaas_stack(
@@ -202,8 +227,10 @@ def _try_provision_dbaas_stack(
     )
 
     resource_opts = _build_dbaas_resource_opts(
+        vendor=vendor,
         client=client,
         region=region,
+        zone=zone,
         slug=slug,
         stack_spec=stack_spec,
     )
@@ -270,7 +297,18 @@ def try_start_dbaas_inspect(
         )
         slug = stack_slug(target, cache_tier)
 
-        for region in candidate_regions(vendor, target.native_id, regions):
+        for kind, location in _dbaas_location_candidates(
+            vendor, target, regions, zones, zone_to_region
+        ):
+            if kind == "zone":
+                zone = location
+                region = (zone_to_region or {}).get(
+                    location, "-".join(location.split("-")[:-1])
+                )
+            else:
+                zone = None
+                region = location
+
             pg_ok, pg_reason = check_dbaas_postgres_quota(
                 vendor,
                 region,
@@ -281,19 +319,18 @@ def try_start_dbaas_inspect(
                 logging.info(
                     "Skipping DBaaS %s/%s: %s",
                     vendor,
-                    region,
+                    location,
                     pg_reason,
                 )
                 continue
 
             clients = rank_client_instances(vendor, region, client_req)
             if not clients:
-                logging.info("No DBaaS client for %s/%s", vendor, region)
+                logging.info("No DBaaS client for %s/%s", vendor, location)
                 continue
             clients = filter_clients_by_vm_quota(vendor, region, clients)
             if not clients:
                 continue
-            zone = None
 
             for client in clients:
                 if _try_provision_dbaas_stack(

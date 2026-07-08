@@ -5,7 +5,10 @@ from datetime import timedelta
 from lib import DbaasDbTask
 
 # Initial rollout allowlist — expand as more managed SKUs are validated per vendor.
-DBAAS_ROLLOUT = {("azure", "Standard_E16ds_v5/postgres/18/standalone")}
+DBAAS_ROLLOUT = {
+    ("azure", "Standard_E16ds_v5/postgres/18/standalone"),
+    ("gcp", "db-perf-optimized-N-16/postgres/18/standalone"),
+}
 
 # DBaaS priority band 1 (1.0, 1.1, …). Async tasks are defined for all vendors; vendors
 # where synchronous_commit cannot be relaxed (e.g. Azure) skip them via

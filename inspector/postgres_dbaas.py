@@ -54,6 +54,25 @@ def _mem_gib() -> float:
     return 16.0
 
 
+def _db_sslmode() -> str:
+    explicit = os.environ.get("SC_DB_SSLMODE", "").strip()
+    if explicit:
+        return explicit
+    network_mode = os.environ.get("SC_PROVISION_NETWORK_MODE", "")
+    if network_mode == "private_vnet":
+        return "require"
+    if network_mode == "private_vpc":
+        return "prefer"
+    return "prefer"
+
+
+def _db_connect_kwargs() -> dict[str, str]:
+    mode = _db_sslmode()
+    if mode == "disable":
+        return {}
+    return {"sslmode": mode}
+
+
 def wait_db_ready() -> None:
     """Block until the managed Postgres endpoint accepts connections."""
     import psycopg2
@@ -71,6 +90,7 @@ def wait_db_ready() -> None:
                 password=PG_PASSWORD,
                 dbname=PG_DB,
                 connect_timeout=10,
+                **_db_connect_kwargs(),
             )
             conn.close()
             logging.info("Managed DB ready at %s:%s", host, port)
@@ -92,6 +112,7 @@ def _sync_commit_session_settable() -> bool:
             password=PG_PASSWORD,
             dbname=PG_DB,
             connect_timeout=10,
+            **_db_connect_kwargs(),
         )
         conn.autocommit = True
         with conn.cursor() as cur:
@@ -113,6 +134,7 @@ def _fix_public_schema(dbname: str, owner: str) -> None:
         password=PG_PASSWORD,
         dbname=dbname,
         connect_timeout=30,
+        **_db_connect_kwargs(),
     )
     conn.autocommit = True
     with conn.cursor() as cur:
@@ -121,7 +143,8 @@ def _fix_public_schema(dbname: str, owner: str) -> None:
     conn.close()
 
 
-def _ensure_benchbase_db() -> None:
+def _reset_benchmark_database(dbname: str, owner: str, role_password: str | None = None) -> None:
+    """Drop and recreate a benchmark database; fix public schema for managed Postgres."""
     import psycopg2
 
     conn = psycopg2.connect(
@@ -131,45 +154,37 @@ def _ensure_benchbase_db() -> None:
         password=PG_PASSWORD,
         dbname=PG_DB,
         connect_timeout=30,
+        **_db_connect_kwargs(),
     )
     conn.autocommit = True
     with conn.cursor() as cur:
-        cur.execute(f"SELECT 1 FROM pg_database WHERE datname = %s", (BENCHBASE_DB,))
-        if not cur.fetchone():
-            cur.execute(f'CREATE DATABASE "{BENCHBASE_DB}"')
-    conn.close()
-    _fix_public_schema(BENCHBASE_DB, PG_USER)
-
-
-def _ensure_hammerdb_prereqs() -> None:
-    """Prepare roles/databases HammerDB expects; fix public schema on managed Postgres."""
-    import psycopg2
-
-    specs = (
-        ("tpcc", "tpcc", "tpcc"),
-        ("tpch", "tpch", "tpch"),
-    )
-    conn = psycopg2.connect(
-        host=_db_host(),
-        port=_db_port(),
-        user=PG_USER,
-        password=PG_PASSWORD,
-        dbname="postgres",
-        connect_timeout=30,
-    )
-    conn.autocommit = True
-    with conn.cursor() as cur:
-        for role, password, dbname in specs:
-            cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
+        cur.execute(
+            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+            "WHERE datname = %s AND pid <> pg_backend_pid()",
+            (dbname,),
+        )
+        cur.execute(f'DROP DATABASE IF EXISTS "{dbname}"')
+        if role_password is not None:
+            cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (owner,))
             if not cur.fetchone():
-                cur.execute(f'CREATE ROLE "{role}" LOGIN PASSWORD %s', (password,))
-            cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (dbname,))
-            if not cur.fetchone():
-                cur.execute(f'CREATE DATABASE "{dbname}" OWNER "{role}"')
+                cur.execute(f'CREATE ROLE "{owner}" LOGIN PASSWORD %s', (role_password,))
+        cur.execute(f'CREATE DATABASE "{dbname}" OWNER "{owner}"')
     conn.close()
+    _fix_public_schema(dbname, owner)
 
-    for role, _, dbname in specs:
-        _fix_public_schema(dbname, role)
+
+def _ensure_benchbase_db() -> None:
+    _reset_benchmark_database(BENCHBASE_DB, PG_USER)
+
+
+def _ensure_hammerdb_prereqs(workload: str) -> None:
+    """Reset HammerDB workload database so buildschema starts from a clean slate."""
+    if workload == "tpcc":
+        _reset_benchmark_database("tpcc", "tpcc", "tpcc")
+    elif workload == "tpch":
+        _reset_benchmark_database("tpch", "tpch", "tpch")
+    else:
+        raise RuntimeError(f"unsupported HammerDB workload: {workload}")
 
 
 def _provision_env() -> dict[str, str]:
@@ -223,6 +238,7 @@ def _benchmark_env(task, params, mem_gib: float, db_vcpus: int, client_vcpus: in
         "SC_WH_PER_VU_MIN": str(wh_per_vu_min(db_vcpus)),
         "SC_TOPOLOGY": "dbaas",
         "SC_CACHE_TIER": task.cache_tier,
+        "SC_DB_SSLMODE": _db_sslmode(),
     }
     env.update(_provision_env())
     if task.tool == "hammerdb":
@@ -281,7 +297,8 @@ def run_dbaas_task(
             return None, b"", str(exc).encode()
     elif task.tool == "hammerdb":
         try:
-            _ensure_hammerdb_prereqs()
+            wl = WORKLOADS.get(task.workload_proxy, {}).get("hammerdb", "tpcc")
+            _ensure_hammerdb_prereqs(wl)
         except Exception as exc:
             meta.error_msg = f"hammerdb db setup failed: {exc}"
             meta.end = datetime.now()
