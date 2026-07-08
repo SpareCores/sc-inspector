@@ -632,10 +632,28 @@ def _task_resource_checks(
     return True
 
 
+def task_data_dir(
+    task: Task,
+    data_dir: str | os.PathLike,
+    client_data_dir: str | os.PathLike | None = None,
+) -> str | os.PathLike:
+    """Return the inspect data directory for a task.
+
+    On DBaaS client VMs, managed-DB benchmarks use ``data_dir`` (under ``dbaas/``);
+    compute characterization tasks use ``client_data_dir`` (under ``data/<vendor>/<instance>/``).
+    """
+    if client_data_dir is None or isinstance(task, DbaasDbTask):
+        return data_dir
+    return client_data_dir
+
+
 def should_run(task: Task, data_dir: str | os.PathLike, vendor: str, instance: str, gpu_count: float) -> bool:
     """Return True if we should run a task."""
     if isinstance(task, DbaasDbTask) and os.environ.get("TOPOLOGY") != "dbaas":
         logging.info(f"Skipping task {task.name}: TOPOLOGY is not dbaas")
+        return False
+    if os.environ.get("TOPOLOGY") == "dbaas" and isinstance(task, MultiVmDbTask):
+        logging.info(f"Skipping task {task.name}: multi-VM tasks don't run on DBaaS topology")
         return False
     import psutil  # lazy load
 
@@ -1144,19 +1162,25 @@ def tasks_to_start_dbaas(vendor: str, data_dir: str | os.PathLike, target) -> li
     return tasks
 
 
-def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> None:
+def run_task(
+    q: Queue,
+    data_dir: str | os.PathLike,
+    gpu_count: float = 0.0,
+    client_data_dir: str | os.PathLike | None = None,
+) -> None:
     while True:
         try:
             task = q.get()
             if not task:
                 break
-            meta = boot_meta_for_task(task, data_dir, kernel_version=platform.release())
+            task_dir_root = task_data_dir(task, data_dir, client_data_dir)
+            meta = boot_meta_for_task(task, task_dir_root, kernel_version=platform.release())
             failed = False
-            task_dir = os.path.join(data_dir, task.name)
+            task_dir = os.path.join(task_dir_root, task.name)
             os.makedirs(task_dir, exist_ok=True)
             if task.name == TIMING_TASK_NAME:
                 try:
-                    record_timing_metrics(data_dir)
+                    record_timing_metrics(task_dir_root)
                     meta.end = datetime.now()
                     meta.exit_code = 0
                     meta.version = "n/a"
@@ -1169,24 +1193,24 @@ def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> N
             try:
                 if isinstance(task, VllmDockerTask):
                     ver, stdout, stderr = run_vllm_docker(
-                        meta, task, os.path.join(data_dir, task.name), gpu_count
+                        meta, task, task_dir, gpu_count
                     )
                 elif isinstance(task, MultiVmDbTask):
                     from postgres_multi import run_multi_vm_task
 
                     ver, stdout, stderr = run_multi_vm_task(
-                        meta, task, data_dir, gpu_count
+                        meta, task, task_dir_root, gpu_count
                     )
                 elif isinstance(task, DbaasDbTask):
                     from postgres_dbaas import run_dbaas_task
 
                     ver, stdout, stderr = run_dbaas_task(
-                        meta, task, data_dir, gpu_count
+                        meta, task, task_dir_root, gpu_count
                     )
                 elif isinstance(task, DockerTask):
-                    ver, stdout, stderr = run_docker(meta, task, os.path.join(data_dir, task.name), gpu_count)
+                    ver, stdout, stderr = run_docker(meta, task, task_dir, gpu_count)
                 else:
-                    ver, stdout, stderr = run_native(meta, task, os.path.join(data_dir, task.name))
+                    ver, stdout, stderr = run_native(meta, task, task_dir)
                 meta.version = ver
             except Exception as e:
                 failed = True
@@ -1196,7 +1220,7 @@ def run_task(q: Queue, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> N
             if not failed:
                 for t in task.transform_output:
                     meta.outputs.extend(t(meta, task, task_dir, stdout, stderr))
-            write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
+            write_meta(meta, os.path.join(task_dir, META_NAME))
         except Exception:
             raise
         finally:
@@ -1235,32 +1259,58 @@ def _finalize_multi_vm_band_if_done(
         logging.exception("multi-VM companion shutdown failed")
 
 
-def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: float = 0.0, nthreads: int = 8):
+def _push_data_dirs(data_dirs: list[str | os.PathLike], message: str) -> None:
+    for data_dir in dict.fromkeys(data_dirs):
+        for i in range(3):
+            try:
+                repo.push_path(data_dir, message)
+                break
+            except Exception:
+                logging.exception("push failed")
+                if i < 2:
+                    time.sleep(random.randint(1, 10))
+
+
+def run_tasks(
+    vendor,
+    data_dir: str | os.PathLike,
+    instance: str,
+    gpu_count: float = 0.0,
+    nthreads: int = 8,
+    client_data_dir: str | os.PathLike | None = None,
+):
     taskgroups = get_taskgroups(vendor)
 
     # initialize thread pool
     q: Queue = Queue(maxsize=nthreads)
     threads = []
     for _ in range(nthreads):
-        threads.append(threading.Thread(target=run_task, args=(q, data_dir, gpu_count), daemon=True))
+        threads.append(
+            threading.Thread(
+                target=run_task,
+                args=(q, data_dir, gpu_count, client_data_dir),
+                daemon=True,
+            )
+        )
         threads[-1].start()
 
     # iterate over tasks, sorted by task key (running parallel tasks in a group first, then
     # non-parallel ones)
     ordered_groups = sorted(taskgroups.keys())
     for group_index, taskgroup in enumerate(ordered_groups):
-        meta_changed = False
+        changed_dirs: list[str | os.PathLike] = []
         for task in taskgroups[taskgroup]:
-            meta = load_task_meta(task, data_dir)
-            if not should_run(task, data_dir, vendor, instance, gpu_count):
+            task_dir_root = task_data_dir(task, data_dir, client_data_dir)
+            meta = load_task_meta(task, task_dir_root)
+            if not should_run(task, task_dir_root, vendor, instance, gpu_count):
                 if meta.start and meta.exit_code is None:
                     # update meta, if it doesn't yet have an exit code, so the monitoring won't fail on this
                     meta.end = datetime.now()
                     meta.exit_code = -2
                     meta.task_hash=task_hash(task)
                     meta.error_msg = "Task doesn't need to run on this instance"
-                    write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
-                    meta_changed = True
+                    write_meta(meta, os.path.join(task_dir_root, task.name, META_NAME))
+                    changed_dirs.append(task_dir_root)
                 continue
             if task.precheck_command and task.precheck_regex:
                 check_res = subprocess.run(task.precheck_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
@@ -1270,28 +1320,21 @@ def run_tasks(vendor, data_dir: str | os.PathLike, instance: str, gpu_count: flo
                     meta.exit_code = -3
                     meta.task_hash=task_hash(task)
                     meta.error_msg = "Task precheck_regex didn't match"
-                    write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
-                    meta_changed = True
+                    write_meta(meta, os.path.join(task_dir_root, task.name, META_NAME))
+                    changed_dirs.append(task_dir_root)
                     continue
 
             logging.info(f"Starting {task.name}")
             q.put(task)
-            meta_changed = True
+            changed_dirs.append(task_dir_root)
             if not task.parallel:
                 q.join()
         # wait at the end of the taskgroup
         q.join()
         docker_prune_after_round()
         # do a push at the end of each round if we made changes
-        if meta_changed:
-            for i in range(3):
-                try:
-                    repo.push_path(data_dir, f"Inspecting server from {repo.gha_url()}")
-                    break  # Success, exit retry loop
-                except Exception:
-                    logging.exception("push failed")
-                    if i < 2:  # Don't sleep on last attempt
-                        time.sleep(random.randint(1, 10))
+        if changed_dirs:
+            _push_data_dirs(changed_dirs, f"Inspecting server from {repo.gha_url()}")
         _finalize_multi_vm_band_if_done(ordered_groups, group_index, data_dir)
     q.join()
 
@@ -1313,16 +1356,18 @@ def finalize_task_metas(
     data_dir: str | os.PathLike,
     instance: str,
     gpu_count: float = 0.0,
+    client_data_dir: str | os.PathLike | None = None,
 ) -> None:
     """Mark unfinished task metas when inspect ends before every queued task ran."""
-    changed = False
+    changed_dirs: list[str | os.PathLike] = []
     last_activity = None
     for task in get_tasks(vendor):
         if task.servers_only and (vendor, instance) not in task.servers_only:
             continue
         if task.servers_exclude and (vendor, instance) in task.servers_exclude:
             continue
-        meta = load_task_meta(task, data_dir=data_dir)
+        task_dir_root = task_data_dir(task, data_dir, client_data_dir)
+        meta = load_task_meta(task, data_dir=task_dir_root)
         if meta.end:
             last_activity = max(last_activity, meta.end) if last_activity else meta.end
     for task in get_tasks(vendor):
@@ -1330,32 +1375,26 @@ def finalize_task_metas(
             continue
         if task.servers_exclude and (vendor, instance) in task.servers_exclude:
             continue
-        meta = load_task_meta(task, data_dir=data_dir)
+        task_dir_root = task_data_dir(task, data_dir, client_data_dir)
+        meta = load_task_meta(task, data_dir=task_dir_root)
         if not meta.start or meta.end is not None:
             continue
-        if should_run(task, data_dir, vendor, instance, gpu_count):
+        if should_run(task, task_dir_root, vendor, instance, gpu_count):
             meta.end = datetime.now()
             meta.exit_code = -4
             meta.task_hash = task_hash(task)
             meta.error_msg = "Inspect ended before task completed"
-            write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
-            changed = True
+            write_meta(meta, os.path.join(task_dir_root, task.name, META_NAME))
+            changed_dirs.append(task_dir_root)
         elif meta.exit_code is None:
             meta.end = datetime.now()
             meta.exit_code = -2
             meta.task_hash = task_hash(task)
             meta.error_msg = "Task doesn't need to run on this instance"
-            write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
-            changed = True
-    if changed:
-        for i in range(3):
-            try:
-                repo.push_path(data_dir, f"Finalized task metas from {repo.gha_url()}")
-                break
-            except Exception:
-                logging.exception("push failed")
-                if i < 2:
-                    time.sleep(random.randint(1, 10))
+            write_meta(meta, os.path.join(task_dir_root, task.name, META_NAME))
+            changed_dirs.append(task_dir_root)
+    if changed_dirs:
+        _push_data_dirs(changed_dirs, f"Finalized task metas from {repo.gha_url()}")
 
 
 def _applicable_tasks(vendor: str, server: str):
