@@ -186,10 +186,19 @@ def test_try_start_tries_next_client_after_create_failure(
     assert mock_provision.call_count == 2
 
 
+def test_finalize_multi_vm_band_skipped_for_dbaas_topology():
+    import os
+    from lib import _finalize_multi_vm_band_if_done
+
+    with patch.dict(os.environ, {"TOPOLOGY": "dbaas"}, clear=False):
+        _finalize_multi_vm_band_if_done([(1.0, False)], 0, "/tmp")
+
+
 if __name__ == "__main__":
     tests = [
         test_try_start_tries_next_client_after_vm_quota_skip,
         test_try_start_tries_next_client_after_create_failure,
+        test_finalize_multi_vm_band_skipped_for_dbaas_topology,
     ]
     for fn in tests:
         fn()

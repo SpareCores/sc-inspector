@@ -449,6 +449,8 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e SC_PROVISION_ZONE={SC_PROVISION_ZONE} \
     -e SC_PROVISION_NETWORK_MODE={SC_PROVISION_NETWORK_MODE} \
     -e SC_PROVISION_CACHE_TIER={SC_PROVISION_CACHE_TIER} \
+    -e TOPOLOGY=dbaas \
+    -e MANAGED_DB_INSTANCE_KEY={MANAGED_DB_INSTANCE_KEY} \
     ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT} --dbaas-instance-key {MANAGED_DB_INSTANCE_KEY}
 inspect_exit=$?
 else

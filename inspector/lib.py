@@ -635,6 +635,7 @@ def _task_resource_checks(
 def should_run(task: Task, data_dir: str | os.PathLike, vendor: str, instance: str, gpu_count: float) -> bool:
     """Return True if we should run a task."""
     if isinstance(task, DbaasDbTask) and os.environ.get("TOPOLOGY") != "dbaas":
+        logging.info(f"Skipping task {task.name}: TOPOLOGY is not dbaas")
         return False
     import psutil  # lazy load
 
@@ -1209,6 +1210,8 @@ def _finalize_multi_vm_band_if_done(
     data_dir: str | os.PathLike,
 ) -> None:
     """Power off the companion client after the last task in the multi-VM priority band."""
+    if os.environ.get("TOPOLOGY") == "dbaas":
+        return
     priority = ordered_groups[group_index][0]
     if not math.isfinite(priority) or math.floor(priority) != MultiVmDbTask.MULTI_VM_PRIORITY_BAND:
         return
