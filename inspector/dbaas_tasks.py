@@ -10,9 +10,8 @@ DBAAS_ROLLOUT = {
     ("gcp", "db-perf-optimized-N-16/postgres/18/standalone"),
 }
 
-# DBaaS priority band 1 (1.0, 1.1, …). Async tasks are defined for all vendors; vendors
-# where synchronous_commit cannot be relaxed (e.g. Azure) skip them via
-# ManagedDbTarget.sync_commit_session_settable in dbaas_catalog + DbaasDbTask.supported_on_*.
+# DBaaS priority band 1 (1.0, 1.1, …). Async tasks skip provisioning on targets where
+# synchronous_commit cannot be relaxed per ManagedDbTarget.sync_commit_session_settable.
 
 hammerdb_postgres_dbaas_oltp_mixed_c100 = DbaasDbTask(
     parallel=False,

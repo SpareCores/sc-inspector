@@ -43,7 +43,7 @@ STATIC_MANAGED_DB_TARGETS: tuple[ManagedDbTarget, ...] = (
         cpu_count=16,
         memory_gib=128,
         edition="MemoryOptimized",
-        sync_commit_session_settable=False,
+        sync_commit_session_settable=True,
     ),
     ManagedDbTarget(
         vendor_id="gcp",

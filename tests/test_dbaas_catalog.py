@@ -33,7 +33,7 @@ def test_provision_spec_c100_c30():
     assert c30["iops_tier"] == "P20"
 
 
-def test_async_tasks_skipped_on_azure_target():
+def test_async_tasks_supported_on_azure_target():
     from dbaas_catalog import ManagedDbTarget
     from dbaas_tasks import (
         hammerdb_postgres_dbaas_oltp_mixed_c100,
@@ -49,7 +49,7 @@ def test_async_tasks_skipped_on_azure_target():
         ha_mode="standalone",
         cpu_count=16,
         memory_gib=128,
-        sync_commit_session_settable=False,
+        sync_commit_session_settable=True,
     )
-    assert not hammerdb_postgres_dbaas_oltp_mixed_c100.supported_on_target(azure)
+    assert hammerdb_postgres_dbaas_oltp_mixed_c100.supported_on_target(azure)
     assert hammerdb_postgres_dbaas_oltp_mixed_durable_c100.supported_on_target(azure)
