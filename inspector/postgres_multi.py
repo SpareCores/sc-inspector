@@ -109,6 +109,11 @@ def _ip_placeholder(value: str) -> bool:
     return not value or "{" in value or "}" in value
 
 
+def has_companion_client() -> bool:
+    """True when this server was provisioned with a multi-VM benchmark client."""
+    return not _ip_placeholder(os.environ.get("CLIENT_PRIVATE_IP", "").strip())
+
+
 def _mp_port() -> int:
     return int(os.environ.get("MP_PORT", "18765"))
 
@@ -383,4 +388,6 @@ def shutdown_companion(reason: str) -> None:
 
 
 def finalize_multi_vm(_data_dir: str | os.PathLike) -> None:
+    if not has_companion_client():
+        return
     shutdown_companion(reason="inspect complete")

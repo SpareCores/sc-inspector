@@ -301,6 +301,16 @@ def test_finalize_multi_vm_band_skipped_for_dbaas_topology():
         _finalize_multi_vm_band_if_done([(1.0, False)], 0, "/tmp")
 
 
+def test_finalize_multi_vm_band_skipped_without_companion():
+    import os
+    from lib import _finalize_multi_vm_band_if_done
+
+    with patch.dict(os.environ, {"CLIENT_PRIVATE_IP": "", "TOPOLOGY": ""}, clear=False):
+        with patch("postgres_multi.finalize_multi_vm") as finalize:
+            _finalize_multi_vm_band_if_done([(1.0, False), (2.0, False)], 0, "/tmp")
+            finalize.assert_not_called()
+
+
 if __name__ == "__main__":
     tests = [
         test_try_start_tries_next_client_after_vm_quota_skip,
@@ -308,6 +318,7 @@ if __name__ == "__main__":
         test_try_provision_destroy_stack_on_create_failure,
         test_try_provision_passes_image_sku_only_for_azure,
         test_finalize_multi_vm_band_skipped_for_dbaas_topology,
+        test_finalize_multi_vm_band_skipped_without_companion,
     ]
     for fn in tests:
         fn()

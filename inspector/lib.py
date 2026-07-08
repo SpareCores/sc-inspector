@@ -1252,8 +1252,10 @@ def _finalize_multi_vm_band_if_done(
     if next_floor is not None and next_floor <= MultiVmDbTask.MULTI_VM_PRIORITY_BAND:
         return
     try:
-        from postgres_multi import finalize_multi_vm
+        from postgres_multi import finalize_multi_vm, has_companion_client
 
+        if not has_companion_client():
+            return
         finalize_multi_vm(data_dir)
     except Exception:
         logging.exception("multi-VM companion shutdown failed")
