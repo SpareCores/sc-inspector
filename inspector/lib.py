@@ -1578,6 +1578,24 @@ def should_scan_dbaas_for_cleanup(
     return now <= active_deadline
 
 
+def instance_start_order_key(vendor: str, instance: str) -> int:
+    """Stable pseudo-random order for start iteration (mixes instance sizes)."""
+    return crc32(f"{vendor}/{instance}".encode("utf-8"))
+
+
+def sort_servers_for_start(available_servers: dict) -> list[tuple[tuple[str, str], list]]:
+    """Return servers in deterministic hash order for the start command.
+
+    Catalog price order would start small instances first and heavy ones last,
+    which burns through quota on a new vendor before larger SKUs get a turn.
+    Hashing vendor/instance mixes sizes while staying predictable across runs.
+    """
+    return sorted(
+        available_servers.items(),
+        key=lambda item: instance_start_order_key(item[0][0], item[0][1]),
+    )
+
+
 def sort_available_managed_dbs(available_managed_dbs: dict, data_dir, reverse=True, max_start=None):
     if max_start:
         available_managed_dbs = {

@@ -382,7 +382,10 @@ def start(ctx, exclude, start_only, vendor):
     count = 0
     lock = threading.Lock()
     exception = None
-    for (vnd, server), (srv_data, regions, zones, zone_to_region) in available_servers(vendor=vendor).items():
+    # Hash order mixes instance sizes; price order would exhaust quota on small SKUs first.
+    for (vnd, server), (srv_data, regions, zones, zone_to_region) in lib.sort_servers_for_start(
+        available_servers(vendor=vendor)
+    ):
         if vnd == "aws" and not (server.startswith("m9g") or server == "c4.xlarge"):
             logging.info(f"Excluding {vnd}/{server}")
             continue
