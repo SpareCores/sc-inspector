@@ -124,6 +124,53 @@ def _sync_commit_session_settable() -> bool:
         return False
 
 
+def _durability_roles(task) -> list[str]:
+    roles = [PG_USER]
+    if task.tool == "hammerdb":
+        wl = WORKLOADS.get(task.workload_proxy, {}).get("hammerdb", "tpcc")
+        if wl == "tpcc":
+            roles.append("tpcc")
+        elif wl == "tpch":
+            roles.append("tpch")
+    return roles
+
+
+def _apply_durability(durability: str, roles: list[str], *, sync_settable: bool) -> None:
+    """Set per-role synchronous_commit so benchmark clients honor SC_DURABILITY."""
+    import psycopg2
+
+    if durability == "async":
+        if not sync_settable:
+            raise RuntimeError(
+                "async durability requires synchronous_commit=off; "
+                "this managed DB does not allow relaxing it"
+            )
+        sync_value = "off"
+    else:
+        sync_value = None
+
+    conn = psycopg2.connect(
+        host=_db_host(),
+        port=_db_port(),
+        user=PG_USER,
+        password=PG_PASSWORD,
+        dbname=PG_DB,
+        connect_timeout=30,
+        **_db_connect_kwargs(),
+    )
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        for role in roles:
+            cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
+            if not cur.fetchone():
+                continue
+            if sync_value is None:
+                cur.execute(f'ALTER ROLE "{role}" RESET synchronous_commit')
+            else:
+                cur.execute(f'ALTER ROLE "{role}" SET synchronous_commit TO {sync_value}')
+    conn.close()
+
+
 def _fix_public_schema(dbname: str, owner: str) -> None:
     import psycopg2
 
@@ -304,6 +351,15 @@ def run_dbaas_task(
             meta.end = datetime.now()
             meta.exit_code = 1
             return None, b"", str(exc).encode()
+
+    durability = getattr(task, "durability", "durable")
+    try:
+        _apply_durability(durability, _durability_roles(task), sync_settable=sync_settable)
+    except Exception as exc:
+        meta.error_msg = f"durability setup failed: {exc}"
+        meta.end = datetime.now()
+        meta.exit_code = 1
+        return None, b"", str(exc).encode()
 
     env = _benchmark_env(task, params, mem_gib, db_vcpus, client_vcpus)
     env.update(_tracker_env(task))
