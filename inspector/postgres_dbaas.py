@@ -135,6 +135,13 @@ def _durability_roles(task) -> list[str]:
     return roles
 
 
+def _grant_benchmark_role_admin(cur, role: str) -> None:
+    """Let the admin user SET ROLE / ALTER ROLE for benchmark-owned databases (GCP Cloud SQL)."""
+    if role == PG_USER:
+        return
+    cur.execute(f'GRANT "{role}" TO "{PG_USER}" WITH ADMIN OPTION')
+
+
 def _apply_durability(durability: str, roles: list[str], *, sync_settable: bool) -> None:
     """Set per-role synchronous_commit so benchmark clients honor SC_DURABILITY."""
     import psycopg2
@@ -164,6 +171,7 @@ def _apply_durability(durability: str, roles: list[str], *, sync_settable: bool)
             cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
             if not cur.fetchone():
                 continue
+            _grant_benchmark_role_admin(cur, role)
             if sync_value is None:
                 cur.execute(f'ALTER ROLE "{role}" RESET synchronous_commit')
             else:
@@ -185,8 +193,12 @@ def _fix_public_schema(dbname: str, owner: str) -> None:
     )
     conn.autocommit = True
     with conn.cursor() as cur:
+        if owner != PG_USER:
+            cur.execute(f'SET ROLE "{owner}"')
         cur.execute(f'ALTER SCHEMA public OWNER TO "{owner}"')
         cur.execute(f'GRANT ALL ON SCHEMA public TO "{owner}"')
+        if owner != PG_USER:
+            cur.execute(f'RESET ROLE')
     conn.close()
 
 
@@ -215,6 +227,7 @@ def _reset_benchmark_database(dbname: str, owner: str, role_password: str | None
             cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (owner,))
             if not cur.fetchone():
                 cur.execute(f'CREATE ROLE "{owner}" LOGIN PASSWORD %s', (role_password,))
+            _grant_benchmark_role_admin(cur, owner)
         cur.execute(f'CREATE DATABASE "{dbname}" OWNER "{owner}"')
     conn.close()
     _fix_public_schema(dbname, owner)
