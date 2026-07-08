@@ -174,7 +174,10 @@ def _try_provision_dbaas_stack(
         dbaas=stack_spec,
     )
     runner.destroy(
-        vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info)
+        vendor,
+        {},
+        resource_opts,
+        stack_opts=pulumi_stack_opts(error_msgs, [], instance_logger),
     )
     pulumi_output = []
     stack_opts = pulumi_stack_opts(

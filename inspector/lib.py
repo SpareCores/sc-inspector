@@ -1775,7 +1775,7 @@ def delayed_destroy(vendor, server, resource_opts):
     current_thread.name = f"{vendor}/{server}"
     instance_logger = logging.getLogger(f"{vendor}/{server}")
     try:
-        runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
+        runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
     except Exception:
         logging.exception("Failed to destroy")
 
@@ -1869,6 +1869,51 @@ def strip_pulumi_output(text: str) -> str:
     return re.sub(r"<\{%[^%]+%\}>", "", text)
 
 
+_SECRET_OUTPUT_KEYS = (
+    "db_admin_password",
+    "administrator_login_password",
+    "admin_password",
+)
+
+
+def redact_pulumi_output(text: str) -> str:
+    """Mask credential-like values before Pulumi stdout reaches CI logs."""
+    text = strip_pulumi_output(text)
+    for key in _SECRET_OUTPUT_KEYS:
+        text = re.sub(
+            rf'({re.escape(key)}\s*:\s*)"[^"]*"',
+            r'\1"[secret]"',
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            rf"({re.escape(key)}\s*:\s*)'[^']*'",
+            r"\1'[secret]'",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            rf"({re.escape(key)})=([^\s,]+)",
+            r"\1=[secret]",
+            text,
+            flags=re.IGNORECASE,
+        )
+    return text
+
+
+def pulumi_log_output(message: str) -> None:
+    logging.info(redact_pulumi_output(message))
+
+
+def pulumi_on_output(logger):
+    """Return an ``on_output`` callback that redacts secrets before logging."""
+
+    def on_output(message: str) -> None:
+        logger.info(redact_pulumi_output(message))
+
+    return on_output
+
+
 def is_instance_resource_type(resource_type: str) -> bool:
     return any(resource_type.endswith(suffix) for suffix in INSTANCE_RESOURCE_SUFFIXES)
 
@@ -1903,10 +1948,11 @@ class InstanceCreationTiming:
 
 def pulumi_output_filter(message, error_msgs, output, logger=logging):
     # print output to the console with logger, so we have the dates
-    logger.info(message)
-    output.append(message)
-    if any([regex.search(message) for regex in PULUMI_ERRORS]):
-        error_msgs.append(message)
+    safe = redact_pulumi_output(message)
+    logger.info(safe)
+    output.append(safe)
+    if any(regex.search(message) for regex in PULUMI_ERRORS):
+        error_msgs.append(safe)
 
 
 def pulumi_event_filter(event, error_msgs):
@@ -2002,7 +2048,7 @@ def delayed_destroy(vendor, server, resource_opts):
     current_thread.name = f"{vendor}/{server}"
     instance_logger = logging.getLogger(f"{vendor}/{server}")
     try:
-        runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
+        runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
     except Exception:
         logging.exception("Failed to destroy")
 
@@ -2209,7 +2255,7 @@ def _try_start_multi_vm_inspect(
         else:
             resource_opts["region"] = region
 
-        runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
+        runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
         pulumi_output = []
         stack_opts = pulumi_stack_opts(
             error_msgs, pulumi_output, instance_logger, instance_timing, server
@@ -2317,7 +2363,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             )
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
+            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
             pulumi_output = []
             stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger, instance_timing, server)
             try:
@@ -2348,7 +2394,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             )
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
+            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
             pulumi_output = []
             stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger, instance_timing, server)
             try:
@@ -2380,7 +2426,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             )
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
+            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
             pulumi_output = []
             stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger, instance_timing, server)
             try:
@@ -2421,7 +2467,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             )
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
+            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
             error_msgs = []
             output = []
             stack_opts = pulumi_stack_opts(error_msgs, output, instance_logger, instance_timing, server)
@@ -2474,7 +2520,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 vendor, server, srv_data, region, None, timeout_mins, ssh_deploy_key_b64, repo_url_ssh
             )
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
+            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
 
             error_msgs = []
             output = []
@@ -2552,7 +2598,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 advanced_machine_features=dict(enable_nested_virtualization=True),
             )
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=instance_logger.info))
+            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
 
             pulumi_output = []
             stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger, instance_timing, server)

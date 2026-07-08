@@ -654,7 +654,7 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
                         vendor,
                         pulumi_opts,
                         resource_opts | dict(instance=server),
-                        stack_opts=dict(on_output=logging.info),
+                        stack_opts=dict(on_output=lib.pulumi_log_output),
                     )
                 except Exception:
                     logging.exception(f"Failed to destroy {vendor}/{value}/{server}")
@@ -836,7 +836,7 @@ def cleanup_s3_stack(vendor: str, records: list, *, data_dir: str | None = None)
                     vendor,
                     pulumi_opts,
                     resource_opts,
-                    stack_opts=dict(on_output=logging.info),
+                    stack_opts=dict(on_output=lib.pulumi_log_output),
                 ),
                 cancel_func=cancel_lock,
             )
