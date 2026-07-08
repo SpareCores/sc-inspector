@@ -233,6 +233,66 @@ def test_try_provision_destroy_stack_on_create_failure(mock_repl, mock_retry, mo
     assert second_opts["instance"] == first_opts["instance"]
 
 
+@patch("dbaas_start.runner.destroy_stack")
+@patch("dbaas_start.retry_locked", return_value=None)
+@patch("dbaas_start._dbaas_user_data_replacements", return_value={"USER_DATA_TEMPLATE": "tmpl"})
+def test_try_provision_passes_image_sku_only_for_azure(mock_repl, mock_retry, mock_destroy_stack):
+    del mock_repl, mock_destroy_stack
+    client = _client("n4-highcpu-16")
+    target = _target()
+    provision = {
+        "sku_name": "db-perf-optimized-N-16",
+        "sku_tier": "PerformanceOptimized",
+        "storage_gib": 128,
+        "storage_type": "PD_SSD",
+        "storage_edition": "PD_SSD",
+        "iops_tier": "P30",
+        "cache_tier": "c100",
+        "admin_login": "scadmin",
+        "database_name": "bench",
+    }
+
+    _try_provision_dbaas_stack(
+        vendor="gcp",
+        target=target,
+        client=client,
+        region="europe-west1",
+        zone="europe-west1-b",
+        cache_tier="c100",
+        provision=provision,
+        slug="perfoptn16-pg18-c100",
+        timeout_mins=60,
+        ssh_deploy_key_b64="",
+        repo_url_ssh="git@github.com:example/repo.git",
+        instance_logger=MagicMock(),
+        instance_timing=MagicMock(),
+        error_msgs=[],
+    )
+
+    create_opts = mock_retry.call_args.args[3]
+    assert "image_sku" not in create_opts
+
+    mock_retry.reset_mock()
+    _try_provision_dbaas_stack(
+        vendor="azure",
+        target=target,
+        client=client,
+        region="northeurope",
+        zone=None,
+        cache_tier="c100",
+        provision=provision,
+        slug="perfoptn16-pg18-c100",
+        timeout_mins=60,
+        ssh_deploy_key_b64="",
+        repo_url_ssh="git@github.com:example/repo.git",
+        instance_logger=MagicMock(),
+        instance_timing=MagicMock(),
+        error_msgs=[],
+    )
+    create_opts = mock_retry.call_args.args[3]
+    assert create_opts["image_sku"] == "server"
+
+
 def test_finalize_multi_vm_band_skipped_for_dbaas_topology():
     import os
     from lib import _finalize_multi_vm_band_if_done
@@ -246,6 +306,7 @@ if __name__ == "__main__":
         test_try_start_tries_next_client_after_vm_quota_skip,
         test_try_start_tries_next_client_after_create_failure,
         test_try_provision_destroy_stack_on_create_failure,
+        test_try_provision_passes_image_sku_only_for_azure,
         test_finalize_multi_vm_band_skipped_for_dbaas_topology,
     ]
     for fn in tests:

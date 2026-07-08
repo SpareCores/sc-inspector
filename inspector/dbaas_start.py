@@ -240,7 +240,9 @@ def _try_provision_dbaas_stack(
         error_msgs, pulumi_output, instance_logger, instance_timing, client.api_reference
     )
     arch = client.cpu_architecture or "x86_64"
-    extra = {"image_sku": "server-arm64" if "arm" in arch.lower() else "server"}
+    extra: dict[str, str] = {}
+    if vendor == "azure":
+        extra["image_sku"] = "server-arm64" if "arm" in arch.lower() else "server"
     try:
         retry_locked(
             runner.create,
