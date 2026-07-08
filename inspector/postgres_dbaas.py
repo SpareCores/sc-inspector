@@ -25,6 +25,12 @@ PG_DB = os.environ.get("SC_DB_NAME", "bench")
 BENCHBASE_DB = "benchbase"
 DB_WAIT_TIMEOUT_SEC = int(os.environ.get("DB_WAIT_TIMEOUT_SEC", "1200"))
 
+_TRACKER_FORWARD_ENV = (
+    "SENTINEL_API_TOKEN",
+    "SENTINEL_API_BASE",
+    "SENTINEL_API_URL",
+)
+
 
 def _db_host() -> str:
     host = os.environ.get("SC_DB_HOST", "").strip()
@@ -97,6 +103,24 @@ def _sync_commit_session_settable() -> bool:
         return False
 
 
+def _fix_public_schema(dbname: str, owner: str) -> None:
+    import psycopg2
+
+    conn = psycopg2.connect(
+        host=_db_host(),
+        port=_db_port(),
+        user=PG_USER,
+        password=PG_PASSWORD,
+        dbname=dbname,
+        connect_timeout=30,
+    )
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute(f'ALTER SCHEMA public OWNER TO "{owner}"')
+        cur.execute(f'GRANT ALL ON SCHEMA public TO "{owner}"')
+    conn.close()
+
+
 def _ensure_benchbase_db() -> None:
     import psycopg2
 
@@ -114,6 +138,38 @@ def _ensure_benchbase_db() -> None:
         if not cur.fetchone():
             cur.execute(f'CREATE DATABASE "{BENCHBASE_DB}"')
     conn.close()
+    _fix_public_schema(BENCHBASE_DB, PG_USER)
+
+
+def _ensure_hammerdb_prereqs() -> None:
+    """Prepare roles/databases HammerDB expects; fix public schema on managed Postgres."""
+    import psycopg2
+
+    specs = (
+        ("tpcc", "tpcc", "tpcc"),
+        ("tpch", "tpch", "tpch"),
+    )
+    conn = psycopg2.connect(
+        host=_db_host(),
+        port=_db_port(),
+        user=PG_USER,
+        password=PG_PASSWORD,
+        dbname="postgres",
+        connect_timeout=30,
+    )
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        for role, password, dbname in specs:
+            cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
+            if not cur.fetchone():
+                cur.execute(f'CREATE ROLE "{role}" LOGIN PASSWORD %s', (password,))
+            cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (dbname,))
+            if not cur.fetchone():
+                cur.execute(f'CREATE DATABASE "{dbname}" OWNER "{role}"')
+    conn.close()
+
+    for role, _, dbname in specs:
+        _fix_public_schema(dbname, role)
 
 
 def _provision_env() -> dict[str, str]:
@@ -178,6 +234,22 @@ def _benchmark_env(task, params, mem_gib: float, db_vcpus: int, client_vcpus: in
     return env
 
 
+def _tracker_env(task) -> dict[str, str]:
+    """Env vars for resource-tracker inside benchmark images (see companion.py)."""
+    env = {
+        "TRACKER_PROJECT_NAME": "inspector",
+        "TRACKER_JOB_NAME": task.name,
+        "TRACKER_EXTERNAL_RUN_ID": os.environ.get("GITHUB_RUN_ID", ""),
+        "TRACKER_QUIET": "true",
+    }
+    for key in _TRACKER_FORWARD_ENV:
+        if os.environ.get(key):
+            env[key] = os.environ[key]
+    if os.environ.get("HF_TOKEN"):
+        env["HF_TOKEN"] = os.environ["HF_TOKEN"]
+    return env
+
+
 def run_dbaas_task(
     meta: Meta,
     task,
@@ -207,15 +279,27 @@ def run_dbaas_task(
             meta.end = datetime.now()
             meta.exit_code = 1
             return None, b"", str(exc).encode()
+    elif task.tool == "hammerdb":
+        try:
+            _ensure_hammerdb_prereqs()
+        except Exception as exc:
+            meta.error_msg = f"hammerdb db setup failed: {exc}"
+            meta.end = datetime.now()
+            meta.exit_code = 1
+            return None, b"", str(exc).encode()
 
     env = _benchmark_env(task, params, mem_gib, db_vcpus, client_vcpus)
+    env.update(_tracker_env(task))
     docker_opts = dict(DOCKER_OPTS)
     docker_opts["environment"] = env
     docker_opts["network_mode"] = "host"
     c = None
     try:
         d = docker.from_env(timeout=1800)
-        d.images.pull(task.image)
+        image = d.images.pull(task.image)
+        image_ref = next(iter(image.attrs.get("RepoDigests") or []), task.image)
+        env["TRACKER_CONTAINER_IMAGE"] = image_ref
+        docker_opts["environment"] = env
         c = d.containers.run(task.image, task.command, **docker_opts)
         ts = time.time() + task.timeout.total_seconds()
         while time.time() < ts:
