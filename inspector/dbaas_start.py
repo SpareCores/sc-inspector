@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import copy
 import logging
 import os
 import threading
@@ -20,7 +19,6 @@ from lib import (
     InstanceCreationTiming,
     boot_meta_for_task,
     candidate_regions,
-    delayed_destroy,
     inspector_user_data_replacements,
     pulumi_stack_opts,
     record_instance_start_failure,
@@ -100,6 +98,44 @@ def _group_tasks_by_cache_tier(tasks) -> dict[str, list]:
     return groups
 
 
+def _build_dbaas_resource_opts(
+    *,
+    client,
+    region: str,
+    slug: str,
+    stack_spec: DbaasStackSpec,
+) -> dict:
+    return dict(
+        public_key=os.environ.get("SSH_PUBLIC_KEY", ""),
+        instance=client.api_reference,
+        dbaas_slug=slug,
+        region=region,
+        dbaas=stack_spec,
+    )
+
+
+def _destroy_dbaas_stack(
+    vendor: str,
+    resource_opts: dict,
+    instance_logger,
+    error_msgs: list,
+) -> None:
+    """Tear down a DBaaS Pulumi stack so slug-shared Azure resources can be reprovisioned."""
+    try:
+        runner.destroy_stack(
+            vendor,
+            {},
+            resource_opts,
+            stack_opts=pulumi_stack_opts(error_msgs, [], instance_logger),
+        )
+    except Exception:
+        logging.exception(
+            "DBaaS stack destroy failed for %s/%s",
+            resource_opts.get("region"),
+            resource_opts.get("instance"),
+        )
+
+
 def _try_provision_dbaas_stack(
     vendor: str,
     target: ManagedDbTarget,
@@ -112,7 +148,6 @@ def _try_provision_dbaas_stack(
     timeout_mins: int,
     ssh_deploy_key_b64: str,
     repo_url_ssh: str,
-    executor,
     instance_logger,
     instance_timing,
     error_msgs,
@@ -166,19 +201,13 @@ def _try_provision_dbaas_stack(
         },
     )
 
-    resource_opts = dict(
-        public_key=os.environ.get("SSH_PUBLIC_KEY", ""),
-        instance=client.api_reference,
-        dbaas_slug=slug,
+    resource_opts = _build_dbaas_resource_opts(
+        client=client,
         region=region,
-        dbaas=stack_spec,
+        slug=slug,
+        stack_spec=stack_spec,
     )
-    runner.destroy(
-        vendor,
-        {},
-        resource_opts,
-        stack_opts=pulumi_stack_opts(error_msgs, [], instance_logger),
-    )
+    _destroy_dbaas_stack(vendor, resource_opts, instance_logger, error_msgs)
     pulumi_output = []
     stack_opts = pulumi_stack_opts(
         error_msgs, pulumi_output, instance_logger, instance_timing, client.api_reference
@@ -203,12 +232,7 @@ def _try_provision_dbaas_stack(
         )
         if not error_msgs:
             error_msgs.append(str(exc))
-        executor.submit(
-            delayed_destroy,
-            vendor,
-            client.api_reference,
-            copy.deepcopy(resource_opts),
-        )
+        _destroy_dbaas_stack(vendor, resource_opts, instance_logger, error_msgs)
         return False
 
 
@@ -284,7 +308,6 @@ def try_start_dbaas_inspect(
                     timeout_mins,
                     ssh_deploy_key_b64,
                     repo_url_ssh,
-                    executor,
                     instance_logger,
                     instance_timing,
                     error_msgs,

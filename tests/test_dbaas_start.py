@@ -15,7 +15,9 @@ sys.modules["sc_crawler.table_fields"] = _sc_tf
 
 _sc_runner = ModuleType("sc_runner")
 _sc_runner_runner = ModuleType("sc_runner.runner")
-_sc_runner_runner.runner = SimpleNamespace(create=MagicMock(), destroy=MagicMock())
+_sc_runner_runner.create = MagicMock()
+_sc_runner_runner.destroy = MagicMock()
+_sc_runner_runner.destroy_stack = MagicMock()
 _sc_runner_resources = ModuleType("sc_runner.resources")
 _sc_runner_managed_db = ModuleType("sc_runner.resources.managed_db")
 
@@ -45,7 +47,7 @@ sys.modules["repo"] = _repo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "inspector"))
 
-from dbaas_start import try_start_dbaas_inspect  # noqa: E402
+from dbaas_start import _try_provision_dbaas_stack, try_start_dbaas_inspect  # noqa: E402
 from lib import DbaasDbTask  # noqa: E402
 
 
@@ -186,6 +188,51 @@ def test_try_start_tries_next_client_after_create_failure(
     assert mock_provision.call_count == 2
 
 
+@patch("dbaas_start.runner.destroy_stack")
+@patch("dbaas_start.retry_locked", side_effect=RuntimeError("create failed"))
+@patch("dbaas_start._dbaas_user_data_replacements", return_value={"USER_DATA_TEMPLATE": "tmpl"})
+def test_try_provision_destroy_stack_on_create_failure(mock_repl, mock_retry, mock_destroy_stack):
+    del mock_repl
+    client = _client("Standard_D8als_v6")
+    target = _target()
+    provision = {
+        "sku_name": "Standard_E16ds_v5",
+        "sku_tier": "MemoryOptimized",
+        "storage_gib": 128,
+        "storage_type": "PremiumV2_LRS",
+        "storage_edition": "ManagedDiskV2",
+        "iops_tier": "P30",
+        "cache_tier": "c100",
+        "admin_login": "scadmin",
+        "database_name": "bench",
+    }
+
+    started = _try_provision_dbaas_stack(
+        vendor="azure",
+        target=target,
+        client=client,
+        region="northeurope",
+        zone=None,
+        cache_tier="c100",
+        provision=provision,
+        slug="e16dsv5-pg18-c100",
+        timeout_mins=60,
+        ssh_deploy_key_b64="",
+        repo_url_ssh="git@github.com:example/repo.git",
+        instance_logger=MagicMock(),
+        instance_timing=MagicMock(),
+        error_msgs=[],
+    )
+
+    assert started is False
+    assert mock_destroy_stack.call_count == 2
+    first_opts = mock_destroy_stack.call_args_list[0].args[2]
+    second_opts = mock_destroy_stack.call_args_list[1].args[2]
+    assert first_opts["instance"] == "Standard_D8als_v6"
+    assert first_opts["dbaas_slug"] == "e16dsv5-pg18-c100"
+    assert second_opts["instance"] == first_opts["instance"]
+
+
 def test_finalize_multi_vm_band_skipped_for_dbaas_topology():
     import os
     from lib import _finalize_multi_vm_band_if_done
@@ -198,6 +245,7 @@ if __name__ == "__main__":
     tests = [
         test_try_start_tries_next_client_after_vm_quota_skip,
         test_try_start_tries_next_client_after_create_failure,
+        test_try_provision_destroy_stack_on_create_failure,
         test_finalize_multi_vm_band_skipped_for_dbaas_topology,
     ]
     for fn in tests:
