@@ -472,6 +472,9 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e MULTI_VM_CLIENT_VCPUS={MULTI_VM_CLIENT_VCPUS} \
     -e PROVISIONED_DISK_GIB={PROVISIONED_DISK_GIB} \
     -e CLIENT_DISK_GIB={CLIENT_DISK_GIB} \
+    -e MULTI_VM_DB_DISK_TYPE={MULTI_VM_DB_DISK_TYPE} \
+    -e MULTI_VM_DB_DISK_IOPS={MULTI_VM_DB_DISK_IOPS} \
+    -e MULTI_VM_DB_DISK_THROUGHPUT={MULTI_VM_DB_DISK_THROUGHPUT} \
     ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT}
 inspect_exit=$?
 fi

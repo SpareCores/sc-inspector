@@ -42,7 +42,8 @@ _P_TIER_ORDER: tuple[str, ...] = (
 
 # Minimum performance tier per cache profile (can exceed size baseline via PremiumV2).
 _CACHE_TIER_MIN_IOPS: dict[str, str] = {
-    "c100": "P30",
+    # c100 durable headline is fsync-bound; P40 (7.5k IOPS) reduces storage ceiling vs P30.
+    "c100": "P40",
     "c30": "P20",
 }
 
@@ -86,15 +87,12 @@ def _provision_spec_azure(target: ManagedDbTarget, cache_tier: str, cache_ratio:
 
 
 def _provision_spec_gcp(target: ManagedDbTarget, cache_tier: str, cache_ratio: float, storage_gib: int) -> dict[str, Any]:
-    iops_tier = _iops_tier_for_gib(storage_gib)
-    min_tier = _CACHE_TIER_MIN_IOPS.get(cache_tier)
-    if min_tier:
-        iops_tier = _max_iops_tier(iops_tier, min_tier)
     return {
         "storage_gib": storage_gib,
         "storage_edition": "PD_SSD",
         "storage_type": "PD_SSD",
-        "iops_tier": iops_tier,
+        # Cloud SQL has no Azure-style P-tier; IOPS scale with disk size automatically.
+        "iops_tier": "",
         "cache_tier": cache_tier,
         "cache_ratio": cache_ratio,
         "sku_name": target.native_id,

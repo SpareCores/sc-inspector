@@ -70,6 +70,11 @@ def db_disk_options(vendor: str) -> dict[str, Any]:
         opts["disk_throughput"] = int(disk_throughput)
     if not opts.get("disk_type"):
         return {}
+    # PremiumV2 without explicit knobs still beats Premium_LRS; default to P30-class
+    # (5k IOPS / 200 MB/s) when MULTI_VM_DB_DISK_TYPE=PremiumV2_LRS is set alone.
+    if opts.get("disk_type") in {"PremiumV2_LRS", "UltraSSD_LRS"}:
+        opts.setdefault("disk_iops", 5000)
+        opts.setdefault("disk_throughput", 200)
     return opts
 
 

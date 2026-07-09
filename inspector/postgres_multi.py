@@ -283,7 +283,19 @@ def _benchmark_env(task, db_host: str, params, mem_gib: float, db_vcpus: int, cl
         "SC_RUN_VUS": str(params.run_vus),
         "SC_WAREHOUSES": str(params.scale_units),
         "SC_WH_PER_VU_MIN": str(wh_per_vu_min(db_vcpus)),
+        "SC_TOPOLOGY": "multi_vm",
     }
+    provisioned_gib = os.environ.get("PROVISIONED_DISK_GIB", "").strip()
+    if provisioned_gib:
+        env["SC_PROVISIONED_DISK_GIB"] = provisioned_gib
+    for key, var in (
+        ("SC_MULTI_VM_DB_DISK_TYPE", "MULTI_VM_DB_DISK_TYPE"),
+        ("SC_MULTI_VM_DB_DISK_IOPS", "MULTI_VM_DB_DISK_IOPS"),
+        ("SC_MULTI_VM_DB_DISK_THROUGHPUT", "MULTI_VM_DB_DISK_THROUGHPUT"),
+    ):
+        val = os.environ.get(var, "").strip()
+        if val:
+            env[key] = val
     if task.tool == "hammerdb":
         env["SC_WORKLOAD"] = wl.get("hammerdb", "tpcc")
     else:

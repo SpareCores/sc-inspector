@@ -1644,6 +1644,9 @@ def inspector_user_data_replacements(
     client_vcpus: int = 0,
     provisioned_disk_gib: int | None = None,
     client_disk_gib: int = 30,
+    db_disk_type: str = "",
+    db_disk_iops: str = "",
+    db_disk_throughput: str = "",
     include_run_upload: bool | None = None,
 ) -> dict[str, str]:
     import s3_runs
@@ -1683,6 +1686,9 @@ def inspector_user_data_replacements(
         "MULTI_VM_CLIENT_VCPUS": str(client_vcpus or ""),
         "PROVISIONED_DISK_GIB": str(provisioned_disk_gib or VOLUME_SIZE),
         "CLIENT_DISK_GIB": str(client_disk_gib),
+        "MULTI_VM_DB_DISK_TYPE": db_disk_type,
+        "MULTI_VM_DB_DISK_IOPS": db_disk_iops,
+        "MULTI_VM_DB_DISK_THROUGHPUT": db_disk_throughput,
         "TOPOLOGY": "multi_vm" if role != "dbaas_client" else "dbaas",
         "MANAGED_DB_INSTANCE_KEY": "",
         "SC_DB_HOST": "",
@@ -1757,6 +1763,9 @@ def build_server_user_data_replacements(
     client_vcpus: int,
     provisioned_disk_gib: int,
     client_disk_gib: int,
+    db_disk_type: str = "",
+    db_disk_iops: str = "",
+    db_disk_throughput: str = "",
 ) -> dict:
     """Replacements for server user-data rendered inside Pulumi via Output.apply."""
     replacements = inspector_user_data_replacements(
@@ -1777,6 +1786,9 @@ def build_server_user_data_replacements(
         client_vcpus=client_vcpus,
         provisioned_disk_gib=provisioned_disk_gib,
         client_disk_gib=client_disk_gib,
+        db_disk_type=db_disk_type,
+        db_disk_iops=db_disk_iops,
+        db_disk_throughput=db_disk_throughput,
     )
     # Unpacked template: sc-runner injects CLIENT_PRIVATE_IP after the client NIC exists.
     return {
@@ -2246,6 +2258,9 @@ def _try_start_multi_vm_inspect(
             client_vcpus=int(client.vcpus or 0),
             provisioned_disk_gib=db_disk,
             client_disk_gib=30,
+            db_disk_type=str(db_disk_opts.get("disk_type") or ""),
+            db_disk_iops=str(db_disk_opts.get("disk_iops") or ""),
+            db_disk_throughput=str(db_disk_opts.get("disk_throughput") or ""),
         )
         spec = MultiVmStackSpec.two_vm(
             primary_instance=server,
