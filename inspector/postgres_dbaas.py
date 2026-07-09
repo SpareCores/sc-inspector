@@ -22,6 +22,9 @@ from lib import DOCKER_OPTS, Meta, container_remove
 PG_USER = os.environ.get("SC_DB_USER", "scadmin")
 PG_PASSWORD = os.environ.get("SC_DB_PASSWORD", "")
 PG_DB = os.environ.get("SC_DB_NAME", "bench")
+BOOTSTRAP_USER = os.environ.get("SC_DB_BOOTSTRAP_USER", PG_USER)
+BOOTSTRAP_PASSWORD = os.environ.get("SC_DB_BOOTSTRAP_PASSWORD", PG_PASSWORD)
+BOOTSTRAP_DB = os.environ.get("SC_DB_BOOTSTRAP_DATABASE", "postgres")
 BENCHBASE_DB = "benchbase"
 DB_WAIT_TIMEOUT_SEC = int(os.environ.get("DB_WAIT_TIMEOUT_SEC", "1200"))
 
@@ -73,8 +76,57 @@ def _db_connect_kwargs() -> dict[str, str]:
     return {"sslmode": mode}
 
 
+def _bootstrap_connect():
+    import psycopg2
+
+    return psycopg2.connect(
+        host=_db_host(),
+        port=_db_port(),
+        user=BOOTSTRAP_USER,
+        password=BOOTSTRAP_PASSWORD,
+        dbname=BOOTSTRAP_DB,
+        connect_timeout=10,
+        **_db_connect_kwargs(),
+    )
+
+
+def _bootstrap_managed_db() -> None:
+    """Create the workload admin user and empty bench database (not managed by Pulumi)."""
+    vendor = _dbaas_vendor()
+    conn = _bootstrap_connect()
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        if vendor == "gcp":
+            cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (PG_USER,))
+            if not cur.fetchone():
+                cur.execute(f'CREATE USER "{PG_USER}" WITH PASSWORD %s', (PG_PASSWORD,))
+                cur.execute(f'GRANT cloudsqlsuperuser TO "{PG_USER}"')
+        cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (PG_DB,))
+        if not cur.fetchone():
+            cur.execute(f'CREATE DATABASE "{PG_DB}" OWNER "{PG_USER}"')
+    conn.close()
+    logging.info("Bootstrapped managed DB user=%s database=%s", PG_USER, PG_DB)
+
+
+def _wait_bootstrap_ready() -> None:
+    deadline = time.monotonic() + DB_WAIT_TIMEOUT_SEC
+    last_err = None
+    while time.monotonic() < deadline:
+        try:
+            conn = _bootstrap_connect()
+            conn.close()
+            logging.info("Managed DB bootstrap endpoint ready at %s:%s", _db_host(), _db_port())
+            return
+        except Exception as exc:
+            last_err = exc
+            time.sleep(10)
+    raise TimeoutError(f"managed DB bootstrap endpoint not ready after {DB_WAIT_TIMEOUT_SEC}s: {last_err}")
+
+
 def wait_db_ready() -> None:
     """Block until the managed Postgres endpoint accepts connections."""
+    _wait_bootstrap_ready()
+    _bootstrap_managed_db()
     import psycopg2
 
     host = _db_host()
@@ -93,7 +145,7 @@ def wait_db_ready() -> None:
                 **_db_connect_kwargs(),
             )
             conn.close()
-            logging.info("Managed DB ready at %s:%s", host, port)
+            logging.info("Managed DB ready at %s:%s db=%s user=%s", host, port, PG_DB, PG_USER)
             return
         except Exception as exc:
             last_err = exc
