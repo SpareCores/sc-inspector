@@ -1055,22 +1055,15 @@ def inspect(ctx, vendor, instance, gpu_count, threads, dbaas_instance_key):
     logging.info("Updating the git repo")
     # we must clone the repo before writing anything to it
     repo_path = ctx.parent.params["repo_path"]
-    client_data_dir = None
     if dbaas_instance_key:
-        sparse = (
-            f"dbaas/{vendor}/{dbaas_instance_key}",
-            f"data/{vendor}/{instance}",
-        )
+        sparse = (f"dbaas/{vendor}/{dbaas_instance_key}",)
         data_dir = os.path.join(repo_path, "dbaas", vendor, dbaas_instance_key)
-        client_data_dir = os.path.join(repo_path, "data", vendor, instance)
     else:
         sparse = (f"data/{vendor}/{instance}",)
         data_dir = os.path.join(repo_path, "data", vendor, instance)
     repo.get_repo(sparse_paths=sparse)
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
-    if client_data_dir and not os.path.exists(client_data_dir):
-        os.makedirs(client_data_dir)
     lib.record_timing_inspector_start(data_dir)
     try:
         repo.push_path(lib.timing_dir(data_dir), f"Inspector started from {repo.gha_url()}")
@@ -1087,7 +1080,6 @@ def inspect(ctx, vendor, instance, gpu_count, threads, dbaas_instance_key):
             instance=instance,
             gpu_count=gpu_count,
             nthreads=threads,
-            client_data_dir=client_data_dir,
         )
     finally:
         lib.finalize_task_metas(
@@ -1095,15 +1087,12 @@ def inspect(ctx, vendor, instance, gpu_count, threads, dbaas_instance_key):
             data_dir,
             instance,
             gpu_count=gpu_count,
-            client_data_dir=client_data_dir,
         )
         lib.record_timing_inspector_end(data_dir)
         try:
             import s3_runs
 
             s3_runs.upload_task_logs_to_s3(data_dir)
-            if client_data_dir:
-                s3_runs.upload_task_logs_to_s3(client_data_dir)
         except Exception:
             logging.exception("Failed to upload task logs to S3")
         try:

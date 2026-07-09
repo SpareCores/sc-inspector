@@ -135,11 +135,40 @@ def _durability_roles(task) -> list[str]:
     return roles
 
 
-def _grant_benchmark_role_admin(cur, role: str) -> None:
-    """Let the admin user SET ROLE / ALTER ROLE for benchmark-owned databases (GCP Cloud SQL)."""
-    if role == PG_USER:
+def _dbaas_vendor() -> str:
+    return os.environ.get("SC_PROVISION_VENDOR_ID", "").lower()
+
+
+def _needs_workload_role_admin_grant() -> bool:
+    """GCP Cloud SQL requires GRANT ... WITH ADMIN OPTION before SET ROLE on workload roles."""
+    return _dbaas_vendor() == "gcp"
+
+
+def _role_has_admin_grant(cur, role: str) -> bool:
+    cur.execute(
+        """
+        SELECT 1 FROM pg_auth_members m
+        JOIN pg_roles r ON r.oid = m.roleid
+        JOIN pg_roles mbr ON mbr.oid = m.member
+        WHERE r.rolname = %s AND mbr.rolname = %s AND m.admin_option
+        """,
+        (role, PG_USER),
+    )
+    return bool(cur.fetchone())
+
+
+def _gcp_grant_benchmark_role_admin(cur, role: str) -> None:
+    if _role_has_admin_grant(cur, role):
         return
     cur.execute(f'GRANT "{role}" TO "{PG_USER}" WITH ADMIN OPTION')
+
+
+def _prepare_workload_role(cur, role: str) -> None:
+    """Vendor-specific prep so the admin user can SET ROLE / ALTER ROLE for workload roles."""
+    if role == PG_USER:
+        return
+    if _needs_workload_role_admin_grant():
+        _gcp_grant_benchmark_role_admin(cur, role)
 
 
 def _apply_durability(durability: str, roles: list[str], *, sync_settable: bool) -> None:
@@ -171,7 +200,7 @@ def _apply_durability(durability: str, roles: list[str], *, sync_settable: bool)
             cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
             if not cur.fetchone():
                 continue
-            _grant_benchmark_role_admin(cur, role)
+            _prepare_workload_role(cur, role)
             if sync_value is None:
                 cur.execute(f'ALTER ROLE "{role}" RESET synchronous_commit')
             else:
@@ -193,12 +222,17 @@ def _fix_public_schema(dbname: str, owner: str) -> None:
     )
     conn.autocommit = True
     with conn.cursor() as cur:
-        if owner != PG_USER:
+        if owner != PG_USER and _needs_workload_role_admin_grant():
+            # GCP Cloud SQL: workload role must own public; admin needs SET ROLE first.
+            _prepare_workload_role(cur, owner)
             cur.execute(f'SET ROLE "{owner}"')
-        cur.execute(f'ALTER SCHEMA public OWNER TO "{owner}"')
-        cur.execute(f'GRANT ALL ON SCHEMA public TO "{owner}"')
-        if owner != PG_USER:
-            cur.execute(f'RESET ROLE')
+            cur.execute(f'ALTER SCHEMA public OWNER TO "{owner}"')
+            cur.execute(f'GRANT ALL ON SCHEMA public TO "{owner}"')
+            cur.execute("RESET ROLE")
+        else:
+            # Azure: scadmin stays azure_pg_admin; SET ROLE would drop that privilege.
+            cur.execute(f'ALTER SCHEMA public OWNER TO "{owner}"')
+            cur.execute(f'GRANT ALL ON SCHEMA public TO "{owner}"')
     conn.close()
 
 
@@ -227,7 +261,7 @@ def _reset_benchmark_database(dbname: str, owner: str, role_password: str | None
             cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (owner,))
             if not cur.fetchone():
                 cur.execute(f'CREATE ROLE "{owner}" LOGIN PASSWORD %s', (role_password,))
-            _grant_benchmark_role_admin(cur, owner)
+            _prepare_workload_role(cur, owner)
         cur.execute(f'CREATE DATABASE "{dbname}" OWNER "{owner}"')
     conn.close()
     _fix_public_schema(dbname, owner)

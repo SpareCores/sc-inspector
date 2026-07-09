@@ -639,8 +639,8 @@ def task_data_dir(
 ) -> str | os.PathLike:
     """Return the inspect data directory for a task.
 
-    On DBaaS client VMs, managed-DB benchmarks use ``data_dir`` (under ``dbaas/``);
-    compute characterization tasks use ``client_data_dir`` (under ``data/<vendor>/<instance>/``).
+  On multi-VM DB hosts, companion-client characterization may use ``client_data_dir``.
+  DBaaS companions only run managed-DB benchmarks under ``data_dir`` (``dbaas/``).
     """
     if client_data_dir is None or isinstance(task, DbaasDbTask):
         return data_dir
@@ -652,8 +652,8 @@ def should_run(task: Task, data_dir: str | os.PathLike, vendor: str, instance: s
     if isinstance(task, DbaasDbTask) and os.environ.get("TOPOLOGY") != "dbaas":
         logging.info(f"Skipping task {task.name}: TOPOLOGY is not dbaas")
         return False
-    if os.environ.get("TOPOLOGY") == "dbaas" and isinstance(task, MultiVmDbTask):
-        logging.info(f"Skipping task {task.name}: multi-VM tasks don't run on DBaaS topology")
+    if os.environ.get("TOPOLOGY") == "dbaas" and not isinstance(task, DbaasDbTask):
+        logging.info(f"Skipping task {task.name}: characterization tasks don't run on DBaaS topology")
         return False
     import psutil  # lazy load
 
