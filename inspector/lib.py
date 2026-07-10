@@ -848,10 +848,13 @@ NVBANDWIDTH_BUFFER_MIB_LOW_VRAM = 256
 NVBANDWIDTH_LOW_VRAM_THRESHOLD_MIB = 2048
 
 
-def nvbandwidth_command(vram_mib: int | None = None) -> str:
+def nvbandwidth_command(vram_mib: int | None = None, gpu_count: float = 0.0) -> str:
     """nvbandwidth CLI; bidirectional CE needs 3x buffer MiB on GPU (size + 2*size)."""
     buffer_mib = NVBANDWIDTH_BUFFER_MIB_DEFAULT
     if vram_mib is not None and vram_mib <= NVBANDWIDTH_LOW_VRAM_THRESHOLD_MIB:
+        buffer_mib = NVBANDWIDTH_BUFFER_MIB_LOW_VRAM
+    elif vram_mib is None and gpu_count > 0 and gpu_count != int(gpu_count):
+        # Fractional GPUs are typically low-VRAM; avoid -b 512 OOM when nvidia-smi fails.
         buffer_mib = NVBANDWIDTH_BUFFER_MIB_LOW_VRAM
     return f"nvbandwidth -j -b {buffer_mib}"
 
@@ -875,16 +878,16 @@ def _gpu_vram_mib() -> int | None:
         return None
 
 
-def _resolve_docker_command(task: DockerTask) -> str | list | None:
+def _resolve_docker_command(task: DockerTask, gpu_count: float = 0.0) -> str | list | None:
     if task.name == "nvbandwidth":
-        return nvbandwidth_command(_gpu_vram_mib())
+        return nvbandwidth_command(_gpu_vram_mib(), gpu_count=gpu_count)
     return task.command
 
 
 def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> tuple[str | None, bytes, bytes]:
     ver = None
     stdout = stderr = b""
-    command = _resolve_docker_command(task)
+    command = _resolve_docker_command(task, gpu_count=gpu_count)
     
     # Define the different docker options to try
     docker_options = []
