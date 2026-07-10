@@ -51,9 +51,12 @@ jobs:
           if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
             VERSION='${{ github.event.client_payload.version }}'
             IMAGE_TAG='${{ github.event.client_payload.image_tag }}'
-          else
+          elif [ -n '${{ inputs.sc_runner_version }}' ] || [ -n '${{ inputs.sc_runner_image_tag }}' ]; then
             VERSION='${{ inputs.sc_runner_version }}'
             IMAGE_TAG='${{ inputs.sc_runner_image_tag }}'
+          else
+            VERSION=''
+            IMAGE_TAG=''
           fi
           if [ -z "$IMAGE_TAG" ] && [ -n "$VERSION" ]; then
             IMAGE_TAG="${VERSION}"
