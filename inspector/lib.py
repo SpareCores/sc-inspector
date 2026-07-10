@@ -602,6 +602,13 @@ def _task_resource_checks(
             logging.info(f"Skipping task {task.name}: not feasible on live host")
             return False
     if isinstance(task, DbaasDbTask):
+        provisioned_tier = os.environ.get("SC_PROVISION_CACHE_TIER", "")
+        if provisioned_tier and task.cache_tier != provisioned_tier:
+            logging.info(
+                f"Skipping task {task.name}: cache tier {task.cache_tier} "
+                f"!= provisioned {provisioned_tier}"
+            )
+            return False
         mem_gib = float(os.environ.get("MEM_GIB") or mem_bytes / 1024**3)
         db_vcpus = float(os.environ.get("SC_PROVISION_CPU_COUNT", os.cpu_count() or 1))
         if os.environ.get("SC_PROVISION_STORAGE_GIB"):

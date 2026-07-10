@@ -293,68 +293,69 @@ def try_start_dbaas_inspect(
         return False
 
     tier_groups = _group_tasks_by_cache_tier(dbaas_tasks)
+    # One managed-DB stack per cache tier (C100 vs C30 storage). Provision a single
+    # tier per start-dbaas invocation; re-run after cleanup for the next tier.
+    cache_tier, tier_tasks = sorted(tier_groups.items())[0]
     stub = target_sizing_stub(target)
+    provision = provision_spec(target, cache_tier)
+    client_req = merge_client_requirements(
+        [t.client_requirements(stub) for t in tier_tasks]
+    )
+    slug = stack_slug(target, cache_tier)
 
-    for cache_tier, tier_tasks in sorted(tier_groups.items()):
-        provision = provision_spec(target, cache_tier)
-        client_req = merge_client_requirements(
-            [t.client_requirements(stub) for t in tier_tasks]
-        )
-        slug = stack_slug(target, cache_tier)
-
-        for kind, location in _dbaas_location_candidates(
-            vendor, target, regions, zones, zone_to_region
-        ):
-            if kind == "zone":
-                zone = location
-                region = (zone_to_region or {}).get(
-                    location, "-".join(location.split("-")[:-1])
-                )
-            else:
-                zone = None
-                region = location
-
-            pg_ok, pg_reason = check_dbaas_postgres_quota(
-                vendor,
-                region,
-                provision["sku_name"],
-                int(target.cpu_count),
+    for kind, location in _dbaas_location_candidates(
+        vendor, target, regions, zones, zone_to_region
+    ):
+        if kind == "zone":
+            zone = location
+            region = (zone_to_region or {}).get(
+                location, "-".join(location.split("-")[:-1])
             )
-            if not pg_ok:
-                logging.info(
-                    "Skipping DBaaS %s/%s: %s",
-                    vendor,
-                    location,
-                    pg_reason,
-                )
-                continue
+        else:
+            zone = None
+            region = location
 
-            clients = rank_client_instances(vendor, region, client_req)
-            if not clients:
-                logging.info("No DBaaS client for %s/%s", vendor, location)
-                continue
-            clients = filter_clients_by_vm_quota(vendor, region, clients)
-            if not clients:
-                continue
+        pg_ok, pg_reason = check_dbaas_postgres_quota(
+            vendor,
+            region,
+            provision["sku_name"],
+            int(target.cpu_count),
+        )
+        if not pg_ok:
+            logging.info(
+                "Skipping DBaaS %s/%s: %s",
+                vendor,
+                location,
+                pg_reason,
+            )
+            continue
 
-            for client in clients:
-                if _try_provision_dbaas_stack(
-                    vendor,
-                    target,
-                    client,
-                    region,
-                    zone,
-                    cache_tier,
-                    provision,
-                    slug,
-                    timeout_mins,
-                    ssh_deploy_key_b64,
-                    repo_url_ssh,
-                    instance_logger,
-                    instance_timing,
-                    error_msgs,
-                ):
-                    return True
+        clients = rank_client_instances(vendor, region, client_req)
+        if not clients:
+            logging.info("No DBaaS client for %s/%s", vendor, location)
+            continue
+        clients = filter_clients_by_vm_quota(vendor, region, clients)
+        if not clients:
+            continue
+
+        for client in clients:
+            if _try_provision_dbaas_stack(
+                vendor,
+                target,
+                client,
+                region,
+                zone,
+                cache_tier,
+                provision,
+                slug,
+                timeout_mins,
+                ssh_deploy_key_b64,
+                repo_url_ssh,
+                instance_logger,
+                instance_timing,
+                error_msgs,
+            ):
+                return True
     return False
 
 
@@ -370,18 +371,34 @@ def start_dbaas_inspect(
     zone_to_region=None,
 ):
     """Entry point from inspector start-dbaas CLI."""
+    from lib import DbaasDbTask
+
     current_thread = threading.current_thread()
     current_thread.name = f"{vendor}/{target.instance_key}"
     instance_logger = logging.getLogger(f"{vendor}/{target.instance_key}")
 
+    dbaas_tasks = [t for t in tasks if isinstance(t, DbaasDbTask)]
+    if not dbaas_tasks:
+        raise RuntimeError("no DBaaS tasks to start")
+    tier_groups = _group_tasks_by_cache_tier(dbaas_tasks)
+    cache_tier, tier_tasks = sorted(tier_groups.items())[0]
+    logging.info(
+        "DBaaS start %s/%s cache_tier=%s (%d tasks; %d tier(s) pending overall)",
+        vendor,
+        target.instance_key,
+        cache_tier,
+        len(tier_tasks),
+        len(tier_groups),
+    )
+
     error_msgs = []
     instance_timing = InstanceCreationTiming()
     sum_timeout = timedelta()
-    for task in tasks:
+    for task in tier_tasks:
         sum_timeout += task.timeout
     with lock:
         repo.pull()
-        for task in tasks:
+        for task in tier_tasks:
             meta = boot_meta_for_task(task, data_dir)
             write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
         repo.push_path(data_dir, f"Starting DBaaS from {repo.gha_url()}")
@@ -400,7 +417,7 @@ def start_dbaas_inspect(
         data_dir,
         vendor,
         target,
-        tasks,
+        tier_tasks,
         regions,
         zones,
         zone_to_region,
@@ -417,7 +434,7 @@ def start_dbaas_inspect(
             record_timing_api(data_dir, instance_timing.start, instance_timing.end)
             repo.push_path(data_dir, f"DBaaS creation timing from {repo.gha_url()}")
     if not started:
-        record_instance_start_failure(lock, data_dir, tasks, error_msgs)
+        record_instance_start_failure(lock, data_dir, tier_tasks, error_msgs)
         raise RuntimeError(
             error_msgs[0] if error_msgs else "DBaaS stack was not provisioned in any region"
         )

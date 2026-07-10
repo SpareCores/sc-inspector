@@ -31,6 +31,8 @@ PG_USER = "postgres"
 PG_PASSWORD = "postgres"
 PG_DB = "bench"
 BENCHBASE_DB = "benchbase"
+HAMMERDB_TPCC_DB = "tpcc"
+HAMMERDB_TPCH_DB = "tpch"
 
 
 class CompanionSession:
@@ -339,6 +341,12 @@ def run_multi_vm_task(
         pg_container = _start_postgres(task, mem_gib, pg_wh, vcpus)
         if task.tool == "benchbase":
             _ensure_database(pg_container, BENCHBASE_DB)
+        elif task.tool == "hammerdb":
+            wl = WORKLOADS.get(task.workload_proxy, {}).get("hammerdb", "tpcc")
+            if wl == "tpcc":
+                _ensure_database(pg_container, HAMMERDB_TPCC_DB)
+            elif wl == "tpch":
+                _ensure_database(pg_container, HAMMERDB_TPCH_DB)
     except Exception as exc:
         meta.error_msg = f"postgres start failed: {exc}"
         meta.end = datetime.now()
