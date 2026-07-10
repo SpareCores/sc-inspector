@@ -54,6 +54,15 @@ jobs:
           elif [ -n '${{ inputs.sc_runner_version }}' ] || [ -n '${{ inputs.sc_runner_image_tag }}' ]; then
             VERSION='${{ inputs.sc_runner_version }}'
             IMAGE_TAG='${{ inputs.sc_runner_image_tag }}'
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            MSG='${{ github.event.head_commit.message }}'
+            if echo "$MSG" | grep -q '^sc-runner-release '; then
+              VERSION=$(echo "$MSG" | sed -n 's/.* version=\([^ ]*\).*/\1/p')
+              IMAGE_TAG=$(echo "$MSG" | sed -n 's/.* image_tag=\([^ ]*\).*/\1/p')
+            else
+              VERSION=''
+              IMAGE_TAG=''
+            fi
           else
             VERSION=''
             IMAGE_TAG=''
