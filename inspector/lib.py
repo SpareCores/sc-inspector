@@ -2431,25 +2431,15 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             instance=server,
             disk_size=VOLUME_SIZE,
         )
-        # Vultr stacks are per-region; tear down every deployable region so orphaned VMs
-        # are removed even when Pulumi state was lost or the instance moved regions.
-        for destroy_region in vultr_cleanup_regions(server, regions):
-            logging.info(f"Destroying vultr/{server} stack in {destroy_region} before start")
-            try:
-                runner.destroy_stack(
-                    vendor,
-                    {},
-                    resource_opts | dict(region=destroy_region),
-                    stack_opts=dict(on_output=pulumi_on_output(instance_logger)),
-                )
-            except Exception:
-                logging.exception("Failed to destroy vultr/%s stack in %s", server, destroy_region)
         for region in candidate_regions(vendor, server, regions):
             logging.info(f"Trying {region}")
             resource_opts["region"] = region
             user_data, b64_user_data = build_inspector_user_data(
                 vendor, server, srv_data, region, None, timeout_mins, ssh_deploy_key_b64, repo_url_ssh
             )
+
+            # before starting, destroy everything to make sure the user-data will run (this is the first boot)
+            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
             pulumi_output = []
             stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger, instance_timing, server)
             try:
