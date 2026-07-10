@@ -60,13 +60,15 @@ systemctl disable gce-workload-cert-refresh.timer 2>/dev/null || true
 export DEBIAN_FRONTEND=noninteractive
 . /etc/os-release
 
-# Vultr Cloud GPU images ship Docker via docker-official.sources (deb822). Remove
-# vendor packages and apt sources before we add our docker.list, or apt Signed-By conflicts.
+# Cloud images may ship Docker (docker-official.sources deb822, docker.io, etc.).
+# Remove vendor packages and apt sources before we add our docker.list, or apt Signed-By conflicts.
 purge_preinstalled_docker() {
     if [ ! -f /etc/apt/sources.list.d/docker-official.sources ] \
         && [ ! -f /etc/apt/sources.list.d/docker.list ] \
         && ! dpkg -s docker-ce >/dev/null 2>&1 \
-        && ! dpkg -s containerd.io >/dev/null 2>&1; then
+        && ! dpkg -s docker.io >/dev/null 2>&1 \
+        && ! dpkg -s containerd.io >/dev/null 2>&1 \
+        && ! dpkg -s containerd >/dev/null 2>&1; then
         return 0
     fi
     echo "Removing pre-installed Docker packages and apt sources"
@@ -76,7 +78,11 @@ purge_preinstalled_docker() {
           /etc/apt/keyrings/docker-official.asc \
           /etc/apt/keyrings/docker.asc
     apt-get update -y || true
-    for pkg in $(dpkg-query -W -f='${Package}\n' 'docker*' 'containerd.io' 'nvidia-docker2' 2>/dev/null); do
+    for pkg in $(dpkg-query -W -f='${Package}\n' \
+            'docker.io' 'docker-doc' 'docker-compose' \
+            'docker-ce' 'docker-ce-cli' 'docker-buildx-plugin' 'docker-compose-plugin' \
+            'containerd.io' 'containerd' 'nvidia-docker2' 'podman-docker' \
+            2>/dev/null | sort -u); do
         apt-get remove -y --purge "$pkg" || true
     done
     apt-get autoremove -y || true
