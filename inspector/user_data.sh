@@ -60,6 +60,29 @@ systemctl disable gce-workload-cert-refresh.timer 2>/dev/null || true
 export DEBIAN_FRONTEND=noninteractive
 . /etc/os-release
 
+# Vultr Cloud GPU images ship Docker via docker-official.sources (deb822). Remove
+# vendor packages and apt sources before we add our docker.list, or apt Signed-By conflicts.
+purge_preinstalled_docker() {
+    if [ ! -f /etc/apt/sources.list.d/docker-official.sources ] \
+        && [ ! -f /etc/apt/sources.list.d/docker.list ] \
+        && ! dpkg -s docker-ce >/dev/null 2>&1 \
+        && ! dpkg -s containerd.io >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "Removing pre-installed Docker packages and apt sources"
+    systemctl stop docker containerd 2>/dev/null || true
+    rm -f /etc/apt/sources.list.d/docker-official.sources \
+          /etc/apt/sources.list.d/docker.list \
+          /etc/apt/keyrings/docker-official.asc \
+          /etc/apt/keyrings/docker.asc
+    apt-get update -y || true
+    for pkg in $(dpkg-query -W -f='${Package}\n' 'docker*' 'containerd.io' 'nvidia-docker2' 2>/dev/null); do
+        apt-get remove -y --purge "$pkg" || true
+    done
+    apt-get autoremove -y || true
+}
+purge_preinstalled_docker
+
 # Retry apt-get update/install on transient mirror errors (hash sum mismatch, etc.)
 # for up to 3 minutes with random backoff between attempts.
 apt_retry() {
