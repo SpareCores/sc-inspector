@@ -1,4 +1,6 @@
-FROM ghcr.io/sparecores/sc-runner:main AS base
+# SC_RUNNER_IMAGE_TAG selects the sc-runner base image (main for dev, vX.Y.Z on release).
+ARG SC_RUNNER_IMAGE_TAG=main
+FROM ghcr.io/sparecores/sc-runner:${SC_RUNNER_IMAGE_TAG} AS base
 ENV REPO_URL="https://github.com/SpareCores/sc-inspector-data"
 ENV REPO_PATH="/repo/sc-inspector-data"
 ENV VIRTUAL_ENV="/venv/inspector"
@@ -31,10 +33,15 @@ RUN --mount=type=tmpfs,target=/tmp,rw \
     apt-get install -y lshw jq git-restore-mtime hwloc-nox
 
 FROM base AS build
+# SC_RUNNER_VERSION pins sparecores-runner in the inspector venv (release builds).
+ARG SC_RUNNER_VERSION
 ADD requirements.txt /tmp/requirements.txt
 RUN \
     python -m venv --without-pip ${VIRTUAL_ENV} && \
     curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    if [ -n "$SC_RUNNER_VERSION" ]; then \
+      sed -i "s/^sparecores-runner.*/sparecores-runner==${SC_RUNNER_VERSION}/" /tmp/requirements.txt; \
+    fi && \
     uv pip install -r /tmp/requirements.txt
 
 FROM base AS final
