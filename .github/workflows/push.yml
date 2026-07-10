@@ -44,6 +44,7 @@ jobs:
       sc_runner_version: ${{ steps.resolve.outputs.sc_runner_version }}
       sc_runner_image_tag: ${{ steps.resolve.outputs.sc_runner_image_tag }}
       cache_suffix: ${{ steps.resolve.outputs.cache_suffix }}
+      checkout_ref: ${{ steps.resolve.outputs.checkout_ref }}
     steps:
       - id: resolve
         run: |
@@ -60,8 +61,14 @@ jobs:
           if [ -z "$IMAGE_TAG" ]; then
             IMAGE_TAG="main"
           fi
+          if [ -n "$VERSION" ]; then
+            CHECKOUT_REF="main"
+          else
+            CHECKOUT_REF="${GITHUB_REF}"
+          fi
           echo "sc_runner_version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "sc_runner_image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "checkout_ref=${CHECKOUT_REF}" >> "$GITHUB_OUTPUT"
           if [ -n "$VERSION" ]; then
             echo "cache_suffix=-runner-${VERSION}" >> "$GITHUB_OUTPUT"
           else
@@ -91,8 +98,7 @@ jobs:
         uses: actions/checkout@v6.0.2
         with:
           repository: SpareCores/sc-inspector
-          # workflow_call inherits the caller ref (e.g. a sc-runner tag); use main when inputs pin a runner version.
-          ref: ${{ inputs.sc_runner_version != '' && 'main' || github.ref }}
+          ref: ${{ needs.resolve.outputs.checkout_ref }}
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4.0.0
       - name: Log in to the Container registry
