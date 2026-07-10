@@ -32,7 +32,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  # GHCR image paths must be lowercase; github.repository is SpareCores/sc-inspector.
+  IMAGE_NAME: sparecores/sc-inspector
   # zstd layer compression for faster pulls on inspector VMs (Docker Engine ≥ 23.0).
   IMAGE_OUTPUT: type=registry,push=true,oci-mediatypes=true,compression=zstd,compression-level=7,force-compression=true
 
@@ -91,6 +92,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6.0.2
+        with:
+          repository: SpareCores/sc-inspector
+          # workflow_call inherits the caller ref (e.g. a sc-runner tag), not sc-inspector main.
+          ref: ${{ github.event_name == 'workflow_call' && 'main' || github.ref }}
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4.0.0
       - name: Log in to the Container registry
