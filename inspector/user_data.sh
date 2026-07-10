@@ -432,6 +432,19 @@ apt-get autoremove -y $(dpkg-query -W -f='${Package}\n' \
 # https://github.com/NVIDIA/nvidia-container-toolkit/issues/202
 # on some machines docker initialization times out with a lot of GPUs. Enable persistence mode to overcome that.
 nvidia-smi -pm 1
+GPU_VRAM_MIB=""
+if [ "{GPU_COUNT}" != "0" ] && [ "{GPU_COUNT}" != "0.0" ]; then
+    _gpu_vram=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d '[:space:]')
+    case "$_gpu_vram" in
+        ''|*[!0-9]*) ;;
+        *) GPU_VRAM_MIB="$_gpu_vram" ;;
+    esac
+    if [ -z "$GPU_VRAM_MIB" ]; then
+        echo "GPU VRAM query failed on host; inspector will use gpu_count fallbacks"
+    else
+        echo "Host GPU VRAM: ${GPU_VRAM_MIB} MiB"
+    fi
+fi
 date -u +%Y-%m-%dT%H:%M:%SZ > "$TIMING_HOST_DIR/user_data_end"
 set +e
 if [ "{INSPECTOR_ROLE}" = "client" ]; then
@@ -459,6 +472,7 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e SENTINEL_API_TOKEN={SENTINEL_API_TOKEN} \
     -e HF_TOKEN={HF_TOKEN} \
     -e TASK_LOGS_S3_POST_B64={TASK_LOGS_S3_POST_B64} \
+    -e GPU_VRAM_MIB="$GPU_VRAM_MIB" \
     -e MEM_GIB={SC_PROVISION_MEMORY_GIB} \
     -e SC_DB_HOST={SC_DB_HOST} -e SC_DB_PORT={SC_DB_PORT} \
     -e SC_DB_USER={SC_DB_USER} -e SC_DB_PASSWORD={SC_DB_PASSWORD} -e SC_DB_NAME={SC_DB_NAME} \
@@ -497,6 +511,7 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e SENTINEL_API_TOKEN={SENTINEL_API_TOKEN} \
     -e HF_TOKEN={HF_TOKEN} \
     -e TASK_LOGS_S3_POST_B64={TASK_LOGS_S3_POST_B64} \
+    -e GPU_VRAM_MIB="$GPU_VRAM_MIB" \
     -e MP_AUTHKEY_B64={MP_AUTHKEY_B64} -e MP_PORT={MP_PORT} \
     -e CLIENT_PRIVATE_IP={CLIENT_PRIVATE_IP} \
     -e MULTI_VM_CLIENT_INSTANCE={MULTI_VM_CLIENT_INSTANCE} \

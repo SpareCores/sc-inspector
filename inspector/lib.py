@@ -860,21 +860,17 @@ def nvbandwidth_command(vram_mib: int | None = None, gpu_count: float = 0.0) -> 
 
 
 def _gpu_vram_mib() -> int | None:
+    """VRAM from host user_data (GPU_VRAM_MIB); inspector container has no GPU."""
+    raw = os.environ.get("GPU_VRAM_MIB", "").strip()
+    if not raw:
+        return None
     try:
-        res = subprocess.run(
-            [
-                "nvidia-smi",
-                "--query-gpu=memory.total",
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=True,
-        )
-        return int(res.stdout.strip().splitlines()[0])
-    except Exception:
-        logging.warning("nvidia-smi VRAM query failed, using default nvbandwidth buffer size")
+        vram = int(raw)
+        if vram <= 0:
+            raise ValueError("non-positive VRAM")
+        return vram
+    except ValueError:
+        logging.warning("Invalid GPU_VRAM_MIB=%r, ignoring host VRAM hint", raw)
         return None
 
 
