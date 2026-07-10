@@ -50,12 +50,9 @@ jobs:
           if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
             VERSION='${{ github.event.client_payload.version }}'
             IMAGE_TAG='${{ github.event.client_payload.image_tag }}'
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] || [ "${{ github.event_name }}" = "workflow_call" ]; then
+          else
             VERSION='${{ inputs.sc_runner_version }}'
             IMAGE_TAG='${{ inputs.sc_runner_image_tag }}'
-          else
-            VERSION=""
-            IMAGE_TAG=""
           fi
           if [ -z "$IMAGE_TAG" ] && [ -n "$VERSION" ]; then
             IMAGE_TAG="${VERSION}"
@@ -94,8 +91,8 @@ jobs:
         uses: actions/checkout@v6.0.2
         with:
           repository: SpareCores/sc-inspector
-          # workflow_call inherits the caller ref (e.g. a sc-runner tag), not sc-inspector main.
-          ref: ${{ github.event_name == 'workflow_call' && 'main' || github.ref }}
+          # workflow_call inherits the caller ref (e.g. a sc-runner tag); use main when inputs pin a runner version.
+          ref: ${{ inputs.sc_runner_version != '' && 'main' || github.ref }}
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4.0.0
       - name: Log in to the Container registry
