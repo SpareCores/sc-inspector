@@ -90,21 +90,51 @@ def _bootstrap_connect():
     )
 
 
-def _bootstrap_managed_db() -> None:
-    """Create the workload admin user and empty bench database (not managed by Pulumi)."""
-    vendor = _dbaas_vendor()
+def _workload_admin_connect(*, dbname: str | None = None):
+    import psycopg2
+
+    return psycopg2.connect(
+        host=_db_host(),
+        port=_db_port(),
+        user=PG_USER,
+        password=PG_PASSWORD,
+        dbname=dbname or BOOTSTRAP_DB,
+        connect_timeout=10,
+        **_db_connect_kwargs(),
+    )
+
+
+def _ensure_workload_admin_role() -> None:
+    """Create SC_DB_USER on GCP when bootstrap connects as postgres."""
+    if _dbaas_vendor() != "gcp" or BOOTSTRAP_USER == PG_USER:
+        return
     conn = _bootstrap_connect()
     conn.autocommit = True
-    with conn.cursor() as cur:
-        if vendor == "gcp":
+    try:
+        with conn.cursor() as cur:
             cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (PG_USER,))
+            if cur.fetchone():
+                return
+            cur.execute(f'CREATE USER "{PG_USER}" WITH PASSWORD %s', (PG_PASSWORD,))
+            cur.execute(f'GRANT cloudsqlsuperuser TO "{PG_USER}"')
+    finally:
+        conn.close()
+
+
+def _bootstrap_managed_db() -> None:
+    """Create the workload admin user and empty bench database (not managed by Pulumi)."""
+    _ensure_workload_admin_role()
+
+    conn = _workload_admin_connect()
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (PG_DB,))
             if not cur.fetchone():
-                cur.execute(f'CREATE USER "{PG_USER}" WITH PASSWORD %s', (PG_PASSWORD,))
-                cur.execute(f'GRANT cloudsqlsuperuser TO "{PG_USER}"')
-        cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (PG_DB,))
-        if not cur.fetchone():
-            cur.execute(f'CREATE DATABASE "{PG_DB}" OWNER "{PG_USER}"')
-    conn.close()
+                # Owner defaults to PG_USER; postgres cannot SET ROLE scadmin on Cloud SQL.
+                cur.execute(f'CREATE DATABASE "{PG_DB}"')
+    finally:
+        conn.close()
     logging.info("Bootstrapped managed DB user=%s database=%s", PG_USER, PG_DB)
 
 
