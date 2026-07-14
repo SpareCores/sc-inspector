@@ -19,12 +19,16 @@ def uses_resource_tracker(env: dict | None) -> bool:
     return bool(env.get("TRACKER_JOB_NAME") or env.get("TRACKER_PROJECT_NAME"))
 
 
-def resource_tracker_output_names(task_dir: str | os.PathLike) -> list[str]:
-    """Output filenames to commit when the container wrote resource-tracker samples."""
-    tracker_path = os.path.join(task_dir, RESOURCE_TRACKER_OUTPUT_FILENAME)
-    if os.path.isfile(tracker_path) and os.path.getsize(tracker_path) > 0:
-        return [RESOURCE_TRACKER_OUTPUT_FILENAME]
-    return []
+def upload_resource_tracker_metrics(task_name: str, task_dir: str | os.PathLike) -> None:
+    """Upload resource-tracker JSONL to S3 and remove the local copy (not committed to git)."""
+    from s3_runs import upload_task_artifact
+
+    upload_task_artifact(
+        task_name,
+        task_dir,
+        RESOURCE_TRACKER_OUTPUT_FILENAME,
+        delete_after=True,
+    )
 
 
 def configure_resource_tracker_docker_opts(

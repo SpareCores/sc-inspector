@@ -24,7 +24,7 @@ import threading
 import time
 import transform
 import user_data as user_data_pack
-from resource_tracker import configure_resource_tracker_docker_opts, resource_tracker_output_names
+from resource_tracker import configure_resource_tracker_docker_opts, upload_resource_tracker_metrics
 from zlib import crc32
 
 META_NAME = "meta.json"
@@ -1167,7 +1167,7 @@ def run_task(
             if not failed:
                 for t in task.transform_output:
                     meta.outputs.extend(t(meta, task, task_dir, stdout, stderr))
-                meta.outputs.extend(resource_tracker_output_names(task_dir))
+            upload_resource_tracker_metrics(task.name, task_dir)
             write_meta(meta, os.path.join(task_dir, META_NAME))
         except Exception:
             raise

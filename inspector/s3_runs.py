@@ -127,38 +127,73 @@ def _upload_presigned_post(path: str, key: str, post: dict[str, Any]) -> None:
             raise
 
 
-def upload_task_logs_to_s3(data_dir: str) -> None:
-    """Upload per-task stdout/stderr from the inspect data directory to S3."""
+def _parse_task_logs_post() -> dict[str, Any] | None:
     raw = os.environ.get("TASK_LOGS_S3_POST_B64")
     if not raw:
-        return
+        return None
     try:
         post = json.loads(base64.b64decode(raw))
     except (json.JSONDecodeError, ValueError):
         logging.exception("Invalid TASK_LOGS_S3_POST_B64")
-        return
+        return None
     prefix = post.get("prefix", "")
     if not prefix or "url" not in post or "fields" not in post:
         logging.warning("TASK_LOGS_S3_POST_B64 is missing url/fields/prefix")
+        return None
+    return post
+
+
+def upload_task_artifact(
+    task_name: str,
+    task_dir: str | os.PathLike,
+    filename: str,
+    *,
+    post: dict[str, Any] | None = None,
+    delete_after: bool = False,
+) -> bool:
+    """Upload one task output file via the inspect presigned POST (TASK_LOGS_S3_POST_B64)."""
+    post = post if post is not None else _parse_task_logs_post()
+    if not post:
+        return False
+    path = os.path.join(task_dir, filename)
+    if not os.path.isfile(path) or os.path.getsize(path) == 0:
+        return False
+    prefix = post["prefix"]
+    key = f"{prefix}{_sanitize_segment(task_name)}/{filename}"
+    try:
+        _upload_presigned_post(path, key, post)
+        logging.info("Uploaded task artifact %s", key)
+        if delete_after:
+            os.remove(path)
+        return True
+    except Exception:
+        logging.exception("Failed to upload task artifact %s", key)
+        return False
+
+
+def upload_task_logs_to_s3(data_dir: str) -> None:
+    """Upload per-task stdout/stderr and resource-tracker metrics from the inspect data directory to S3."""
+    from resource_tracker import RESOURCE_TRACKER_OUTPUT_FILENAME
+
+    post = _parse_task_logs_post()
+    if not post:
         return
+    prefix = post["prefix"]
     uploaded = 0
     for name in sorted(os.listdir(data_dir)):
         task_dir = os.path.join(data_dir, name)
         if not os.path.isdir(task_dir):
             continue
-        safe_name = _sanitize_segment(name)
-        for stream in ("stdout", "stderr"):
-            path = os.path.join(task_dir, stream)
-            if not os.path.isfile(path) or os.path.getsize(path) == 0:
-                continue
-            key = f"{prefix}{safe_name}/{stream}"
-            try:
-                _upload_presigned_post(path, key, post)
+        for stream in ("stdout", "stderr", RESOURCE_TRACKER_OUTPUT_FILENAME):
+            if upload_task_artifact(
+                name,
+                task_dir,
+                stream,
+                post=post,
+                delete_after=(stream == RESOURCE_TRACKER_OUTPUT_FILENAME),
+            ):
                 uploaded += 1
-                logging.info("Uploaded task log %s", key)
-            except Exception:
-                logging.exception("Failed to upload task log %s", key)
-    logging.info("Uploaded %d task log file(s) to S3 under %s", uploaded, prefix)
+    logging.info("Uploaded %d task artifact(s) to S3 under %s", uploaded, prefix)
 
 
 def presigned_urls_for_instance(vendor: str, instance: str) -> tuple[str, str]:
