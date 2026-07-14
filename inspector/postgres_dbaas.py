@@ -126,14 +126,14 @@ def _bootstrap_managed_db() -> None:
     """Create the workload admin user and empty bench database (not managed by Pulumi)."""
     _ensure_workload_admin_role()
 
-    conn = _workload_admin_connect()
+    # cloudsqlsuperuser lacks CREATEDB; postgres can CREATE DATABASE ... OWNER without SET ROLE.
+    conn = _bootstrap_connect()
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (PG_DB,))
             if not cur.fetchone():
-                # Owner defaults to PG_USER; postgres cannot SET ROLE scadmin on Cloud SQL.
-                cur.execute(f'CREATE DATABASE "{PG_DB}"')
+                cur.execute(f'CREATE DATABASE "{PG_DB}" OWNER "{PG_USER}"')
     finally:
         conn.close()
     logging.info("Bootstrapped managed DB user=%s database=%s", PG_USER, PG_DB)
