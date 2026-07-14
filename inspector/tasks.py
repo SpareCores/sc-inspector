@@ -309,26 +309,6 @@ compression_text = DockerTask(
     command="nice -n -20 python /usr/local/bin/compress.py",
 )
 
-# C/C++/Rust compile benchmark: pinned sources, ninja+cargo parallelism, mold linker.
-# Named Docker volume keeps object files off container overlayfs.
-compile_benchmark = DockerTask(
-    parallel=False,
-    priority=6.5,
-    minimum_memory=4,
-    timeout=timedelta(hours=2),
-    image="ghcr.io/sparecores/benchmark-compile:main",
-    docker_opts=DOCKER_OPTS
-    | tracker_docker_opts("compile_benchmark")
-    | dict(
-        cap_add=["SYS_NICE"],
-        volumes={
-            "sparecores-compile-work": {"bind": "/work", "mode": "rw"},
-        },
-    ),
-    version_command="--version",
-    command=None,
-)
-
 membench = DockerTask(
     parallel=False,
     priority=7,
