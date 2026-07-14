@@ -114,10 +114,16 @@ def _ensure_workload_admin_role() -> None:
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (PG_USER,))
-            if cur.fetchone():
-                return
-            cur.execute(f'CREATE USER "{PG_USER}" WITH PASSWORD %s', (PG_PASSWORD,))
-            cur.execute(f'GRANT cloudsqlsuperuser TO "{PG_USER}"')
+            if not cur.fetchone():
+                cur.execute(
+                    f'CREATE USER "{PG_USER}" WITH PASSWORD %s CREATEDB',
+                    (PG_PASSWORD,),
+                )
+                cur.execute(f'GRANT cloudsqlsuperuser TO "{PG_USER}"')
+            else:
+                # cloudsqlsuperuser alone cannot CREATE DATABASE on Cloud SQL.
+                cur.execute(f'ALTER USER "{PG_USER}" CREATEDB')
+                cur.execute(f'GRANT cloudsqlsuperuser TO "{PG_USER}"')
     finally:
         conn.close()
 
@@ -126,14 +132,23 @@ def _bootstrap_managed_db() -> None:
     """Create the workload admin user and empty bench database (not managed by Pulumi)."""
     _ensure_workload_admin_role()
 
-    # cloudsqlsuperuser lacks CREATEDB; postgres can CREATE DATABASE ... OWNER without SET ROLE.
-    conn = _bootstrap_connect()
+    if _dbaas_vendor() == "gcp" and BOOTSTRAP_USER != PG_USER:
+        # postgres cannot SET ROLE scadmin, so scadmin must CREATE DATABASE directly.
+        conn = _workload_admin_connect()
+        create_sql = f'CREATE DATABASE "{PG_DB}"'
+    else:
+        conn = _bootstrap_connect()
+        create_sql = (
+            f'CREATE DATABASE "{PG_DB}" OWNER "{PG_USER}"'
+            if BOOTSTRAP_USER != PG_USER
+            else f'CREATE DATABASE "{PG_DB}"'
+        )
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (PG_DB,))
             if not cur.fetchone():
-                cur.execute(f'CREATE DATABASE "{PG_DB}" OWNER "{PG_USER}"')
+                cur.execute(create_sql)
     finally:
         conn.close()
     logging.info("Bootstrapped managed DB user=%s database=%s", PG_USER, PG_DB)
