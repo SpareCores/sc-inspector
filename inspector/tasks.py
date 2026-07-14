@@ -142,7 +142,7 @@ virtualization = DockerTask(
     timeout=timedelta(minutes=5),
 )
 
-POSTGRES_MULTI_ROLLOUT = {("azure", "Standard_F16ams_v6"), ("azure", "Standard_E16ds_v5"), ("azure", "Standard_M416ms_v2")}
+POSTGRES_MULTI_ROLLOUT = {("azure", "Standard_F16ams_v6"), ("azure", "Standard_E16ds_v5")}
 
 # Multi-VM Postgres benchmarks: priority band 1 (1.0, 1.1, …). Companion powers off when band 1 ends.
 # Write-heavy headline scores (OLTP, YCSB) use synchronous_commit=off (async): CPU/memory/lock-bound
