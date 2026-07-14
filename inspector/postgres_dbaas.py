@@ -491,6 +491,7 @@ def run_dbaas_task(
         return None, b"", str(exc).encode()
 
     env = _benchmark_env(task, params, mem_gib, db_vcpus, client_vcpus)
+    env["SC_HAMMERDB_CLI_TIMEOUT"] = str(max(3600, int(task.timeout.total_seconds()) - 180))
     env.update(_tracker_env(task))
     docker_opts = dict(DOCKER_OPTS)
     docker_opts["environment"] = env

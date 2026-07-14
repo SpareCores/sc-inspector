@@ -189,7 +189,7 @@ hammerdb_postgres_multi_oltp_mixed_durable_c100 = MultiVmDbTask(
     cache_ratio=1.0,
     durability="durable",
     image="ghcr.io/sparecores/benchmark-hammerdb-postgres:main",
-    timeout=timedelta(minutes=60),
+    timeout=timedelta(minutes=120),
 )
 
 benchbase_postgres_multi_read_heavy_c100 = MultiVmDbTask(
@@ -219,7 +219,7 @@ benchbase_postgres_multi_crud_simple_c100 = MultiVmDbTask(
     timeout=timedelta(minutes=60),
 )
 
-# TPCH: parallel build (pg_num_tpch_threads) + query profiling; 120m budget on F16-class hosts.
+# TPCH: parallel build (pg_num_tpch_threads) + query profiling; 180m budget on F16-class hosts.
 hammerdb_postgres_multi_olap_c100 = MultiVmDbTask(
     parallel=False,
     priority=1.4,
@@ -230,7 +230,7 @@ hammerdb_postgres_multi_olap_c100 = MultiVmDbTask(
     cache_tier="c100",
     cache_ratio=1.0,
     image="ghcr.io/sparecores/benchmark-hammerdb-postgres:main",
-    timeout=timedelta(minutes=120),
+    timeout=timedelta(minutes=180),
 )
 
 # We use this benchmark to determine the "SCore" of a given instance. This should represent the relative
@@ -307,6 +307,26 @@ compression_text = DockerTask(
     image="ghcr.io/sparecores/benchmark:main",
     docker_opts=DOCKER_OPTS | tracker_docker_opts("compression_text"),
     command="nice -n -20 python /usr/local/bin/compress.py",
+)
+
+# C/C++/Rust compile benchmark: pinned sources, ninja+cargo parallelism, mold linker.
+# Named Docker volume keeps object files off container overlayfs.
+compile_benchmark = DockerTask(
+    parallel=False,
+    priority=6.5,
+    minimum_memory=4,
+    timeout=timedelta(hours=2),
+    image="ghcr.io/sparecores/benchmark-compile:main",
+    docker_opts=DOCKER_OPTS
+    | tracker_docker_opts("compile_benchmark")
+    | dict(
+        cap_add=["SYS_NICE"],
+        volumes={
+            "sparecores-compile-work": {"bind": "/work", "mode": "rw"},
+        },
+    ),
+    version_command="--version",
+    command=None,
 )
 
 membench = DockerTask(

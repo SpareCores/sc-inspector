@@ -174,7 +174,34 @@ def pg_gucs(mem_gib: float, warehouses: int, durability: str = "durable", vcpus:
     return args
 
 
+def _cleanup_stale_postgres(task) -> None:
+    """Drop leftover host-network Postgres containers from prior benchmark tasks."""
+    try:
+        d = docker.from_env(timeout=120)
+        keep = f"pg-{task.name}"
+        for container in d.containers.list(all=True):
+            name = container.name or ""
+            if not name.startswith("pg-") or name == keep:
+                continue
+            logging.info("Removing stale postgres container %s", name)
+            container_remove(container)
+    except Exception:
+        logging.exception("Stale postgres cleanup failed (non-fatal)")
+
+
+def _wait_pg_port_free(port: int = 5432, timeout: float = 30) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(0.5)
+            if sock.connect_ex(("127.0.0.1", port)) != 0:
+                return
+        time.sleep(0.5)
+
+
 def _start_postgres(task, mem_gib: float, warehouses: int, vcpus: int) -> docker.models.containers.Container:
+    _cleanup_stale_postgres(task)
+    _wait_pg_port_free()
     d = docker.from_env(timeout=1800)
     gucs = pg_gucs(mem_gib, warehouses, durability=getattr(task, "durability", "durable"), vcpus=vcpus)
     cmd = [
@@ -256,6 +283,27 @@ def _ensure_database(container, name: str) -> None:
     if "already exists" in out.lower():
         return
     raise RuntimeError(f"CREATE DATABASE {name} failed: {out}")
+
+
+def _verify_database(host: str, name: str) -> None:
+    import psycopg2
+
+    conn = psycopg2.connect(
+        host=host,
+        port=5432,
+        user=PG_USER,
+        password=PG_PASSWORD,
+        dbname=PG_DB,
+        connect_timeout=10,
+    )
+    try:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,))
+            if not cur.fetchone():
+                raise RuntimeError(f"database {name!r} missing on {host}:5432 after CREATE DATABASE")
+    finally:
+        conn.close()
 
 
 def _benchmark_env(task, db_host: str, params, mem_gib: float, db_vcpus: int, client_vcpus: int) -> dict[str, str]:
@@ -345,8 +393,10 @@ def run_multi_vm_task(
             wl = WORKLOADS.get(task.workload_proxy, {}).get("hammerdb", "tpcc")
             if wl == "tpcc":
                 _ensure_database(pg_container, HAMMERDB_TPCC_DB)
+                _verify_database(db_host, HAMMERDB_TPCC_DB)
             elif wl == "tpch":
                 _ensure_database(pg_container, HAMMERDB_TPCH_DB)
+                _verify_database(db_host, HAMMERDB_TPCH_DB)
     except Exception as exc:
         meta.error_msg = f"postgres start failed: {exc}"
         meta.end = datetime.now()
@@ -356,7 +406,10 @@ def run_multi_vm_task(
     msg = RunBenchmark(
         task_name=task.name,
         image=task.image,
-        env=_benchmark_env(task, db_host, params, mem_gib, vcpus, client_vcpus),
+        env={
+            **_benchmark_env(task, db_host, params, mem_gib, vcpus, client_vcpus),
+            "SC_HAMMERDB_CLI_TIMEOUT": str(max(3600, int(task.timeout.total_seconds()) - 180)),
+        },
         command=task.command or "",
         timeout_sec=int(task.timeout.total_seconds()),
         tracker_job_name=f"{task.name}_benchmark_client",

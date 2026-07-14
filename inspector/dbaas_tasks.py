@@ -92,5 +92,5 @@ hammerdb_postgres_dbaas_olap_c100 = DbaasDbTask(
     cache_tier="c100",
     cache_ratio=1.0,
     image="ghcr.io/sparecores/benchmark-hammerdb-postgres:main",
-    timeout=timedelta(minutes=120),
+    timeout=timedelta(minutes=180),
 )
