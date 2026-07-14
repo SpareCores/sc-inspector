@@ -3,6 +3,8 @@ import os
 import re
 import requests
 
+from resource_tracker import RESOURCE_TRACKER_OUTPUT_FILENAME
+
 
 def raw(meta, task, task_dir, stdout, stderr) -> list[str]:
     outputs: list[str] = []
@@ -11,6 +13,10 @@ def raw(meta, task, task_dir, stdout, stderr) -> list[str]:
             with open(os.path.join(task_dir, name), "wb") as f:
                 f.write(locals()[name])
             outputs.append(name)
+
+    tracker_path = os.path.join(task_dir, RESOURCE_TRACKER_OUTPUT_FILENAME)
+    if os.path.isfile(tracker_path) and os.path.getsize(tracker_path) > 0:
+        outputs.append(RESOURCE_TRACKER_OUTPUT_FILENAME)
 
     return outputs
 

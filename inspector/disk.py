@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 VOLUME_SIZE = 128  # keep in sync with lib.VOLUME_SIZE
-# Fraction of provisioned root volume treated as usable for schema (matches cache_tier_feasible).
+# Fraction of provisioned root volume treated as usable for schema.
 DISK_USABLE_FRAC = 0.85
 
 DISK_CONFIGURABLE_VENDORS = frozenset(
@@ -17,7 +17,7 @@ def effective_disk_gib(vendor: str, srv, required_gib: float) -> float:
     if vendor in DISK_CONFIGURABLE_VENDORS:
         if required_gib <= 0:
             return float(VOLUME_SIZE)
-        # Reserve headroom so cache_tier_feasible(required) passes at runtime.
+        # Reserve headroom so shirt_size_feasible(required) passes at runtime.
         return max(VOLUME_SIZE, math.ceil(required_gib / DISK_USABLE_FRAC))
     return float(srv.storage_size or 0)
 

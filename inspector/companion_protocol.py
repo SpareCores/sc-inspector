@@ -32,6 +32,7 @@ class BenchmarkResult:
     stdout: str = ""
     stderr: str = ""
     metrics_json: dict[str, Any] = field(default_factory=dict)
+    resource_tracker_jsonl: str = ""
 
 
 @dataclass

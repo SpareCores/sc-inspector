@@ -84,8 +84,7 @@ def _dbaas_user_data_replacements(
             "SC_PROVISION_REGION": region,
             "SC_PROVISION_ZONE": zone or "",
             "SC_PROVISION_NETWORK_MODE": "private_vpc" if vendor == "gcp" else "private_vnet",
-            "SC_PROVISION_CACHE_TIER": provision["cache_tier"],
-            "SC_PROVISION_STACK_SLUG": stack_slug(target, provision["cache_tier"]),
+            "SC_PROVISION_STACK_SLUG": stack_slug(target, provision["shirt_size"]),
             "SC_PROVISION_SYNC_COMMIT_SETTABLE": "",
             "USER_DATA_TEMPLATE": USER_DATA,
         }
@@ -93,10 +92,10 @@ def _dbaas_user_data_replacements(
     return repl
 
 
-def _group_tasks_by_cache_tier(tasks) -> dict[str, list]:
+def _group_tasks_by_shirt_size(tasks) -> dict[str, list]:
     groups: dict[str, list] = {}
     for task in tasks:
-        groups.setdefault(task.cache_tier, []).append(task)
+        groups.setdefault(task.shirt_size, []).append(task)
     return groups
 
 
@@ -169,7 +168,7 @@ def _try_provision_dbaas_stack(
     client,
     region: str,
     zone: str | None,
-    cache_tier: str,
+    shirt_size: str,
     provision: dict,
     slug: str,
     timeout_mins: int,
@@ -180,10 +179,10 @@ def _try_provision_dbaas_stack(
     error_msgs,
 ) -> bool:
     logging.info(
-        "DBaaS: %s/%s tier=%s + client %s in %s",
+        "DBaaS: %s/%s size=%s + client %s in %s",
         vendor,
         target.instance_key,
-        cache_tier,
+        shirt_size,
         client.api_reference,
         region,
     )
@@ -223,7 +222,7 @@ def _try_provision_dbaas_stack(
         instance_key_slug=slug,
         extra_exports={
             "instance_key": target.instance_key,
-            "cache_tier": cache_tier,
+            "shirt_size": shirt_size,
             "topology": "dbaas",
         },
     )
@@ -284,23 +283,21 @@ def try_start_dbaas_inspect(
     instance_timing,
     error_msgs,
 ) -> bool:
-    """Provision managed DB + client VM; one stack per cache-tier group."""
+    """Provision managed DB + client VM; one stack per shirt-size group."""
     from lib import DbaasDbTask
 
     dbaas_tasks = [t for t in tasks if isinstance(t, DbaasDbTask)]
     if not dbaas_tasks:
         return False
 
-    tier_groups = _group_tasks_by_cache_tier(dbaas_tasks)
-    # One managed-DB stack per cache tier (C100 vs C30 storage). Provision a single
-    # tier per start-dbaas invocation; re-run after cleanup for the next tier.
-    cache_tier, tier_tasks = sorted(tier_groups.items())[0]
+    size_groups = _group_tasks_by_shirt_size(dbaas_tasks)
+    shirt_size, size_tasks = sorted(size_groups.items())[0]
     stub = target_sizing_stub(target)
-    provision = provision_spec(target, cache_tier)
+    provision = provision_spec(target, shirt_size)
     client_req = merge_client_requirements(
-        [t.client_requirements(stub) for t in tier_tasks]
+        [t.client_requirements(stub) for t in size_tasks]
     )
-    slug = stack_slug(target, cache_tier)
+    slug = stack_slug(target, shirt_size)
 
     for kind, location in _dbaas_location_candidates(
         vendor, target, regions, zones, zone_to_region
@@ -344,7 +341,7 @@ def try_start_dbaas_inspect(
                 client,
                 region,
                 zone,
-                cache_tier,
+                shirt_size,
                 provision,
                 slug,
                 timeout_mins,
@@ -379,15 +376,15 @@ def start_dbaas_inspect(
     dbaas_tasks = [t for t in tasks if isinstance(t, DbaasDbTask)]
     if not dbaas_tasks:
         raise RuntimeError("no DBaaS tasks to start")
-    tier_groups = _group_tasks_by_cache_tier(dbaas_tasks)
-    cache_tier, tier_tasks = sorted(tier_groups.items())[0]
+    size_groups = _group_tasks_by_shirt_size(dbaas_tasks)
+    shirt_size, tier_tasks = sorted(size_groups.items())[0]
     logging.info(
-        "DBaaS start %s/%s cache_tier=%s (%d tasks; %d tier(s) pending overall)",
+        "DBaaS start %s/%s shirt_size=%s (%d tasks; %d size(s) pending overall)",
         vendor,
         target.instance_key,
-        cache_tier,
+        shirt_size,
         len(tier_tasks),
-        len(tier_groups),
+        len(size_groups),
     )
 
     error_msgs = []

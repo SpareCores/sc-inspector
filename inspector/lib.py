@@ -24,6 +24,7 @@ import threading
 import time
 import transform
 import user_data as user_data_pack
+from resource_tracker import configure_resource_tracker_docker_opts
 from zlib import crc32
 
 META_NAME = "meta.json"
@@ -42,7 +43,7 @@ HOST_TIMING_BASE = "/var/lib/sparecores-inspector/timing"
 HOST_TIMING_MOUNT = "/host-timing"
 # add options to the task hash, whose function is to signal any
 # changes in the tasks' runtime parameters, which might alter the output
-TASK_HASH_KEYS = {"command", "transform_output", "image", "cache_ratio", "workload_proxy", "tool", "durability"}
+TASK_HASH_KEYS = {"command", "transform_output", "image", "shirt_size", "workload_proxy", "tool", "durability"}
 # don't start task if it has already been started less than 2 hours ago
 WAIT_SINCE_LAST_START = timedelta(hours=2)
 # fail if a job has already started, but didn't produce output
@@ -173,63 +174,31 @@ class MultiVmDbTask(DockerTask):
     topology: Literal["multi_vm"] = "multi_vm"
     benchmark_family: str = ""
     workload_proxy: str = ""
-    cache_tier: str = ""
-    cache_ratio: float = 1.0
+    shirt_size: str = "S"
     tool: Literal["hammerdb", "benchbase"] = "hammerdb"
-    # "async" sets synchronous_commit=off for write-heavy headline scores (OLTP, ycsb);
-    # "durable" keeps synchronous_commit=on (default, or disclosed disk-dependent metric).
-    durability: Literal["durable", "async"] = "durable"
+    durability: Literal["durable", "async"] = "async"
 
     def client_requirements(self, srv):
         from benchmark_tiers import benchbase_client_req, hammerdb_client_req
 
         if self.tool == "hammerdb":
-            return hammerdb_client_req(srv, self.cache_ratio)
-        return benchbase_client_req(srv, self.workload_proxy, self.cache_ratio)
+            return hammerdb_client_req(srv, self.shirt_size)
+        return benchbase_client_req(srv)
 
     def disk_gib_required(self, srv) -> float:
         from benchmark_tiers import (
-            WORKLOADS,
-            benchbase_disk_gib_required,
-            hammerdb_disk_gib_required,
+            benchbase_shirt_size_disk_gib,
+            shirt_size_disk_gib,
         )
 
-        mem_gib = srv.memory_amount / 1024
-        wl = WORKLOADS.get(self.workload_proxy, {})
         if self.tool == "benchbase":
-            return benchbase_disk_gib_required(self.workload_proxy, self.cache_ratio, mem_gib)
-        return hammerdb_disk_gib_required(
-            wl.get("hammerdb", "tpcc"),
-            self.cache_ratio,
-            int(srv.vcpus),
-            mem_gib,
-        )
+            return benchbase_shirt_size_disk_gib(self.workload_proxy, self.shirt_size)
+        return shirt_size_disk_gib(self.shirt_size)
 
     def feasible_on(self, vcpus: float, mem_gib: float, disk_gib: float | None) -> bool:
-        from benchmark_tiers import (
-            WORKLOADS,
-            benchbase_cache_tier_feasible,
-            hammerdb_cache_tier_feasible,
-        )
+        from benchmark_tiers import shirt_size_feasible
 
-        wl = WORKLOADS.get(self.workload_proxy, {})
-        if self.tool == "benchbase":
-            return benchbase_cache_tier_feasible(
-                self.workload_proxy,
-                self.cache_ratio,
-                vcpus,
-                mem_gib,
-                disk_gib or 0,
-                durability=self.durability,
-            )
-        return hammerdb_cache_tier_feasible(
-            wl.get("hammerdb", "tpcc"),
-            self.cache_ratio,
-            vcpus,
-            mem_gib,
-            disk_gib or 0,
-            durability=self.durability,
-        )
+        return shirt_size_feasible(self.shirt_size, mem_gib)
 
 
 class DbaasDbTask(DockerTask):
@@ -240,8 +209,7 @@ class DbaasDbTask(DockerTask):
     topology: Literal["dbaas"] = "dbaas"
     benchmark_family: str = ""
     workload_proxy: str = ""
-    cache_tier: str = ""
-    cache_ratio: float = 1.0
+    shirt_size: str = "S"
     tool: Literal["hammerdb", "benchbase"] = "hammerdb"
     durability: Literal["durable", "async"] = "durable"
     dbaas_only: set[tuple[str, str]] = set()
@@ -250,39 +218,18 @@ class DbaasDbTask(DockerTask):
         from benchmark_tiers import benchbase_client_req, hammerdb_client_req
 
         if self.tool == "hammerdb":
-            return hammerdb_client_req(target, self.cache_ratio)
-        return benchbase_client_req(target, self.workload_proxy, self.cache_ratio)
+            return hammerdb_client_req(target, self.shirt_size)
+        return benchbase_client_req(target)
 
     def disk_gib_required(self, target) -> float:
         from dbaas_tiers import provision_spec
 
-        return float(provision_spec(target, self.cache_tier)["disk_gib_required"])
+        return float(provision_spec(target, self.shirt_size)["disk_gib_required"])
 
     def feasible_on(self, vcpus: float, mem_gib: float, disk_gib: float | None) -> bool:
-        from benchmark_tiers import (
-            WORKLOADS,
-            benchbase_cache_tier_feasible,
-            hammerdb_cache_tier_feasible,
-        )
+        from benchmark_tiers import shirt_size_feasible
 
-        wl = WORKLOADS.get(self.workload_proxy, {})
-        if self.tool == "benchbase":
-            return benchbase_cache_tier_feasible(
-                self.workload_proxy,
-                self.cache_ratio,
-                vcpus,
-                mem_gib,
-                disk_gib or 0,
-                durability=self.durability,
-            )
-        return hammerdb_cache_tier_feasible(
-            wl.get("hammerdb", "tpcc"),
-            self.cache_ratio,
-            vcpus,
-            mem_gib,
-            disk_gib or 0,
-            durability=self.durability,
-        )
+        return shirt_size_feasible(self.shirt_size, mem_gib)
 
     def supported_on_target(self, target) -> bool:
         """False when this task's durability mode is unavailable on the managed DB."""
@@ -602,13 +549,6 @@ def _task_resource_checks(
             logging.info(f"Skipping task {task.name}: not feasible on live host")
             return False
     if isinstance(task, DbaasDbTask):
-        provisioned_tier = os.environ.get("SC_PROVISION_CACHE_TIER", "")
-        if provisioned_tier and task.cache_tier != provisioned_tier:
-            logging.info(
-                f"Skipping task {task.name}: cache tier {task.cache_tier} "
-                f"!= provisioned {provisioned_tier}"
-            )
-            return False
         mem_gib = float(os.environ.get("MEM_GIB") or mem_bytes / 1024**3)
         db_vcpus = float(os.environ.get("SC_PROVISION_CPU_COUNT", os.cpu_count() or 1))
         if os.environ.get("SC_PROVISION_STORAGE_GIB"):
@@ -627,7 +567,7 @@ def _task_resource_checks(
                 cpu_count=db_vcpus,
                 memory_gib=mem_gib,
             )
-            storage = float(provision_spec(stub, task.cache_tier)["storage_gib"])
+            storage = float(provision_spec(stub, task.shirt_size)["storage_gib"])
         if not task.feasible_on(db_vcpus, mem_gib, storage):
             logging.info(f"Skipping task {task.name}: not feasible on DBaaS host")
             return False
@@ -920,6 +860,7 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, gpu_co
             version_docker_opts["environment"] = version_env
             if task.version_command:
                 ver = d.containers.run(task.image, task.version_command, **version_docker_opts).strip().decode("utf-8").replace("\n", ", ")
+            docker_opts = configure_resource_tracker_docker_opts(docker_opts, data_dir)
             c = d.containers.run(task.image, command, **docker_opts)
         except Exception as e:
             if is_gpu_attempt:

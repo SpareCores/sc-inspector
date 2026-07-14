@@ -18,6 +18,7 @@ from benchmark_tiers import (
     wh_per_vu_min,
 )
 from lib import DOCKER_OPTS, Meta, container_remove
+from resource_tracker import configure_resource_tracker_docker_opts
 
 PG_USER = os.environ.get("SC_DB_USER", "scadmin")
 PG_PASSWORD = os.environ.get("SC_DB_PASSWORD", "")
@@ -212,8 +213,6 @@ def _durability_roles(task) -> list[str]:
         wl = WORKLOADS.get(task.workload_proxy, {}).get("hammerdb", "tpcc")
         if wl == "tpcc":
             roles.append("tpcc")
-        elif wl == "tpch":
-            roles.append("tpch")
     return roles
 
 
@@ -357,8 +356,6 @@ def _ensure_hammerdb_prereqs(workload: str) -> None:
     """Reset HammerDB workload database so buildschema starts from a clean slate."""
     if workload == "tpcc":
         _reset_benchmark_database("tpcc", "tpcc", "tpcc")
-    elif workload == "tpch":
-        _reset_benchmark_database("tpch", "tpch", "tpch")
     else:
         raise RuntimeError(f"unsupported HammerDB workload: {workload}")
 
@@ -379,7 +376,6 @@ def _provision_env() -> dict[str, str]:
         "SC_PROVISION_REGION",
         "SC_PROVISION_ZONE",
         "SC_PROVISION_NETWORK_MODE",
-        "SC_PROVISION_CACHE_TIER",
         "SC_PROVISION_SYNC_COMMIT_SETTABLE",
     )
     return {key: os.environ[key] for key in keys if os.environ.get(key)}
@@ -404,7 +400,7 @@ def _benchmark_env(task, params, mem_gib: float, db_vcpus: int, client_vcpus: in
         "SC_DB_NAME": PG_DB if task.tool == "hammerdb" else BENCHBASE_DB,
         "SC_DB_VCPUS": str(db_vcpus),
         "SC_CLIENT_VCPUS": str(client_vcpus),
-        "SC_CACHE_RATIO": str(task.cache_ratio),
+        "SC_SHIRT_SIZE": task.shirt_size,
         "SC_DURABILITY": durability,
         "SC_PROFILE": "1",
         "SC_PROFILE_VUS": ",".join(str(v) for v in profile_vus),
@@ -413,7 +409,6 @@ def _benchmark_env(task, params, mem_gib: float, db_vcpus: int, client_vcpus: in
         "SC_WAREHOUSES": str(params.scale_units),
         "SC_WH_PER_VU_MIN": str(wh_per_vu_min(db_vcpus)),
         "SC_TOPOLOGY": "dbaas",
-        "SC_CACHE_TIER": task.cache_tier,
         "SC_DB_SSLMODE": _db_sslmode(),
     }
     env.update(_provision_env())
@@ -422,7 +417,7 @@ def _benchmark_env(task, params, mem_gib: float, db_vcpus: int, client_vcpus: in
     else:
         bench_name = wl.get("benchmark", "wikipedia")
         env["SC_WORKLOAD"] = bench_name
-        env["SC_SCALEFACTOR"] = str(benchbase_scalefactor(bench_name, mem_gib, task.cache_ratio))
+        env["SC_SCALEFACTOR"] = str(benchbase_scalefactor(bench_name, task.shirt_size))
     return env
 
 
@@ -457,7 +452,7 @@ def run_dbaas_task(
     params = multi_vm_workload_params(
         task.workload_proxy,
         task.tool,
-        task.cache_ratio,
+        task.shirt_size,
         db_vcpus,
         mem_gib,
         durability=getattr(task, "durability", "durable"),
@@ -496,6 +491,9 @@ def run_dbaas_task(
     docker_opts = dict(DOCKER_OPTS)
     docker_opts["environment"] = env
     docker_opts["network_mode"] = "host"
+    task_dir = os.path.join(data_dir, task.name)
+    os.makedirs(task_dir, exist_ok=True)
+    docker_opts = configure_resource_tracker_docker_opts(docker_opts, task_dir)
     c = None
     try:
         d = docker.from_env(timeout=1800)

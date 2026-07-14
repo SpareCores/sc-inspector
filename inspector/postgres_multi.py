@@ -14,7 +14,6 @@ from pathlib import Path
 import docker
 
 from benchmark_tiers import (
-    WH_SIZE_GIB,
     WORKLOADS,
     benchbase_scalefactor,
     multi_vm_profile_ladder,
@@ -23,6 +22,7 @@ from benchmark_tiers import (
 )
 from companion_protocol import BenchmarkResult, Ping, Pong, RunBenchmark, Shutdown
 from lib import DOCKER_OPTS, Meta, container_remove
+from resource_tracker import RESOURCE_TRACKER_OUTPUT_FILENAME
 
 CONNECT_DEADLINE_SEC = int(os.environ.get("MP_CONNECT_DEADLINE_SEC", "600"))
 CONNECT_RETRY_SEC = 5
@@ -32,7 +32,6 @@ PG_PASSWORD = "postgres"
 PG_DB = "bench"
 BENCHBASE_DB = "benchbase"
 HAMMERDB_TPCC_DB = "tpcc"
-HAMMERDB_TPCH_DB = "tpch"
 
 
 class CompanionSession:
@@ -325,7 +324,7 @@ def _benchmark_env(task, db_host: str, params, mem_gib: float, db_vcpus: int, cl
         "SC_DB_NAME": PG_DB,
         "SC_DB_VCPUS": str(db_vcpus),
         "SC_CLIENT_VCPUS": str(client_vcpus),
-        "SC_CACHE_RATIO": str(task.cache_ratio),
+        "SC_SHIRT_SIZE": task.shirt_size,
         "SC_DURABILITY": durability,
         "SC_PROFILE": "1",
         "SC_PROFILE_VUS": ",".join(str(v) for v in profile_vus),
@@ -351,7 +350,7 @@ def _benchmark_env(task, db_host: str, params, mem_gib: float, db_vcpus: int, cl
     else:
         bench_name = wl.get("benchmark", "wikipedia")
         env["SC_WORKLOAD"] = bench_name
-        env["SC_SCALEFACTOR"] = str(benchbase_scalefactor(bench_name, mem_gib, task.cache_ratio))
+        env["SC_SCALEFACTOR"] = str(benchbase_scalefactor(bench_name, task.shirt_size))
     return env
 
 
@@ -377,26 +376,21 @@ def run_multi_vm_task(
     params = multi_vm_workload_params(
         task.workload_proxy,
         task.tool,
-        task.cache_ratio,
+        task.shirt_size,
         vcpus,
         mem_gib,
         durability=getattr(task, "durability", "durable"),
     )
     db_host = _local_private_ip()
-    pg_wh = max(1, int(params.schema_gib / WH_SIZE_GIB))
+    pg_wh = params.scale_units
 
     try:
         pg_container = _start_postgres(task, mem_gib, pg_wh, vcpus)
         if task.tool == "benchbase":
             _ensure_database(pg_container, BENCHBASE_DB)
         elif task.tool == "hammerdb":
-            wl = WORKLOADS.get(task.workload_proxy, {}).get("hammerdb", "tpcc")
-            if wl == "tpcc":
-                _ensure_database(pg_container, HAMMERDB_TPCC_DB)
-                _verify_database(db_host, HAMMERDB_TPCC_DB)
-            elif wl == "tpch":
-                _ensure_database(pg_container, HAMMERDB_TPCH_DB)
-                _verify_database(db_host, HAMMERDB_TPCH_DB)
+            _ensure_database(pg_container, HAMMERDB_TPCC_DB)
+            _verify_database(db_host, HAMMERDB_TPCC_DB)
     except Exception as exc:
         meta.error_msg = f"postgres start failed: {exc}"
         meta.end = datetime.now()
@@ -431,6 +425,12 @@ def run_multi_vm_task(
     meta.stderr_bytes = len(result.stderr.encode("utf-8"))
     if result.exit_code != 0 and not meta.error_msg:
         meta.error_msg = result.stderr[:500] if result.stderr else "benchmark failed"
+    task_dir = os.path.join(data_dir, task.name)
+    os.makedirs(task_dir, exist_ok=True)
+    if result.resource_tracker_jsonl:
+        tracker_path = os.path.join(task_dir, RESOURCE_TRACKER_OUTPUT_FILENAME)
+        with open(tracker_path, "w", encoding="utf-8") as fh:
+            fh.write(result.resource_tracker_jsonl)
     ver = task.image.rsplit(":", 1)[-1]
     return ver, result.stdout.encode("utf-8"), result.stderr.encode("utf-8")
 

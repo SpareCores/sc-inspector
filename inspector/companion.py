@@ -16,6 +16,7 @@ import docker
 
 from companion_protocol import BenchmarkResult, Ping, Pong, RunBenchmark, Shutdown
 from lib import DOCKER_OPTS
+from resource_tracker import RESOURCE_TRACKER_OUTPUT_FILENAME, uses_resource_tracker
 
 CONNECT_ACCEPT_DEADLINE_SEC = int(os.environ.get("MP_ACCEPT_DEADLINE_SEC", "600"))
 NICE_ENTRYPOINT = ["nice", "-n", "-20"]
@@ -34,12 +35,16 @@ _TRACKER_FORWARD_ENV = (
 )
 
 
-def _benchmark_container_env(msg: RunBenchmark) -> dict[str, str]:
+def _benchmark_container_env(msg: RunBenchmark, metrics_dir: Path) -> dict[str, str]:
     env = dict(msg.env)
     env.setdefault("TRACKER_PROJECT_NAME", "inspector")
     env.setdefault("TRACKER_JOB_NAME", msg.tracker_job_name)
     env.setdefault("TRACKER_EXTERNAL_RUN_ID", os.environ.get("GITHUB_RUN_ID", ""))
-    env.setdefault("TRACKER_QUIET", "true")
+    if uses_resource_tracker(env):
+        env["TRACKER_QUIET"] = "false"
+        env["TRACKER_OUTPUT"] = str(metrics_dir / RESOURCE_TRACKER_OUTPUT_FILENAME)
+    else:
+        env.setdefault("TRACKER_QUIET", "true")
     for key in _TRACKER_FORWARD_ENV:
         if key in os.environ:
             env.setdefault(key, os.environ[key])
@@ -84,14 +89,17 @@ def _benchmark_command(msg: RunBenchmark) -> tuple[list[str], list[str]]:
 def _docker_run(msg: RunBenchmark) -> BenchmarkResult:
     # Use only benchmark-specific env plus explicit tracker forwarding; passing the
     # full host os.environ overwrites image PATH (e.g. BenchBase Java).
-    env = _benchmark_container_env(msg)
-
     host_out, metrics_dir = _benchmark_output_dirs()
-    metrics_path = metrics_dir / "metrics.json"
-    if metrics_path.is_file():
-        metrics_path.unlink()
+    tracker_path = metrics_dir / RESOURCE_TRACKER_OUTPUT_FILENAME
+    benchmark_metrics_path = metrics_dir / "metrics.json"
+    if tracker_path.is_file():
+        tracker_path.unlink()
+    env = _benchmark_container_env(msg, metrics_dir)
     entrypoint, command = _benchmark_command(msg)
     container = None
+    exit_code = 1
+    stdout = ""
+    stderr = ""
     try:
         d = docker.from_env(timeout=msg.timeout_sec + 120)
         try:
@@ -107,7 +115,7 @@ def _docker_run(msg: RunBenchmark) -> BenchmarkResult:
         run_kwargs = {
             **DOCKER_OPTS,
             "environment": env,
-            "volumes": {host_out: {"bind": "/output", "mode": "rw"}},
+            "volumes": {host_out: {"bind": str(metrics_dir), "mode": "rw"}},
             "entrypoint": entrypoint,
         }
         container = d.containers.run(msg.image, command, **run_kwargs)
@@ -142,16 +150,25 @@ def _docker_run(msg: RunBenchmark) -> BenchmarkResult:
                 metrics = json.loads(stdout)
             except Exception:
                 logging.exception("Failed to parse benchmark stdout JSON")
-        if not metrics and metrics_path.is_file():
+        if not metrics and benchmark_metrics_path.is_file():
             try:
-                metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+                metrics = json.loads(benchmark_metrics_path.read_text(encoding="utf-8"))
             except Exception:
                 logging.exception("Failed to parse metrics.json")
+
+    resource_tracker_jsonl = ""
+    if tracker_path.is_file() and tracker_path.stat().st_size > 0:
+        try:
+            resource_tracker_jsonl = tracker_path.read_text(encoding="utf-8")
+        except Exception:
+            logging.exception("Failed to read %s", tracker_path)
+
     return BenchmarkResult(
         exit_code=exit_code,
         stdout=stdout,
         stderr=stderr,
         metrics_json=metrics,
+        resource_tracker_jsonl=resource_tracker_jsonl,
     )
 
 
