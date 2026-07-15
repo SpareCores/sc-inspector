@@ -116,13 +116,13 @@ def _ensure_workload_admin_role() -> None:
             cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (PG_USER,))
             if not cur.fetchone():
                 cur.execute(
-                    f'CREATE USER "{PG_USER}" WITH PASSWORD %s CREATEDB',
+                    f'CREATE USER "{PG_USER}" WITH PASSWORD %s CREATEDB CREATEROLE',
                     (PG_PASSWORD,),
                 )
                 cur.execute(f'GRANT cloudsqlsuperuser TO "{PG_USER}"')
             else:
-                # cloudsqlsuperuser alone cannot CREATE DATABASE on Cloud SQL.
-                cur.execute(f'ALTER USER "{PG_USER}" CREATEDB')
+                # cloudsqlsuperuser grants are not enough for CREATE DATABASE/ROLE on Cloud SQL.
+                cur.execute(f'ALTER USER "{PG_USER}" CREATEDB CREATEROLE')
                 cur.execute(f'GRANT cloudsqlsuperuser TO "{PG_USER}"')
     finally:
         conn.close()
