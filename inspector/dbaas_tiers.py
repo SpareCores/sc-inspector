@@ -28,9 +28,9 @@ _P_TIER_ORDER: tuple[str, ...] = (
 )
 
 _SHIRT_SIZE_MIN_IOPS: dict[str, str] = {
+    "XS": "P10",
     "S": "P20",
-    "M": "P30",
-    "L": "P40",
+    "M": "P40",
 }
 
 

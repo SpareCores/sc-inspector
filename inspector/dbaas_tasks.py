@@ -4,7 +4,7 @@ DBaaS retains both async and durable durability modes: storage is a bundled,
 differentiating factor of managed DB offerings, so fsync-bound scores are
 meaningful for customers comparing DBaaS SKUs.
 
-Fixed shirt-size tiers (S / M / L) — same warehouse/scale-factor counts as
+Fixed shirt-size tiers (XS / S / M) — same warehouse/scale-factor counts as
 multi-VM so scores are comparable across topologies.
 """
 
@@ -18,7 +18,62 @@ DBAAS_ROLLOUT = {
 }
 
 # ---------------------------------------------------------------------------
-# Tier S (100 warehouses / ~10 GiB schema) — 16-128 GiB RAM
+# Tier XS (11 warehouses / ~1 GiB schema)
+# ---------------------------------------------------------------------------
+
+hammerdb_postgres_dbaas_oltp_mixed_xs_async = DbaasDbTask(
+    parallel=False,
+    priority=0.9,
+    dbaas_only=DBAAS_ROLLOUT,
+    benchmark_family="hammerdb_postgres_dbaas",
+    tool="hammerdb",
+    workload_proxy="oltp_mixed",
+    shirt_size="XS",
+    durability="async",
+    image="ghcr.io/sparecores/benchmark-hammerdb-postgres:main",
+    timeout=timedelta(minutes=30),
+)
+
+hammerdb_postgres_dbaas_oltp_mixed_xs_durable = DbaasDbTask(
+    parallel=False,
+    priority=0.91,
+    dbaas_only=DBAAS_ROLLOUT,
+    benchmark_family="hammerdb_postgres_dbaas",
+    tool="hammerdb",
+    workload_proxy="oltp_mixed",
+    shirt_size="XS",
+    durability="durable",
+    image="ghcr.io/sparecores/benchmark-hammerdb-postgres:main",
+    timeout=timedelta(minutes=30),
+)
+
+benchbase_postgres_dbaas_read_heavy_xs = DbaasDbTask(
+    parallel=False,
+    priority=0.92,
+    dbaas_only=DBAAS_ROLLOUT,
+    benchmark_family="benchbase_postgres_dbaas",
+    tool="benchbase",
+    workload_proxy="read_heavy",
+    shirt_size="XS",
+    image="ghcr.io/sparecores/benchmark-benchbase-postgres:main",
+    timeout=timedelta(minutes=30),
+)
+
+benchbase_postgres_dbaas_crud_simple_xs = DbaasDbTask(
+    parallel=False,
+    priority=0.93,
+    dbaas_only=DBAAS_ROLLOUT,
+    benchmark_family="benchbase_postgres_dbaas",
+    tool="benchbase",
+    workload_proxy="crud_simple",
+    shirt_size="XS",
+    durability="async",
+    image="ghcr.io/sparecores/benchmark-benchbase-postgres:main",
+    timeout=timedelta(minutes=30),
+)
+
+# ---------------------------------------------------------------------------
+# Tier S (105 warehouses / ~10 GiB schema)
 # ---------------------------------------------------------------------------
 
 hammerdb_postgres_dbaas_oltp_mixed_s_async = DbaasDbTask(
@@ -73,7 +128,7 @@ benchbase_postgres_dbaas_crud_simple_s = DbaasDbTask(
 )
 
 # ---------------------------------------------------------------------------
-# Tier M (300 warehouses / ~29 GiB schema) — 32-512 GiB RAM
+# Tier M (1047 warehouses / ~100 GiB schema)
 # ---------------------------------------------------------------------------
 
 hammerdb_postgres_dbaas_oltp_mixed_m_async = DbaasDbTask(
@@ -86,7 +141,7 @@ hammerdb_postgres_dbaas_oltp_mixed_m_async = DbaasDbTask(
     shirt_size="M",
     durability="async",
     image="ghcr.io/sparecores/benchmark-hammerdb-postgres:main",
-    timeout=timedelta(minutes=60),
+    timeout=timedelta(minutes=120),
 )
 
 hammerdb_postgres_dbaas_oltp_mixed_m_durable = DbaasDbTask(
@@ -99,7 +154,7 @@ hammerdb_postgres_dbaas_oltp_mixed_m_durable = DbaasDbTask(
     shirt_size="M",
     durability="durable",
     image="ghcr.io/sparecores/benchmark-hammerdb-postgres:main",
-    timeout=timedelta(minutes=60),
+    timeout=timedelta(minutes=120),
 )
 
 benchbase_postgres_dbaas_read_heavy_m = DbaasDbTask(
@@ -111,7 +166,7 @@ benchbase_postgres_dbaas_read_heavy_m = DbaasDbTask(
     workload_proxy="read_heavy",
     shirt_size="M",
     image="ghcr.io/sparecores/benchmark-benchbase-postgres:main",
-    timeout=timedelta(minutes=60),
+    timeout=timedelta(minutes=120),
 )
 
 benchbase_postgres_dbaas_crud_simple_m = DbaasDbTask(
@@ -124,60 +179,5 @@ benchbase_postgres_dbaas_crud_simple_m = DbaasDbTask(
     shirt_size="M",
     durability="async",
     image="ghcr.io/sparecores/benchmark-benchbase-postgres:main",
-    timeout=timedelta(minutes=60),
-)
-
-# ---------------------------------------------------------------------------
-# Tier L (1000 warehouses / ~95 GiB schema) — 128 GiB+ RAM
-# ---------------------------------------------------------------------------
-
-hammerdb_postgres_dbaas_oltp_mixed_l_async = DbaasDbTask(
-    parallel=False,
-    priority=1.2,
-    dbaas_only=DBAAS_ROLLOUT,
-    benchmark_family="hammerdb_postgres_dbaas",
-    tool="hammerdb",
-    workload_proxy="oltp_mixed",
-    shirt_size="L",
-    durability="async",
-    image="ghcr.io/sparecores/benchmark-hammerdb-postgres:main",
     timeout=timedelta(minutes=120),
-)
-
-hammerdb_postgres_dbaas_oltp_mixed_l_durable = DbaasDbTask(
-    parallel=False,
-    priority=1.21,
-    dbaas_only=DBAAS_ROLLOUT,
-    benchmark_family="hammerdb_postgres_dbaas",
-    tool="hammerdb",
-    workload_proxy="oltp_mixed",
-    shirt_size="L",
-    durability="durable",
-    image="ghcr.io/sparecores/benchmark-hammerdb-postgres:main",
-    timeout=timedelta(minutes=120),
-)
-
-benchbase_postgres_dbaas_read_heavy_l = DbaasDbTask(
-    parallel=False,
-    priority=1.22,
-    dbaas_only=DBAAS_ROLLOUT,
-    benchmark_family="benchbase_postgres_dbaas",
-    tool="benchbase",
-    workload_proxy="read_heavy",
-    shirt_size="L",
-    image="ghcr.io/sparecores/benchmark-benchbase-postgres:main",
-    timeout=timedelta(minutes=60),
-)
-
-benchbase_postgres_dbaas_crud_simple_l = DbaasDbTask(
-    parallel=False,
-    priority=1.23,
-    dbaas_only=DBAAS_ROLLOUT,
-    benchmark_family="benchbase_postgres_dbaas",
-    tool="benchbase",
-    workload_proxy="crud_simple",
-    shirt_size="L",
-    durability="async",
-    image="ghcr.io/sparecores/benchmark-benchbase-postgres:main",
-    timeout=timedelta(minutes=60),
 )

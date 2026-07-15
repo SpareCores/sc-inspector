@@ -145,7 +145,7 @@ virtualization = DockerTask(
 POSTGRES_MULTI_ROLLOUT = {("azure", "Standard_F16ams_v6"), ("azure", "Standard_E16ds_v5"), ("azure", "Standard_E8ds_v5")}
 
 # ---------------------------------------------------------------------------
-# Multi-VM Postgres benchmarks — fixed shirt-size tiers (S / M / L)
+# Multi-VM Postgres benchmarks — fixed shirt-size tiers (XS / S / M)
 #
 # Each tier uses a fixed warehouse/scale-factor count so scores are directly
 # comparable across instance sizes.  An instance runs every tier where its RAM
@@ -156,7 +156,47 @@ POSTGRES_MULTI_ROLLOUT = {("azure", "Standard_F16ams_v6"), ("azure", "Standard_E
 # reflect CPU/memory/lock scaling, not provisioned-disk fsync latency.
 # ---------------------------------------------------------------------------
 
-# --- Tier S (100 warehouses / ~10 GiB schema) — 16-128 GiB RAM -----------
+# --- Tier XS (11 warehouses / ~1 GiB schema) --------------------------------
+
+hammerdb_postgres_multi_oltp_mixed_xs = MultiVmDbTask(
+    parallel=False,
+    priority=0.9,
+    servers_only=POSTGRES_MULTI_ROLLOUT,
+    benchmark_family="hammerdb_postgres_multi",
+    tool="hammerdb",
+    workload_proxy="oltp_mixed",
+    shirt_size="XS",
+    durability="async",
+    image="ghcr.io/sparecores/benchmark-hammerdb-postgres:main",
+    timeout=timedelta(minutes=30),
+)
+
+benchbase_postgres_multi_read_heavy_xs = MultiVmDbTask(
+    parallel=False,
+    priority=0.91,
+    servers_only=POSTGRES_MULTI_ROLLOUT,
+    benchmark_family="benchbase_postgres_multi",
+    tool="benchbase",
+    workload_proxy="read_heavy",
+    shirt_size="XS",
+    image="ghcr.io/sparecores/benchmark-benchbase-postgres:main",
+    timeout=timedelta(minutes=30),
+)
+
+benchbase_postgres_multi_crud_simple_xs = MultiVmDbTask(
+    parallel=False,
+    priority=0.92,
+    servers_only=POSTGRES_MULTI_ROLLOUT,
+    benchmark_family="benchbase_postgres_multi",
+    tool="benchbase",
+    workload_proxy="crud_simple",
+    shirt_size="XS",
+    durability="async",
+    image="ghcr.io/sparecores/benchmark-benchbase-postgres:main",
+    timeout=timedelta(minutes=30),
+)
+
+# --- Tier S (105 warehouses / ~10 GiB schema) -------------------------------
 
 hammerdb_postgres_multi_oltp_mixed_s = MultiVmDbTask(
     parallel=False,
@@ -196,7 +236,7 @@ benchbase_postgres_multi_crud_simple_s = MultiVmDbTask(
     timeout=timedelta(minutes=60),
 )
 
-# --- Tier M (300 warehouses / ~29 GiB schema) — 32-512 GiB RAM -----------
+# --- Tier M (1047 warehouses / ~100 GiB schema) ------------------------------
 
 hammerdb_postgres_multi_oltp_mixed_m = MultiVmDbTask(
     parallel=False,
@@ -208,7 +248,7 @@ hammerdb_postgres_multi_oltp_mixed_m = MultiVmDbTask(
     shirt_size="M",
     durability="async",
     image="ghcr.io/sparecores/benchmark-hammerdb-postgres:main",
-    timeout=timedelta(minutes=60),
+    timeout=timedelta(minutes=120),
 )
 
 benchbase_postgres_multi_read_heavy_m = MultiVmDbTask(
@@ -220,7 +260,7 @@ benchbase_postgres_multi_read_heavy_m = MultiVmDbTask(
     workload_proxy="read_heavy",
     shirt_size="M",
     image="ghcr.io/sparecores/benchmark-benchbase-postgres:main",
-    timeout=timedelta(minutes=60),
+    timeout=timedelta(minutes=120),
 )
 
 benchbase_postgres_multi_crud_simple_m = MultiVmDbTask(
@@ -233,47 +273,7 @@ benchbase_postgres_multi_crud_simple_m = MultiVmDbTask(
     shirt_size="M",
     durability="async",
     image="ghcr.io/sparecores/benchmark-benchbase-postgres:main",
-    timeout=timedelta(minutes=60),
-)
-
-# --- Tier L (1000 warehouses / ~95 GiB schema) — 128 GiB+ RAM ------------
-
-hammerdb_postgres_multi_oltp_mixed_l = MultiVmDbTask(
-    parallel=False,
-    priority=1.2,
-    servers_only=POSTGRES_MULTI_ROLLOUT,
-    benchmark_family="hammerdb_postgres_multi",
-    tool="hammerdb",
-    workload_proxy="oltp_mixed",
-    shirt_size="L",
-    durability="async",
-    image="ghcr.io/sparecores/benchmark-hammerdb-postgres:main",
     timeout=timedelta(minutes=120),
-)
-
-benchbase_postgres_multi_read_heavy_l = MultiVmDbTask(
-    parallel=False,
-    priority=1.21,
-    servers_only=POSTGRES_MULTI_ROLLOUT,
-    benchmark_family="benchbase_postgres_multi",
-    tool="benchbase",
-    workload_proxy="read_heavy",
-    shirt_size="L",
-    image="ghcr.io/sparecores/benchmark-benchbase-postgres:main",
-    timeout=timedelta(minutes=60),
-)
-
-benchbase_postgres_multi_crud_simple_l = MultiVmDbTask(
-    parallel=False,
-    priority=1.22,
-    servers_only=POSTGRES_MULTI_ROLLOUT,
-    benchmark_family="benchbase_postgres_multi",
-    tool="benchbase",
-    workload_proxy="crud_simple",
-    shirt_size="L",
-    durability="async",
-    image="ghcr.io/sparecores/benchmark-benchbase-postgres:main",
-    timeout=timedelta(minutes=60),
 )
 
 # We use this benchmark to determine the "SCore" of a given instance. This should represent the relative

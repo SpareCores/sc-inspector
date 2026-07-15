@@ -21,21 +21,22 @@ BUFFER_FRAC = 0.25
 
 # Fixed shirt-size tiers: warehouse count, schema size, and minimum RAM.
 # Each instance runs the tier(s) where its RAM falls within [min_ram_gib, max_ram_gib].
+# Schema targets (HammerDB TPROC-C): XS ~1 GiB, S ~10 GiB, M ~100 GiB.
 SHIRT_SIZES: dict[str, dict[str, Any]] = {
-    "S": {"warehouses": 100, "schema_gib": 100 * WH_SIZE_GIB, "min_ram_gib": 16, "max_ram_gib": 128},
-    "M": {"warehouses": 300, "schema_gib": 300 * WH_SIZE_GIB, "min_ram_gib": 32, "max_ram_gib": 512},
-    "L": {"warehouses": 1000, "schema_gib": 1000 * WH_SIZE_GIB, "min_ram_gib": 128, "max_ram_gib": float("inf")},
+    "XS": {"warehouses": 11, "schema_gib": 11 * WH_SIZE_GIB, "min_ram_gib": 2, "max_ram_gib": float("inf")},
+    "S": {"warehouses": 105, "schema_gib": 105 * WH_SIZE_GIB, "min_ram_gib": 8, "max_ram_gib": float("inf")},
+    "M": {"warehouses": 1047, "schema_gib": 1047 * WH_SIZE_GIB, "min_ram_gib": 32, "max_ram_gib": float("inf")},
 }
 
-# Fixed BenchBase scale factors per shirt size.
+# Fixed BenchBase scale factors per shirt size (matched to the same schema targets).
 BENCHBASE_SHIRT_SIZES: dict[str, dict[str, Any]] = {
-    "S": {"wikipedia_sf": 20, "ycsb_sf": 5000},
-    "M": {"wikipedia_sf": 50, "ycsb_sf": 20000},
-    "L": {"wikipedia_sf": 100, "ycsb_sf": 50000},
+    "XS": {"wikipedia_sf": 7, "ycsb_sf": 882},
+    "S": {"wikipedia_sf": 68, "ycsb_sf": 8819},
+    "M": {"wikipedia_sf": 676, "ycsb_sf": 88190},
 }
 
-WIKIPEDIA_GIB_PER_SF = 8.0 / 50
-YCSB_ROW_KIB = 1.0
+WIKIPEDIA_GIB_PER_SF = 14.803 / 100  # measured on Postgres 18 (sf=100 -> 14.8 GiB)
+YCSB_ROW_KIB = 1.189  # measured on Postgres 18 (sf=1049 -> 1.19 GiB)
 BENCHBASE_UNITS_PER_VU_MIN = 5
 
 WORKLOADS: dict[str, dict[str, Any]] = {
