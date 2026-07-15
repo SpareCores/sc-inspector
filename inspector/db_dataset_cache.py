@@ -84,7 +84,8 @@ def cdn_exists(url: str, *, timeout: int = 30) -> bool:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return 200 <= response.status < 300
     except urllib.error.HTTPError as exc:
-        if exc.code == 404:
+        # CloudFront/S3 often return 403 (not 404) for missing private objects.
+        if exc.code in (403, 404):
             return False
         raise
 
