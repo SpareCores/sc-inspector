@@ -458,6 +458,8 @@ if [ "{INSPECTOR_ROLE}" = "client" ]; then
         -e BENCHMARK_OUTPUT_MOUNT=/benchmark-output \
         -e GITHUB_RUN_ID={GITHUB_RUN_ID} -e SENTINEL_API_TOKEN={SENTINEL_API_TOKEN} \
         -e HF_TOKEN={HF_TOKEN} \
+        -e SC_CDN_BASE_URL={SC_CDN_BASE_URL} \
+        -e SC_CDN_DATASET_POST_B64={SC_CDN_DATASET_POST_B64} \
         ghcr.io/sparecores/sc-inspector:main companion --vendor {VENDOR} --instance {INSTANCE} --listen-port {MP_PORT}
     inspect_exit=$?
 elif [ "{TOPOLOGY}" = "dbaas" ]; then
@@ -472,6 +474,8 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e SENTINEL_API_TOKEN={SENTINEL_API_TOKEN} \
     -e HF_TOKEN={HF_TOKEN} \
     -e TASK_LOGS_S3_POST_B64={TASK_LOGS_S3_POST_B64} \
+    -e SC_CDN_BASE_URL={SC_CDN_BASE_URL} \
+    -e SC_CDN_DATASET_POST_B64={SC_CDN_DATASET_POST_B64} \
     -e GPU_VRAM_MIB="$GPU_VRAM_MIB" \
     -e MEM_GIB={SC_PROVISION_MEMORY_GIB} \
     -e SC_DB_HOST={SC_DB_HOST} -e SC_DB_PORT={SC_DB_PORT} \
@@ -510,6 +514,8 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e SENTINEL_API_TOKEN={SENTINEL_API_TOKEN} \
     -e HF_TOKEN={HF_TOKEN} \
     -e TASK_LOGS_S3_POST_B64={TASK_LOGS_S3_POST_B64} \
+    -e SC_CDN_BASE_URL={SC_CDN_BASE_URL} \
+    -e SC_CDN_DATASET_POST_B64={SC_CDN_DATASET_POST_B64} \
     -e GPU_VRAM_MIB="$GPU_VRAM_MIB" \
     -e MP_AUTHKEY_B64={MP_AUTHKEY_B64} -e MP_PORT={MP_PORT} \
     -e CLIENT_PRIVATE_IP={CLIENT_PRIVATE_IP} \

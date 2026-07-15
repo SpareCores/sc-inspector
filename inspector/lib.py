@@ -1605,7 +1605,8 @@ def inspector_user_data_replacements(
     if not include_run_upload:
         run_url = ""
     task_logs_post_b64 = s3_runs.presigned_task_logs_post_b64(vendor, server)
-    return {
+    cdn_dataset_post_b64 = s3_runs.presigned_cdn_dataset_post_b64()
+    replacements = {
         "SSH_DEPLOY_KEY_B64": ssh_deploy_key_b64,
         "REPO_URL": repo_url_ssh,
         "GITHUB_SERVER_URL": os.environ.get("GITHUB_SERVER_URL", ""),
@@ -1625,6 +1626,7 @@ def inspector_user_data_replacements(
         "LOG_UPLOAD_URL": log_url,
         "RUN_UPLOAD_URL": run_url,
         "TASK_LOGS_S3_POST_B64": task_logs_post_b64,
+        "SC_CDN_DATASET_POST_B64": cdn_dataset_post_b64,
         "INSPECTOR_ROLE": role,
         "MP_AUTHKEY_B64": mp_authkey_b64,
         "MP_PORT": str(mp_port),
@@ -1646,6 +1648,11 @@ def inspector_user_data_replacements(
         "SC_DB_NAME": "bench",
         "DB_WAIT_TIMEOUT_SEC": os.environ.get("DB_WAIT_TIMEOUT_SEC", "1200"),
     }
+    replacements["SC_CDN_BASE_URL"] = os.environ.get(
+        "SC_CDN_BASE_URL",
+        "https://cdn.sparecores.net/sc-inspector",
+    )
+    return replacements
 
 
 def build_inspector_user_data(

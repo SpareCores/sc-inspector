@@ -19,6 +19,7 @@ PRESIGN_EXPIRES_SECONDS = 12 * 60 * 60
 
 
 INSPECTOR_RUNS_CATEGORY = "inspect"
+CDN_DATASET_MAX_BYTES = 256 * 1024 * 1024 * 1024  # 256 GiB compressed dumps
 
 
 def workflow_slug() -> str:
@@ -62,6 +63,20 @@ def _s3_client():
     return boto3.client("s3", region_name=region, config=Config(signature_version="s3v4"))
 
 
+def _cdn_s3_client():
+    region = os.environ.get("SC_CDN_REGION", os.environ.get("CDN_REGION", "eu-central-1"))
+    return boto3.client("s3", region_name=region, config=Config(signature_version="s3v4"))
+
+
+def cdn_bucket_name() -> str:
+    return os.environ.get("SC_CDN_BUCKET", os.environ.get("CDN_BUCKET", "sc-cdn-cae3awai"))
+
+
+def cdn_dataset_prefix() -> str:
+    prefix = os.environ.get("CDN_PREFIX", "sc-inspector").strip("/")
+    return f"{prefix}/"
+
+
 def bucket_name() -> str:
     name = os.environ.get("INSPECTOR_RUNS_BUCKET")
     if not name:
@@ -92,6 +107,25 @@ def presigned_post_for_prefix(prefix: str, *, max_bytes: int = 100 * 1024 * 1024
         ],
         ExpiresIn=PRESIGN_EXPIRES_SECONDS,
     )
+
+
+def presigned_cdn_dataset_post(*, max_bytes: int = CDN_DATASET_MAX_BYTES) -> dict[str, Any]:
+    """Presigned POST for benchmark DB dumps under the CDN bucket prefix."""
+    prefix = cdn_dataset_prefix()
+    post = _cdn_s3_client().generate_presigned_post(
+        Bucket=cdn_bucket_name(),
+        Key=f"{prefix}${{filename}}",
+        Conditions=[
+            ["content-length-range", 1, max_bytes],
+        ],
+        ExpiresIn=PRESIGN_EXPIRES_SECONDS,
+    )
+    return {"url": post["url"], "fields": post["fields"], "prefix": prefix}
+
+
+def presigned_cdn_dataset_post_b64() -> str:
+    payload = presigned_cdn_dataset_post()
+    return base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
 
 
 def presigned_task_logs_post(

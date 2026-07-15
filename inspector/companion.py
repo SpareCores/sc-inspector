@@ -33,6 +33,11 @@ _TRACKER_FORWARD_ENV = (
     "SENTINEL_API_BASE",
     "SENTINEL_API_URL",
 )
+_CDN_FORWARD_ENV = (
+    "SC_CDN_BASE_URL",
+    "SC_CDN_DATASET_POST_B64",
+    "SC_CDN_UPLOAD",
+)
 
 
 def _benchmark_container_env(msg: RunBenchmark, metrics_dir: Path) -> dict[str, str]:
@@ -46,6 +51,9 @@ def _benchmark_container_env(msg: RunBenchmark, metrics_dir: Path) -> dict[str, 
     else:
         env.setdefault("TRACKER_QUIET", "true")
     for key in _TRACKER_FORWARD_ENV:
+        if key in os.environ:
+            env.setdefault(key, os.environ[key])
+    for key in _CDN_FORWARD_ENV:
         if key in os.environ:
             env.setdefault(key, os.environ[key])
     return env

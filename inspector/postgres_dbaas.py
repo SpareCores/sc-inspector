@@ -17,6 +17,7 @@ from benchmark_tiers import (
     multi_vm_workload_params,
     wh_per_vu_min,
 )
+from db_dataset_cache import cdn_env_for_benchmark
 from lib import DOCKER_OPTS, Meta, container_remove
 from resource_tracker import configure_resource_tracker_docker_opts
 
@@ -433,6 +434,7 @@ def _benchmark_env(task, params, mem_gib: float, db_vcpus: int, client_vcpus: in
         bench_name = wl.get("benchmark", "wikipedia")
         env["SC_WORKLOAD"] = bench_name
         env["SC_SCALEFACTOR"] = str(benchbase_scalefactor(bench_name, task.shirt_size))
+    env.update(cdn_env_for_benchmark())
     return env
 
 

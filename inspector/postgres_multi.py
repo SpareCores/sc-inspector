@@ -21,6 +21,7 @@ from benchmark_tiers import (
     wh_per_vu_min,
 )
 from companion_protocol import BenchmarkResult, Ping, Pong, RunBenchmark, Shutdown
+from db_dataset_cache import cdn_env_for_benchmark
 from lib import DOCKER_OPTS, Meta, container_remove
 from resource_tracker import RESOURCE_TRACKER_OUTPUT_FILENAME
 
@@ -351,6 +352,7 @@ def _benchmark_env(task, db_host: str, params, mem_gib: float, db_vcpus: int, cl
         bench_name = wl.get("benchmark", "wikipedia")
         env["SC_WORKLOAD"] = bench_name
         env["SC_SCALEFACTOR"] = str(benchbase_scalefactor(bench_name, task.shirt_size))
+    env.update(cdn_env_for_benchmark())
     return env
 
 
