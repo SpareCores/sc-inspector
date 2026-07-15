@@ -24,7 +24,7 @@ DEFAULT_BENCHMARK_COMMAND = [
     "/usr/local/bin/resource-tracker",
     "--",
     "python3",
-    "/benchmark.py",
+    "/benchmark/benchmark.py",
 ]
 # Forward from the companion host into nested benchmark containers without passing
 # the full os.environ (that clobbers image PATH, e.g. BenchBase Java).
