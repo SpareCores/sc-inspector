@@ -20,6 +20,7 @@ import re
 import repo
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import transform
@@ -2329,6 +2330,8 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         if not instance_started:
             record_instance_start_failure(lock, data_dir, tasks, error_msgs)
         return
+    pulumi_tempdir = tempfile.TemporaryDirectory(prefix=f"pulumi-{vendor}-{server}-")
+    pulumi_opts = dict(work_dir=pulumi_tempdir.name)
     # start instance
     if vendor in ("aws", "gcp", "hcloud", "upcloud", "ovh", "alicloud", "vultr"):
         # get the copy (so we don't modify the original) of the default instance opts for the vendor and add ours
@@ -2353,11 +2356,11 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             )
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
+            runner.destroy(vendor, pulumi_opts, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
             pulumi_output = []
             stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger, instance_timing, server)
             try:
-                retry_locked(runner.create, vendor, {},
+                retry_locked(runner.create, vendor, pulumi_opts,
                              resource_opts | dict(instance_opts=instance_opts, user_data=user_data),
                              stack_opts=stack_opts, instance_timing=instance_timing)
                 # empty it if create succeeded, just in case
@@ -2384,11 +2387,11 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             )
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
+            runner.destroy(vendor, pulumi_opts, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
             pulumi_output = []
             stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger, instance_timing, server)
             try:
-                retry_locked(runner.create, vendor, {},
+                retry_locked(runner.create, vendor, pulumi_opts,
                              resource_opts | dict(instance_opts=instance_opts, user_data=user_data),
                              stack_opts=stack_opts, instance_timing=instance_timing)
                 # empty it if create succeeded, just in case
@@ -2416,11 +2419,11 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             )
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
+            runner.destroy(vendor, pulumi_opts, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
             pulumi_output = []
             stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger, instance_timing, server)
             try:
-                retry_locked(runner.create, vendor, {},
+                retry_locked(runner.create, vendor, pulumi_opts,
                              resource_opts | dict(instance_opts=instance_opts, user_data=b64_user_data),
                              stack_opts=stack_opts, instance_timing=instance_timing)
                 # empty it if create succeeded, just in case
@@ -2457,7 +2460,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             )
 
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
+            runner.destroy(vendor, pulumi_opts, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
             error_msgs = []
             output = []
             stack_opts = pulumi_stack_opts(error_msgs, output, instance_logger, instance_timing, server)
@@ -2468,7 +2471,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             for attempt in range(2):
                 logging.info(f"Attempt {attempt + 1} for zone {zone} with instance_opts: {current_instance_opts}")
                 try:
-                    retry_locked(runner.create, vendor, {},
+                    retry_locked(runner.create, vendor, pulumi_opts,
                                  resource_opts | dict(instance_opts=current_instance_opts, user_data=b64_user_data),
                                  stack_opts=stack_opts, instance_timing=instance_timing)
                     # empty it if create succeeded, just in case
@@ -2510,7 +2513,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 vendor, server, srv_data, region, None, timeout_mins, ssh_deploy_key_b64, repo_url_ssh
             )
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
+            runner.destroy(vendor, pulumi_opts, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
 
             error_msgs = []
             output = []
@@ -2518,7 +2521,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             for _ in range(2):
                 # try normal images first, then gen1 if we get Hypervisor Generation '2' error
                 try:
-                    retry_locked(runner.create, vendor, {},
+                    retry_locked(runner.create, vendor, pulumi_opts,
                                  resource_opts | dict(user_data=b64_user_data, image_sku=image_sku),
                                  stack_opts=stack_opts, instance_timing=instance_timing)
                     # empty it if create succeeded, just in case
@@ -2588,12 +2591,12 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 advanced_machine_features=dict(enable_nested_virtualization=True),
             )
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
+            runner.destroy(vendor, pulumi_opts, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
 
             pulumi_output = []
             stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger, instance_timing, server)
             try:
-                retry_locked(runner.create, vendor, {},
+                retry_locked(runner.create, vendor, pulumi_opts,
                              resource_opts | dict(instance_opts=instance_opts),
                              stack_opts=stack_opts, instance_timing=instance_timing)
                 # empty it if create succeeded, just in case
