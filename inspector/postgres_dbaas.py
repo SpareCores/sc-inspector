@@ -7,6 +7,7 @@ import os
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import docker
 
@@ -19,6 +20,7 @@ from benchmark_tiers import (
 )
 from db_dataset_cache import cdn_env_for_benchmark
 from lib import DOCKER_OPTS, Meta, container_remove
+from pg_repro import merge_postgres_into_stdout, safe_collect_postgres_repro
 from resource_tracker import configure_resource_tracker_docker_opts
 
 PG_USER = os.environ.get("SC_DB_USER", "scadmin")
@@ -415,6 +417,7 @@ def _benchmark_env(task, params, mem_gib: float, db_vcpus: int, client_vcpus: in
         "SC_DB_PASSWORD": PG_PASSWORD,
         "SC_DB_NAME": PG_DB if task.tool == "hammerdb" else BENCHBASE_DB,
         "SC_DB_VCPUS": str(db_vcpus),
+        "SC_DB_MEM_GIB": str(mem_gib),
         "SC_CLIENT_VCPUS": str(client_vcpus),
         "SC_SHIRT_SIZE": task.shirt_size,
         "SC_DURABILITY": durability,
@@ -452,6 +455,37 @@ def _tracker_env(task) -> dict[str, str]:
     if os.environ.get("HF_TOKEN"):
         env["HF_TOKEN"] = os.environ["HF_TOKEN"]
     return env
+
+
+def _dbaas_repro_extra(
+    task,
+    *,
+    mem_gib: float,
+    db_vcpus: int,
+    client_vcpus: int,
+    params,
+    sync_settable: bool,
+) -> dict[str, Any]:
+    """Top-level stdout fields useful for reproducing a DBaaS run."""
+    durability = getattr(task, "durability", "durable")
+    profile_vus = multi_vm_profile_ladder(
+        db_vcpus,
+        params.scale_units,
+        task.tool,
+        task.workload_proxy,
+        durability,
+    )
+    extra: dict[str, Any] = {
+        "shirt_size": task.shirt_size,
+        "db_vcpus": db_vcpus,
+        "client_vcpus": client_vcpus,
+        "db_mem_gib": mem_gib,
+        "profile_vus": profile_vus,
+        "benchmark_image": task.image,
+        "sslmode": _db_sslmode(),
+        "sync_commit_session_settable": sync_settable,
+    }
+    return extra
 
 
 def run_dbaas_task(
@@ -538,6 +572,26 @@ def run_dbaas_task(
         stderr = c.logs(stdout=False, stderr=True)
         if meta.exit_code != 0:
             meta.error_msg = stderr.decode("utf-8", errors="replace")[:500]
+        postgres_repro = safe_collect_postgres_repro(
+            host=_db_host(),
+            port=_db_port(),
+            user=PG_USER,
+            password=PG_PASSWORD,
+            dbname=PG_DB if task.tool == "hammerdb" else BENCHBASE_DB,
+            connect_kwargs=_db_connect_kwargs(),
+        )
+        stdout = merge_postgres_into_stdout(
+            stdout,
+            postgres_repro,
+            extra=_dbaas_repro_extra(
+                task,
+                mem_gib=mem_gib,
+                db_vcpus=db_vcpus,
+                client_vcpus=client_vcpus,
+                params=params,
+                sync_settable=sync_settable,
+            ),
+        )
         ver = task.image.rsplit(":", 1)[-1]
         return ver, stdout, stderr
     except Exception as exc:

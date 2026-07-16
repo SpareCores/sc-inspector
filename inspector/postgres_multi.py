@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 import socket
@@ -10,6 +11,7 @@ import time
 from datetime import datetime
 from multiprocessing.connection import Client
 from pathlib import Path
+from typing import Any
 
 import docker
 
@@ -23,6 +25,7 @@ from benchmark_tiers import (
 from companion_protocol import BenchmarkResult, Ping, Pong, RunBenchmark, Shutdown
 from db_dataset_cache import cdn_env_for_benchmark
 from lib import DOCKER_OPTS, Meta, container_remove
+from pg_repro import merge_postgres_into_stdout, safe_collect_postgres_repro
 from resource_tracker import RESOURCE_TRACKER_OUTPUT_FILENAME
 
 CONNECT_DEADLINE_SEC = int(os.environ.get("MP_CONNECT_DEADLINE_SEC", "600"))
@@ -140,7 +143,13 @@ def multi_vm_supported(vendor: str) -> bool:
     return vendor in supported_vendors
 
 
-def pg_gucs(mem_gib: float, warehouses: int, durability: str = "durable", vcpus: int | None = None) -> list[str]:
+def pg_guc_settings(
+    mem_gib: float,
+    warehouses: int,
+    durability: str = "durable",
+    vcpus: int | None = None,
+) -> dict[str, str]:
+    """Return the multi-VM Postgres GUC template as name→value (no ``-c`` prefixes)."""
     schema_gib = warehouses * 0.095
     sb_gb = max(1, min(int(mem_gib * 0.25), int(schema_gib * 1.05) + 1))
     ecs = min(int(mem_gib * 0.75), sb_gb * 4)
@@ -152,25 +161,28 @@ def pg_gucs(mem_gib: float, warehouses: int, durability: str = "durable", vcpus:
     # stays on, so the cluster is never at risk of corruption. "durable" keeps the
     # production-default synchronous_commit=on for the disclosed secondary metric.
     sync_commit = "off" if durability == "async" else "on"
-    settings = [
-        f"shared_buffers={sb_gb}GB",
-        f"effective_cache_size={ecs}GB",
-        "max_connections=400",
-        f"max_parallel_workers={mpw}",
-        f"max_worker_processes={mpw}",
-        "max_parallel_workers_per_gather=2",
-        f"synchronous_commit={sync_commit}",
-        "wal_buffers=64MB",
-        "max_wal_size=8GB",
-        "min_wal_size=1GB",
-        "checkpoint_completion_target=0.9",
-        "random_page_cost=1.1",
-        "effective_io_concurrency=128",
-        "maintenance_work_mem=1GB",
-    ]
+    return {
+        "shared_buffers": f"{sb_gb}GB",
+        "effective_cache_size": f"{ecs}GB",
+        "max_connections": "400",
+        "max_parallel_workers": str(mpw),
+        "max_worker_processes": str(mpw),
+        "max_parallel_workers_per_gather": "2",
+        "synchronous_commit": sync_commit,
+        "wal_buffers": "64MB",
+        "max_wal_size": "8GB",
+        "min_wal_size": "1GB",
+        "checkpoint_completion_target": "0.9",
+        "random_page_cost": "1.1",
+        "effective_io_concurrency": "128",
+        "maintenance_work_mem": "1GB",
+    }
+
+
+def pg_gucs(mem_gib: float, warehouses: int, durability: str = "durable", vcpus: int | None = None) -> list[str]:
     args: list[str] = []
-    for setting in settings:
-        args.extend(["-c", setting])
+    for name, value in pg_guc_settings(mem_gib, warehouses, durability=durability, vcpus=vcpus).items():
+        args.extend(["-c", f"{name}={value}"])
     return args
 
 
@@ -306,7 +318,16 @@ def _verify_database(host: str, name: str) -> None:
         conn.close()
 
 
-def _benchmark_env(task, db_host: str, params, mem_gib: float, db_vcpus: int, client_vcpus: int) -> dict[str, str]:
+def _benchmark_env(
+    task,
+    db_host: str,
+    params,
+    mem_gib: float,
+    db_vcpus: int,
+    client_vcpus: int,
+    *,
+    requested_gucs: dict[str, str] | None = None,
+) -> dict[str, str]:
     wl = WORKLOADS.get(task.workload_proxy, {})
     build_vus = min(params.build_vus, client_vcpus)
     durability = getattr(task, "durability", "durable")
@@ -324,6 +345,7 @@ def _benchmark_env(task, db_host: str, params, mem_gib: float, db_vcpus: int, cl
         "SC_DB_PASSWORD": PG_PASSWORD,
         "SC_DB_NAME": PG_DB,
         "SC_DB_VCPUS": str(db_vcpus),
+        "SC_DB_MEM_GIB": str(mem_gib),
         "SC_CLIENT_VCPUS": str(client_vcpus),
         "SC_SHIRT_SIZE": task.shirt_size,
         "SC_DURABILITY": durability,
@@ -334,7 +356,10 @@ def _benchmark_env(task, db_host: str, params, mem_gib: float, db_vcpus: int, cl
         "SC_WAREHOUSES": str(params.scale_units),
         "SC_WH_PER_VU_MIN": str(wh_per_vu_min(db_vcpus)),
         "SC_TOPOLOGY": "multi_vm",
+        "SC_PG_IMAGE": PG_IMAGE,
     }
+    if requested_gucs:
+        env["SC_PG_GUCS_REQUESTED"] = json.dumps(requested_gucs, sort_keys=True)
     provisioned_gib = os.environ.get("PROVISIONED_DISK_GIB", "").strip()
     if provisioned_gib:
         env["SC_PROVISIONED_DISK_GIB"] = provisioned_gib
@@ -356,6 +381,47 @@ def _benchmark_env(task, db_host: str, params, mem_gib: float, db_vcpus: int, cl
     return env
 
 
+def _multi_vm_repro_extra(
+    task,
+    *,
+    mem_gib: float,
+    db_vcpus: int,
+    client_vcpus: int,
+    params,
+) -> dict[str, Any]:
+    """Top-level stdout fields useful for reproducing a multi-VM run."""
+    durability = getattr(task, "durability", "durable")
+    profile_vus = multi_vm_profile_ladder(
+        db_vcpus,
+        params.scale_units,
+        task.tool,
+        task.workload_proxy,
+        durability,
+    )
+    extra: dict[str, Any] = {
+        "shirt_size": task.shirt_size,
+        "db_vcpus": db_vcpus,
+        "client_vcpus": client_vcpus,
+        "db_mem_gib": mem_gib,
+        "profile_vus": profile_vus,
+        "pg_image": PG_IMAGE,
+        "benchmark_image": task.image,
+    }
+    provisioned_gib = os.environ.get("PROVISIONED_DISK_GIB", "").strip()
+    if provisioned_gib:
+        extra["storage_gib"] = int(provisioned_gib)
+    disk_type = os.environ.get("MULTI_VM_DB_DISK_TYPE", "").strip()
+    if disk_type:
+        extra["storage_type"] = disk_type
+    disk_iops = os.environ.get("MULTI_VM_DB_DISK_IOPS", "").strip()
+    if disk_iops:
+        extra["disk_iops"] = int(disk_iops)
+    disk_throughput = os.environ.get("MULTI_VM_DB_DISK_THROUGHPUT", "").strip()
+    if disk_throughput:
+        extra["disk_throughput_mb_s"] = int(disk_throughput)
+    return extra
+
+
 def run_multi_vm_task(
     meta: Meta,
     task,
@@ -375,16 +441,18 @@ def run_multi_vm_task(
     mem_gib = float(os.environ.get("MEM_GIB") or 0) or _mem_gib()
     vcpus = int(os.cpu_count() or 4)
     client_vcpus = _client_vcpus(vcpus)
+    durability = getattr(task, "durability", "durable")
     params = multi_vm_workload_params(
         task.workload_proxy,
         task.tool,
         task.shirt_size,
         vcpus,
         mem_gib,
-        durability=getattr(task, "durability", "durable"),
+        durability=durability,
     )
     db_host = _local_private_ip()
     pg_wh = params.scale_units
+    requested_gucs = pg_guc_settings(mem_gib, pg_wh, durability=durability, vcpus=vcpus)
 
     try:
         pg_container = _start_postgres(task, mem_gib, pg_wh, vcpus)
@@ -403,15 +471,33 @@ def run_multi_vm_task(
         task_name=task.name,
         image=task.image,
         env={
-            **_benchmark_env(task, db_host, params, mem_gib, vcpus, client_vcpus),
+            **_benchmark_env(
+                task,
+                db_host,
+                params,
+                mem_gib,
+                vcpus,
+                client_vcpus,
+                requested_gucs=requested_gucs,
+            ),
             "SC_HAMMERDB_CLI_TIMEOUT": str(max(3600, int(task.timeout.total_seconds()) - 180)),
         },
         command=task.command or "",
         timeout_sec=int(task.timeout.total_seconds()),
         tracker_job_name=f"{task.name}_benchmark_client",
     )
+    postgres_repro: dict[str, Any] | None = None
     try:
         result = session.run_benchmark(msg)
+        # Snapshot GUCs before tearing down the server container.
+        postgres_repro = safe_collect_postgres_repro(
+            host="127.0.0.1",
+            port=5432,
+            user=PG_USER,
+            password=PG_PASSWORD,
+            dbname=PG_DB,
+            requested_gucs=requested_gucs,
+        )
     except Exception as exc:
         meta.error_msg = f"companion run failed: {exc}"
         meta.end = datetime.now()
@@ -421,9 +507,20 @@ def run_multi_vm_task(
         if pg_container is not None:
             container_remove(pg_container)
 
+    stdout = merge_postgres_into_stdout(
+        result.stdout.encode("utf-8"),
+        postgres_repro,
+        extra=_multi_vm_repro_extra(
+            task,
+            mem_gib=mem_gib,
+            db_vcpus=vcpus,
+            client_vcpus=client_vcpus,
+            params=params,
+        ),
+    )
     meta.end = datetime.now()
     meta.exit_code = result.exit_code
-    meta.stdout_bytes = len(result.stdout.encode("utf-8"))
+    meta.stdout_bytes = len(stdout)
     meta.stderr_bytes = len(result.stderr.encode("utf-8"))
     if result.exit_code != 0 and not meta.error_msg:
         meta.error_msg = result.stderr[:500] if result.stderr else "benchmark failed"
@@ -434,7 +531,7 @@ def run_multi_vm_task(
         with open(tracker_path, "w", encoding="utf-8") as fh:
             fh.write(result.resource_tracker_jsonl)
     ver = task.image.rsplit(":", 1)[-1]
-    return ver, result.stdout.encode("utf-8"), result.stderr.encode("utf-8")
+    return ver, stdout, result.stderr.encode("utf-8")
 
 
 def _mem_gib() -> float:
