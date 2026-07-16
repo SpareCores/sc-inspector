@@ -93,6 +93,14 @@ PULUMI_BORING_ERRORS = {
     re.compile(r"^\s*error:\s*update failed\s*$", re.IGNORECASE),
 }
 _PROVIDER_JSON_ERROR = re.compile(r'\{"error":"([^"]+)"')
+# Transient capacity/quota errors: retry up to 3 times in retry_locked and on later start runs.
+RETRYABLE_START_ERROR_MARKERS = (
+    "InsufficientInstanceCapacity",
+    "PublicIPCountLimitReached",
+    "OperationNotAllowed",
+    "exceeding approved",
+    "QuotaExceeded",
+)
 # provision machines with storage (GiB)
 VOLUME_SIZE = 128
 
@@ -490,13 +498,8 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
         # This will be triggered when a task is first created or if it has been changed.
         logging.info(f"Task {task.name} should run as its task hash has changed: {meta.task_hash} -> {thash}")
         return True
-    if meta.exit_code == -1 and "InsufficientInstanceCapacity" in meta.error_msg:
-        # Retry insufficient instance capacity startup errors
-        logging.info(f"Retrying task {task.name} due to insufficient capacity, meta: {meta}")
-        return True
-    if meta.exit_code == -1 and "PublicIPCountLimitReached" in meta.error_msg:
-        # Retry Azure public IP count limit reached errors
-        logging.info(f"Retrying task {task.name} due to PublicIPCountLimitReached, meta: {meta}")
+    if meta.exit_code == -1 and is_retryable_start_error(meta.error_msg):
+        logging.info(f"Retrying task {task.name} due to retryable start error, meta: {meta}")
         return True
     if not meta.start:
         logging.info(f"Task {task.name} should run, no start field")
@@ -1975,6 +1978,30 @@ def pulumi_stack_opts(
     return dict(on_output=on_output, on_event=on_event)
 
 
+def is_retryable_start_error(error_msg: str | None) -> bool:
+    if not error_msg:
+        return False
+    return any(marker in error_msg for marker in RETRYABLE_START_ERROR_MARKERS)
+
+
+def pulumi_error_text(exc: BaseException, error_msgs: list[str] | None = None) -> str:
+    parts = [str(exc)]
+    if error_msgs:
+        parts.extend(error_msgs)
+    for attr in ("stdout", "stderr", "message"):
+        val = getattr(exc, attr, None)
+        if val:
+            parts.append(str(val))
+    if exc.__cause__:
+        parts.append(pulumi_error_text(exc.__cause__))
+    return "\n".join(parts)
+
+
+def is_retryable_pulumi_error(exc: BaseException, error_msgs: list[str] | None = None) -> bool:
+    text = pulumi_error_text(exc, error_msgs)
+    return any(marker in text for marker in RETRYABLE_START_ERROR_MARKERS)
+
+
 def is_pulumi_error_summary(message: str) -> bool:
     stripped = message.strip()
     if PULUMI_ERROR_SUMMARY.search(stripped):
@@ -2094,8 +2121,14 @@ def retry_locked_cleanup(func: Callable[[], Any], cancel_func: Callable[[], None
             raise StackLockedError(str(exc)) from exc
 
 
-def retry_locked(func, *args, instance_timing: InstanceCreationTiming | None = None, **kwargs):
-    """Retry a pulumi function with random backoff for locking issues."""
+def retry_locked(
+    func,
+    *args,
+    instance_timing: InstanceCreationTiming | None = None,
+    error_msgs: list[str] | None = None,
+    **kwargs,
+):
+    """Retry a pulumi function with random backoff for locking and transient quota errors."""
     import pulumi
 
     for i in range(3):
@@ -2106,7 +2139,11 @@ def retry_locked(func, *args, instance_timing: InstanceCreationTiming | None = N
         except pulumi.automation.errors.ConcurrentUpdateError:
             logging.exception(f"ConcurrentUpdateError, retry #{i}")
             time.sleep(random.randint(1, 5))
-        except Exception:
+        except Exception as exc:
+            if is_retryable_pulumi_error(exc, error_msgs) and i < 2:
+                logging.warning("Retryable Pulumi error, retry #%d: %s", i + 1, exc)
+                time.sleep(random.randint(1, 5))
+                continue
             raise
 
 
@@ -2263,6 +2300,7 @@ def _try_start_multi_vm_inspect(
                 resource_opts | extra,
                 stack_opts=stack_opts,
                 instance_timing=instance_timing,
+                error_msgs=error_msgs,
             )
             return True
         except Exception as exc:
@@ -2362,7 +2400,8 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             try:
                 retry_locked(runner.create, vendor, pulumi_opts,
                              resource_opts | dict(instance_opts=instance_opts, user_data=user_data),
-                             stack_opts=stack_opts, instance_timing=instance_timing)
+                             stack_opts=stack_opts, instance_timing=instance_timing,
+                             error_msgs=error_msgs)
                 # empty it if create succeeded, just in case
                 error_msgs = []
                 instance_started = True
@@ -2393,7 +2432,8 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             try:
                 retry_locked(runner.create, vendor, pulumi_opts,
                              resource_opts | dict(instance_opts=instance_opts, user_data=user_data),
-                             stack_opts=stack_opts, instance_timing=instance_timing)
+                             stack_opts=stack_opts, instance_timing=instance_timing,
+                             error_msgs=error_msgs)
                 # empty it if create succeeded, just in case
                 error_msgs = []
                 instance_started = True
@@ -2425,7 +2465,8 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             try:
                 retry_locked(runner.create, vendor, pulumi_opts,
                              resource_opts | dict(instance_opts=instance_opts, user_data=b64_user_data),
-                             stack_opts=stack_opts, instance_timing=instance_timing)
+                             stack_opts=stack_opts, instance_timing=instance_timing,
+                             error_msgs=error_msgs)
                 # empty it if create succeeded, just in case
                 error_msgs = []
                 instance_started = True
@@ -2473,7 +2514,8 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 try:
                     retry_locked(runner.create, vendor, pulumi_opts,
                                  resource_opts | dict(instance_opts=current_instance_opts, user_data=b64_user_data),
-                                 stack_opts=stack_opts, instance_timing=instance_timing)
+                                 stack_opts=stack_opts, instance_timing=instance_timing,
+                                 error_msgs=error_msgs)
                     # empty it if create succeeded, just in case
                     error_msgs = []
                     done = True
@@ -2523,7 +2565,8 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 try:
                     retry_locked(runner.create, vendor, pulumi_opts,
                                  resource_opts | dict(user_data=b64_user_data, image_sku=image_sku),
-                                 stack_opts=stack_opts, instance_timing=instance_timing)
+                                 stack_opts=stack_opts, instance_timing=instance_timing,
+                                 error_msgs=error_msgs)
                     # empty it if create succeeded, just in case
                     error_msgs = []
                     done = True
@@ -2598,7 +2641,8 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             try:
                 retry_locked(runner.create, vendor, pulumi_opts,
                              resource_opts | dict(instance_opts=instance_opts),
-                             stack_opts=stack_opts, instance_timing=instance_timing)
+                             stack_opts=stack_opts, instance_timing=instance_timing,
+                             error_msgs=error_msgs)
                 # empty it if create succeeded, just in case
                 error_msgs = []
                 instance_started = True

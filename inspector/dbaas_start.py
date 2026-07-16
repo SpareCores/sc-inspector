@@ -252,6 +252,7 @@ def _try_provision_dbaas_stack(
             resource_opts | extra,
             stack_opts=stack_opts,
             instance_timing=instance_timing,
+            error_msgs=error_msgs,
         )
         return True
     except Exception as exc:
