@@ -22,8 +22,8 @@ def dbaas_sparse_path(vendor: str, instance_key: str) -> str:
     return f"dbaas/{vendor}/{instance_key}"
 
 
-def stack_slug(target: ManagedDbTarget, shirt_size: str) -> str:
-    """Short Pulumi stack slug including shirt size (operational, not in git path)."""
+def stack_slug(target: ManagedDbTarget) -> str:
+    """Short Pulumi stack slug (operational, not in git path)."""
     native = target.native_id.lower().replace("_", "")
     if native.startswith("db-perf-optimized-"):
         native = "perfopt" + native.removeprefix("db-perf-optimized-").replace("-", "")
@@ -31,7 +31,7 @@ def stack_slug(target: ManagedDbTarget, shirt_size: str) -> str:
         native = "dbc" + native.removeprefix("db-custom-").replace("-", "")
     else:
         native = native.replace("standard", "")
-    return f"{native}-pg{target.engine_version}-{shirt_size.lower()}"
+    return f"{native}-pg{target.engine_version}"
 
 
 def target_sizing_stub(target: ManagedDbTarget) -> SimpleNamespace:

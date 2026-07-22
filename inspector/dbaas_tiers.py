@@ -1,95 +1,40 @@
-"""Managed DB provision sizing from shirt-size tiers."""
+"""Managed DB provision sizing from the shared ``db_storage`` plan."""
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
-from benchmark_tiers import SHIRT_SIZES
+from benchmark_tiers import target_schema_gib
 from dbaas_catalog import ManagedDbTarget
-
-_AZURE_IOPS_TIERS: list[tuple[int, str]] = [
-    (32, "P4"),
-    (64, "P6"),
-    (128, "P10"),
-    (256, "P15"),
-    (512, "P20"),
-    (1024, "P30"),
-    (2048, "P40"),
-    (4096, "P50"),
-    (8192, "P60"),
-    (16384, "P70"),
-    (32768, "P80"),
-]
-
-_P_TIER_ORDER: tuple[str, ...] = (
-    "P1", "P2", "P3", "P4", "P6", "P10", "P15", "P20",
-    "P30", "P40", "P50", "P60", "P70", "P80",
-)
-
-_SHIRT_SIZE_MIN_IOPS: dict[str, str] = {
-    "XS": "P10",
-    "S": "P20",
-    "M": "P40",
-}
+from db_storage import db_storage_plan, dbaas_storage_fields
 
 
-def _max_iops_tier(a: str, b: str) -> str:
-    order = {tier: idx for idx, tier in enumerate(_P_TIER_ORDER)}
-    return a if order.get(a, -1) >= order.get(b, -1) else b
-
-
-def _disk_gib_for_shirt_size(shirt_size: str) -> int:
-    tier = SHIRT_SIZES[shirt_size]
-    return int(math.ceil(tier["schema_gib"] * 2 / 0.85))
-
-
-def _iops_tier_for_gib(storage_gib: int) -> str:
-    for limit, tier in _AZURE_IOPS_TIERS:
-        if storage_gib <= limit:
-            return tier
-    return "P80"
-
-
-def _provision_spec_azure(target: ManagedDbTarget, shirt_size: str, storage_gib: int) -> dict[str, Any]:
-    iops_tier = _iops_tier_for_gib(storage_gib)
-    min_tier = _SHIRT_SIZE_MIN_IOPS.get(shirt_size)
-    if min_tier:
-        iops_tier = _max_iops_tier(iops_tier, min_tier)
+def _provision_spec_azure(target: ManagedDbTarget, storage: dict[str, Any], schema_gib: float) -> dict[str, Any]:
     edition = target.edition or "GeneralPurpose"
     sku_name, _, _ = target.sku_id.partition(":")
-    tier = SHIRT_SIZES[shirt_size]
     return {
-        "storage_gib": storage_gib,
-        "storage_edition": "ManagedDiskV2",
-        "storage_type": "PremiumV2_LRS",
-        "iops_tier": iops_tier,
-        "shirt_size": shirt_size,
+        **storage,
         "sku_name": sku_name,
         "sku_tier": edition,
-        "schema_gib": tier["schema_gib"],
-        "disk_gib_required": storage_gib,
+        "schema_gib": schema_gib,
     }
 
 
-def _provision_spec_gcp(target: ManagedDbTarget, shirt_size: str, storage_gib: int) -> dict[str, Any]:
-    tier = SHIRT_SIZES[shirt_size]
+def _provision_spec_gcp(target: ManagedDbTarget, storage: dict[str, Any], schema_gib: float) -> dict[str, Any]:
     return {
-        "storage_gib": storage_gib,
-        "storage_edition": "PD_SSD",
-        "storage_type": "PD_SSD",
-        "iops_tier": "",
-        "shirt_size": shirt_size,
+        **storage,
         "sku_name": target.native_id,
         "sku_tier": target.edition or "Enterprise",
-        "schema_gib": tier["schema_gib"],
-        "disk_gib_required": storage_gib,
+        "schema_gib": schema_gib,
     }
 
 
-def provision_spec(target: ManagedDbTarget, shirt_size: str) -> dict[str, Any]:
-    """Return provision parameters for a managed DB at the given shirt size."""
-    storage_gib = _disk_gib_for_shirt_size(shirt_size)
+def provision_spec(target: ManagedDbTarget) -> dict[str, Any]:
+    """Return provision parameters sized from the managed instance's memory."""
+    mem_gib = float(target.memory_gib or 0) or 16.0
+    schema_gib = target_schema_gib(mem_gib)
+    plan = db_storage_plan(target.vendor_id, mem_gib)
+    storage = dbaas_storage_fields(plan)
     if target.vendor_id == "gcp":
-        return _provision_spec_gcp(target, shirt_size, storage_gib)
-    return _provision_spec_azure(target, shirt_size, storage_gib)
+        return _provision_spec_gcp(target, storage, schema_gib)
+    return _provision_spec_azure(target, storage, schema_gib)

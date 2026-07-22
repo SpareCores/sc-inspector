@@ -206,7 +206,7 @@ def upload_task_artifact(
 
 
 def upload_task_logs_to_s3(data_dir: str) -> None:
-    """Upload per-task stdout/stderr and resource-tracker metrics from the inspect data directory to S3."""
+    """Upload per-task stdout/stderr, resource-tracker metrics, and postgres.log to S3."""
     from resource_tracker import RESOURCE_TRACKER_OUTPUT_FILENAME
 
     post = _parse_task_logs_post()
@@ -218,13 +218,13 @@ def upload_task_logs_to_s3(data_dir: str) -> None:
         task_dir = os.path.join(data_dir, name)
         if not os.path.isdir(task_dir):
             continue
-        for stream in ("stdout", "stderr", RESOURCE_TRACKER_OUTPUT_FILENAME):
+        for stream in ("stdout", "stderr", RESOURCE_TRACKER_OUTPUT_FILENAME, "postgres.log"):
             if upload_task_artifact(
                 name,
                 task_dir,
                 stream,
                 post=post,
-                delete_after=(stream == RESOURCE_TRACKER_OUTPUT_FILENAME),
+                delete_after=(stream in {RESOURCE_TRACKER_OUTPUT_FILENAME, "postgres.log"}),
             ):
                 uploaded += 1
     logging.info("Uploaded %d task artifact(s) to S3 under %s", uploaded, prefix)

@@ -79,24 +79,20 @@ def _dbaas_user_data_replacements(
             "SC_PROVISION_MEMORY_GIB": str(target.memory_gib),
             "SC_PROVISION_STORAGE_GIB": str(provision["storage_gib"]),
             "SC_PROVISION_STORAGE_EDITION": provision["storage_edition"],
+            "SC_PROVISION_STORAGE_TYPE": provision.get("storage_type", ""),
             "SC_PROVISION_IOPS_TIER": provision["iops_tier"],
+            "SC_PROVISION_DISK_IOPS": str(provision.get("disk_iops") or ""),
+            "SC_PROVISION_DISK_THROUGHPUT": str(provision.get("disk_throughput_mb_s") or ""),
             "SC_PROVISION_CLIENT_INSTANCE": client.api_reference,
             "SC_PROVISION_REGION": region,
             "SC_PROVISION_ZONE": zone or "",
             "SC_PROVISION_NETWORK_MODE": "private_vpc" if vendor == "gcp" else "private_vnet",
-            "SC_PROVISION_STACK_SLUG": stack_slug(target, provision["shirt_size"]),
+            "SC_PROVISION_STACK_SLUG": stack_slug(target),
             "SC_PROVISION_SYNC_COMMIT_SETTABLE": "",
             "USER_DATA_TEMPLATE": USER_DATA,
         }
     )
     return repl
-
-
-def _group_tasks_by_shirt_size(tasks) -> dict[str, list]:
-    groups: dict[str, list] = {}
-    for task in tasks:
-        groups.setdefault(task.shirt_size, []).append(task)
-    return groups
 
 
 def _build_dbaas_resource_opts(
@@ -168,7 +164,6 @@ def _try_provision_dbaas_stack(
     client,
     region: str,
     zone: str | None,
-    shirt_size: str,
     provision: dict,
     slug: str,
     timeout_mins: int,
@@ -179,10 +174,9 @@ def _try_provision_dbaas_stack(
     error_msgs,
 ) -> bool:
     logging.info(
-        "DBaaS: %s/%s size=%s + client %s in %s",
+        "DBaaS: %s/%s + client %s in %s",
         vendor,
         target.instance_key,
-        shirt_size,
         client.api_reference,
         region,
     )
@@ -222,7 +216,6 @@ def _try_provision_dbaas_stack(
         instance_key_slug=slug,
         extra_exports={
             "instance_key": target.instance_key,
-            "shirt_size": shirt_size,
             "topology": "dbaas",
         },
     )
@@ -284,21 +277,19 @@ def try_start_dbaas_inspect(
     instance_timing,
     error_msgs,
 ) -> bool:
-    """Provision managed DB + client VM; one stack per shirt-size group."""
+    """Provision managed DB + client VM for the pending DBaaS task set."""
     from lib import DbaasDbTask
 
     dbaas_tasks = [t for t in tasks if isinstance(t, DbaasDbTask)]
     if not dbaas_tasks:
         return False
 
-    size_groups = _group_tasks_by_shirt_size(dbaas_tasks)
-    shirt_size, size_tasks = sorted(size_groups.items())[0]
     stub = target_sizing_stub(target)
-    provision = provision_spec(target, shirt_size)
+    provision = provision_spec(target)
     client_req = merge_client_requirements(
-        [t.client_requirements(stub) for t in size_tasks]
+        [t.client_requirements(stub) for t in dbaas_tasks]
     )
-    slug = stack_slug(target, shirt_size)
+    slug = stack_slug(target)
 
     for kind, location in _dbaas_location_candidates(
         vendor, target, regions, zones, zone_to_region
@@ -342,7 +333,6 @@ def try_start_dbaas_inspect(
                 client,
                 region,
                 zone,
-                shirt_size,
                 provision,
                 slug,
                 timeout_mins,
@@ -377,25 +367,21 @@ def start_dbaas_inspect(
     dbaas_tasks = [t for t in tasks if isinstance(t, DbaasDbTask)]
     if not dbaas_tasks:
         raise RuntimeError("no DBaaS tasks to start")
-    size_groups = _group_tasks_by_shirt_size(dbaas_tasks)
-    shirt_size, tier_tasks = sorted(size_groups.items())[0]
     logging.info(
-        "DBaaS start %s/%s shirt_size=%s (%d tasks; %d size(s) pending overall)",
+        "DBaaS start %s/%s (%d tasks)",
         vendor,
         target.instance_key,
-        shirt_size,
-        len(tier_tasks),
-        len(size_groups),
+        len(dbaas_tasks),
     )
 
     error_msgs = []
     instance_timing = InstanceCreationTiming()
     sum_timeout = timedelta()
-    for task in tier_tasks:
+    for task in dbaas_tasks:
         sum_timeout += task.timeout
     with lock:
         repo.pull()
-        for task in tier_tasks:
+        for task in dbaas_tasks:
             meta = boot_meta_for_task(task, data_dir)
             write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
         repo.push_path(data_dir, f"Starting DBaaS from {repo.gha_url()}")
@@ -414,7 +400,7 @@ def start_dbaas_inspect(
         data_dir,
         vendor,
         target,
-        tier_tasks,
+        dbaas_tasks,
         regions,
         zones,
         zone_to_region,
@@ -431,7 +417,7 @@ def start_dbaas_inspect(
             record_timing_api(data_dir, instance_timing.start, instance_timing.end)
             repo.push_path(data_dir, f"DBaaS creation timing from {repo.gha_url()}")
     if not started:
-        record_instance_start_failure(lock, data_dir, tier_tasks, error_msgs)
+        record_instance_start_failure(lock, data_dir, dbaas_tasks, error_msgs)
         raise RuntimeError(
             error_msgs[0] if error_msgs else "DBaaS stack was not provisioned in any region"
         )

@@ -16,16 +16,17 @@ from typing import Any
 import docker
 
 from benchmark_tiers import (
-    WORKLOADS,
-    benchbase_scalefactor,
-    multi_vm_profile_ladder,
+    BENCHBASE_RUN_SECONDS,
+    BENCHBASE_WARMUP_SECONDS,
+    BENCHMARK,
+    concurrency_ladder,
     multi_vm_workload_params,
-    wh_per_vu_min,
 )
 from companion_protocol import BenchmarkResult, Ping, Pong, RunBenchmark, Shutdown
 from db_dataset_cache import cdn_env_for_benchmark
 from lib import DOCKER_OPTS, Meta, container_remove
 from pg_repro import merge_postgres_into_stdout, safe_collect_postgres_repro
+from pgtune_leopard import generate_for_host
 from resource_tracker import RESOURCE_TRACKER_OUTPUT_FILENAME
 
 CONNECT_DEADLINE_SEC = int(os.environ.get("MP_CONNECT_DEADLINE_SEC", "600"))
@@ -35,7 +36,7 @@ PG_USER = "postgres"
 PG_PASSWORD = "postgres"
 PG_DB = "bench"
 BENCHBASE_DB = "benchbase"
-HAMMERDB_TPCC_DB = "tpcc"
+POSTGRES_LOG_FILENAME = "postgres.log"
 
 
 class CompanionSession:
@@ -145,43 +146,29 @@ def multi_vm_supported(vendor: str) -> bool:
 
 def pg_guc_settings(
     mem_gib: float,
-    warehouses: int,
     durability: str = "durable",
+    *,
     vcpus: int | None = None,
-) -> dict[str, str]:
-    """Return the multi-VM Postgres GUC template as name→value (no ``-c`` prefixes)."""
-    schema_gib = warehouses * 0.095
-    sb_gb = max(1, min(int(mem_gib * 0.25), int(schema_gib * 1.05) + 1))
-    ecs = min(int(mem_gib * 0.75), sb_gb * 4)
-    ncpu = max(1, int(vcpus if vcpus is not None else os.cpu_count() or 4))
-    mpw = min(ncpu, 128)
-    # "async" removes the per-commit WAL fsync wait (synchronous_commit=off): the
-    # OLTP score then reflects CPU/memory/lock scaling of the instance rather than
-    # the provisioned disk's fsync latency, and is comparable across clouds. fsync
-    # stays on, so the cluster is never at risk of corruption. "durable" keeps the
-    # production-default synchronous_commit=on for the disclosed secondary metric.
-    sync_commit = "off" if durability == "async" else "on"
-    return {
-        "shared_buffers": f"{sb_gb}GB",
-        "effective_cache_size": f"{ecs}GB",
-        "max_connections": "400",
-        "max_parallel_workers": str(mpw),
-        "max_worker_processes": str(mpw),
-        "max_parallel_workers_per_gather": "2",
-        "synchronous_commit": sync_commit,
-        "wal_buffers": "64MB",
-        "max_wal_size": "8GB",
-        "min_wal_size": "1GB",
-        "checkpoint_completion_target": "0.9",
-        "random_page_cost": "1.1",
-        "effective_io_concurrency": "128",
-        "maintenance_work_mem": "1GB",
-    }
+) -> tuple[dict[str, str], str]:
+    """Return (name→value GUCs, pgtune share URL) for multi-VM Postgres.
+
+    GUCs match https://pgtune.leopard.in.ua/ form defaults (dbType=web,
+    hdType=ssd, dbVersion=18) with only RAM/CPU from the host — same as
+    run4-wikipedia. Durability overrides ``synchronous_commit``.
+    """
+    cpu = max(1, int(vcpus if vcpus is not None else os.cpu_count() or 4))
+    result = generate_for_host(mem_gib=mem_gib, cpu_num=cpu)
+    settings = dict(result.settings)
+    settings["synchronous_commit"] = "off" if durability == "async" else "on"
+    return settings, result.share_url
 
 
-def pg_gucs(mem_gib: float, warehouses: int, durability: str = "durable", vcpus: int | None = None) -> list[str]:
+def pg_gucs(mem_gib: float, durability: str = "durable", *, vcpus: int | None = None) -> list[str]:
     args: list[str] = []
-    for name, value in pg_guc_settings(mem_gib, warehouses, durability=durability, vcpus=vcpus).items():
+    settings, _ = pg_guc_settings(mem_gib, durability=durability, vcpus=vcpus)
+    for name, value in settings.items():
+        if name == "listen_addresses":
+            continue  # set explicitly in _start_postgres
         args.extend(["-c", f"{name}={value}"])
     return args
 
@@ -211,11 +198,13 @@ def _wait_pg_port_free(port: int = 5432, timeout: float = 30) -> None:
         time.sleep(0.5)
 
 
-def _start_postgres(task, mem_gib: float, warehouses: int, vcpus: int) -> docker.models.containers.Container:
+def _start_postgres(
+    task, mem_gib: float, durability: str, *, vcpus: int
+) -> docker.models.containers.Container:
     _cleanup_stale_postgres(task)
     _wait_pg_port_free()
     d = docker.from_env(timeout=1800)
-    gucs = pg_gucs(mem_gib, warehouses, durability=getattr(task, "durability", "durable"), vcpus=vcpus)
+    gucs = pg_gucs(mem_gib, durability=durability, vcpus=vcpus)
     cmd = [
         "postgres",
         "-c",
@@ -297,27 +286,6 @@ def _ensure_database(container, name: str) -> None:
     raise RuntimeError(f"CREATE DATABASE {name} failed: {out}")
 
 
-def _verify_database(host: str, name: str) -> None:
-    import psycopg2
-
-    conn = psycopg2.connect(
-        host=host,
-        port=5432,
-        user=PG_USER,
-        password=PG_PASSWORD,
-        dbname=PG_DB,
-        connect_timeout=10,
-    )
-    try:
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (name,))
-            if not cur.fetchone():
-                raise RuntimeError(f"database {name!r} missing on {host}:5432 after CREATE DATABASE")
-    finally:
-        conn.close()
-
-
 def _benchmark_env(
     task,
     db_host: str,
@@ -328,35 +296,27 @@ def _benchmark_env(
     *,
     requested_gucs: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    wl = WORKLOADS.get(task.workload_proxy, {})
-    build_vus = min(params.build_vus, client_vcpus)
     durability = getattr(task, "durability", "durable")
-    profile_vus = multi_vm_profile_ladder(
-        db_vcpus,
-        params.scale_units,
-        task.tool,
-        task.workload_proxy,
-        durability,
-    )
+    profile_vus = concurrency_ladder(db_vcpus)
     env = {
         "SC_DB_HOST": db_host,
         "SC_DB_PORT": "5432",
         "SC_DB_USER": PG_USER,
         "SC_DB_PASSWORD": PG_PASSWORD,
-        "SC_DB_NAME": PG_DB,
+        "SC_DB_NAME": BENCHBASE_DB,
         "SC_DB_VCPUS": str(db_vcpus),
         "SC_DB_MEM_GIB": str(mem_gib),
         "SC_CLIENT_VCPUS": str(client_vcpus),
-        "SC_SHIRT_SIZE": task.shirt_size,
         "SC_DURABILITY": durability,
         "SC_PROFILE": "1",
         "SC_PROFILE_VUS": ",".join(str(v) for v in profile_vus),
-        "SC_BUILD_VUS": str(build_vus),
         "SC_RUN_VUS": str(params.run_vus),
-        "SC_WAREHOUSES": str(params.scale_units),
-        "SC_WH_PER_VU_MIN": str(wh_per_vu_min(db_vcpus)),
+        "SC_RUN_SECONDS": str(BENCHBASE_RUN_SECONDS),
+        "SC_WARMUP_SECONDS": str(BENCHBASE_WARMUP_SECONDS),
         "SC_TOPOLOGY": "multi_vm",
         "SC_PG_IMAGE": PG_IMAGE,
+        "SC_WORKLOAD": BENCHMARK,
+        "SC_SCALEFACTOR": str(params.scale_units),
     }
     if requested_gucs:
         env["SC_PG_GUCS_REQUESTED"] = json.dumps(requested_gucs, sort_keys=True)
@@ -371,12 +331,6 @@ def _benchmark_env(
         val = os.environ.get(var, "").strip()
         if val:
             env[key] = val
-    if task.tool == "hammerdb":
-        env["SC_WORKLOAD"] = wl.get("hammerdb", "tpcc")
-    else:
-        bench_name = wl.get("benchmark", "wikipedia")
-        env["SC_WORKLOAD"] = bench_name
-        env["SC_SCALEFACTOR"] = str(benchbase_scalefactor(bench_name, task.shirt_size))
     env.update(cdn_env_for_benchmark())
     return env
 
@@ -388,25 +342,23 @@ def _multi_vm_repro_extra(
     db_vcpus: int,
     client_vcpus: int,
     params,
+    pgtune_share_url: str = "",
 ) -> dict[str, Any]:
     """Top-level stdout fields useful for reproducing a multi-VM run."""
-    durability = getattr(task, "durability", "durable")
-    profile_vus = multi_vm_profile_ladder(
-        db_vcpus,
-        params.scale_units,
-        task.tool,
-        task.workload_proxy,
-        durability,
-    )
+    profile_vus = concurrency_ladder(db_vcpus)
     extra: dict[str, Any] = {
-        "shirt_size": task.shirt_size,
         "db_vcpus": db_vcpus,
         "client_vcpus": client_vcpus,
         "db_mem_gib": mem_gib,
         "profile_vus": profile_vus,
+        "scalefactor": params.scale_units,
+        "schema_gib": params.schema_gib,
         "pg_image": PG_IMAGE,
         "benchmark_image": task.image,
+        "durability": getattr(task, "durability", "durable"),
     }
+    if pgtune_share_url:
+        extra["pgtune_share_url"] = pgtune_share_url
     provisioned_gib = os.environ.get("PROVISIONED_DISK_GIB", "").strip()
     if provisioned_gib:
         extra["storage_gib"] = int(provisioned_gib)
@@ -442,25 +394,15 @@ def run_multi_vm_task(
     vcpus = int(os.cpu_count() or 4)
     client_vcpus = _client_vcpus(vcpus)
     durability = getattr(task, "durability", "durable")
-    params = multi_vm_workload_params(
-        task.workload_proxy,
-        task.tool,
-        task.shirt_size,
-        vcpus,
-        mem_gib,
-        durability=durability,
-    )
+    params = multi_vm_workload_params(vcpus, mem_gib)
     db_host = _local_private_ip()
-    pg_wh = params.scale_units
-    requested_gucs = pg_guc_settings(mem_gib, pg_wh, durability=durability, vcpus=vcpus)
+    requested_gucs, pgtune_share_url = pg_guc_settings(
+        mem_gib, durability=durability, vcpus=vcpus
+    )
 
     try:
-        pg_container = _start_postgres(task, mem_gib, pg_wh, vcpus)
-        if task.tool == "benchbase":
-            _ensure_database(pg_container, BENCHBASE_DB)
-        elif task.tool == "hammerdb":
-            _ensure_database(pg_container, HAMMERDB_TPCC_DB)
-            _verify_database(db_host, HAMMERDB_TPCC_DB)
+        pg_container = _start_postgres(task, mem_gib, durability, vcpus=vcpus)
+        _ensure_database(pg_container, BENCHBASE_DB)
     except Exception as exc:
         meta.error_msg = f"postgres start failed: {exc}"
         meta.end = datetime.now()
@@ -470,26 +412,24 @@ def run_multi_vm_task(
     msg = RunBenchmark(
         task_name=task.name,
         image=task.image,
-        env={
-            **_benchmark_env(
-                task,
-                db_host,
-                params,
-                mem_gib,
-                vcpus,
-                client_vcpus,
-                requested_gucs=requested_gucs,
-            ),
-            "SC_HAMMERDB_CLI_TIMEOUT": str(max(3600, int(task.timeout.total_seconds()) - 180)),
-        },
+        env=_benchmark_env(
+            task,
+            db_host,
+            params,
+            mem_gib,
+            vcpus,
+            client_vcpus,
+            requested_gucs=requested_gucs,
+        ),
         command=task.command or "",
         timeout_sec=int(task.timeout.total_seconds()),
         tracker_job_name=f"{task.name}_benchmark_client",
     )
     postgres_repro: dict[str, Any] | None = None
+    postgres_log = b""
     try:
         result = session.run_benchmark(msg)
-        # Snapshot GUCs before tearing down the server container.
+        # Snapshot GUCs and server logs before tearing down the server container.
         postgres_repro = safe_collect_postgres_repro(
             host="127.0.0.1",
             port=5432,
@@ -498,10 +438,25 @@ def run_multi_vm_task(
             dbname=PG_DB,
             requested_gucs=requested_gucs,
         )
+        if pg_container is not None:
+            try:
+                postgres_log = pg_container.logs(stdout=True, stderr=True)
+            except Exception:
+                logging.exception("Failed to collect postgres container logs")
     except Exception as exc:
         meta.error_msg = f"companion run failed: {exc}"
         meta.end = datetime.now()
         meta.exit_code = 1
+        if pg_container is not None and not postgres_log:
+            try:
+                postgres_log = pg_container.logs(stdout=True, stderr=True)
+            except Exception:
+                pass
+        if postgres_log:
+            task_dir = os.path.join(data_dir, task.name)
+            os.makedirs(task_dir, exist_ok=True)
+            with open(os.path.join(task_dir, POSTGRES_LOG_FILENAME), "wb") as fh:
+                fh.write(postgres_log)
         return None, b"", str(exc).encode()
     finally:
         if pg_container is not None:
@@ -516,6 +471,7 @@ def run_multi_vm_task(
             db_vcpus=vcpus,
             client_vcpus=client_vcpus,
             params=params,
+            pgtune_share_url=pgtune_share_url,
         ),
     )
     meta.end = datetime.now()
@@ -530,6 +486,9 @@ def run_multi_vm_task(
         tracker_path = os.path.join(task_dir, RESOURCE_TRACKER_OUTPUT_FILENAME)
         with open(tracker_path, "w", encoding="utf-8") as fh:
             fh.write(result.resource_tracker_jsonl)
+    if postgres_log:
+        with open(os.path.join(task_dir, POSTGRES_LOG_FILENAME), "wb") as fh:
+            fh.write(postgres_log)
     ver = task.image.rsplit(":", 1)[-1]
     return ver, stdout, result.stderr.encode("utf-8")
 

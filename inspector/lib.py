@@ -44,7 +44,7 @@ HOST_TIMING_BASE = "/var/lib/sparecores-inspector/timing"
 HOST_TIMING_MOUNT = "/host-timing"
 # add options to the task hash, whose function is to signal any
 # changes in the tasks' runtime parameters, which might alter the output
-TASK_HASH_KEYS = {"command", "transform_output", "image", "shirt_size", "workload_proxy", "tool", "durability"}
+TASK_HASH_KEYS = {"command", "transform_output", "image", "workload_proxy", "durability"}
 # don't start task if it has already been started less than 2 hours ago
 WAIT_SINCE_LAST_START = timedelta(hours=2)
 # fail if a job has already started, but didn't produce output
@@ -182,32 +182,25 @@ class MultiVmDbTask(DockerTask):
     needs_companion: bool = True
     topology: Literal["multi_vm"] = "multi_vm"
     benchmark_family: str = ""
-    workload_proxy: str = ""
-    shirt_size: str = "S"
-    tool: Literal["hammerdb", "benchbase"] = "hammerdb"
+    workload_proxy: str = "read_heavy"
     durability: Literal["durable", "async"] = "async"
 
     def client_requirements(self, srv):
-        from benchmark_tiers import benchbase_client_req, hammerdb_client_req
+        from benchmark_tiers import client_req
 
-        if self.tool == "hammerdb":
-            return hammerdb_client_req(srv, self.shirt_size)
-        return benchbase_client_req(srv)
+        return client_req(srv)
 
     def disk_gib_required(self, srv) -> float:
-        from benchmark_tiers import (
-            benchbase_shirt_size_disk_gib,
-            shirt_size_disk_gib,
-        )
+        from db_storage import db_storage_plan
 
-        if self.tool == "benchbase":
-            return benchbase_shirt_size_disk_gib(self.workload_proxy, self.shirt_size)
-        return shirt_size_disk_gib(self.shirt_size)
+        mem_gib = float(srv.memory_amount) / 1024.0
+        return float(db_storage_plan(srv.vendor_id, mem_gib).storage_gib)
 
     def feasible_on(self, vcpus: float, mem_gib: float, disk_gib: float | None) -> bool:
-        from benchmark_tiers import shirt_size_feasible
+        from benchmark_tiers import mem_feasible
 
-        return shirt_size_feasible(self.shirt_size, mem_gib)
+        del vcpus, disk_gib
+        return mem_feasible(mem_gib)
 
 
 class DbaasDbTask(DockerTask):
@@ -217,28 +210,25 @@ class DbaasDbTask(DockerTask):
     command: str | list | None = None
     topology: Literal["dbaas"] = "dbaas"
     benchmark_family: str = ""
-    workload_proxy: str = ""
-    shirt_size: str = "S"
-    tool: Literal["hammerdb", "benchbase"] = "hammerdb"
+    workload_proxy: str = "read_heavy"
     durability: Literal["durable", "async"] = "durable"
     dbaas_only: set[tuple[str, str]] = set()
 
     def client_requirements(self, target):
-        from benchmark_tiers import benchbase_client_req, hammerdb_client_req
+        from benchmark_tiers import client_req
 
-        if self.tool == "hammerdb":
-            return hammerdb_client_req(target, self.shirt_size)
-        return benchbase_client_req(target)
+        return client_req(target)
 
     def disk_gib_required(self, target) -> float:
         from dbaas_tiers import provision_spec
 
-        return float(provision_spec(target, self.shirt_size)["disk_gib_required"])
+        return float(provision_spec(target)["disk_gib_required"])
 
     def feasible_on(self, vcpus: float, mem_gib: float, disk_gib: float | None) -> bool:
-        from benchmark_tiers import shirt_size_feasible
+        from benchmark_tiers import mem_feasible
 
-        return shirt_size_feasible(self.shirt_size, mem_gib)
+        del vcpus, disk_gib
+        return mem_feasible(mem_gib)
 
     def supported_on_target(self, target) -> bool:
         """False when this task's durability mode is unavailable on the managed DB."""
@@ -571,7 +561,7 @@ def _task_resource_checks(
                 cpu_count=db_vcpus,
                 memory_gib=mem_gib,
             )
-            storage = float(provision_spec(stub, task.shirt_size)["storage_gib"])
+            storage = float(provision_spec(stub)["storage_gib"])
         if not task.feasible_on(db_vcpus, mem_gib, storage):
             logging.info(f"Skipping task {task.name}: not feasible on DBaaS host")
             return False
@@ -2168,9 +2158,9 @@ def _try_start_multi_vm_inspect(
     """Provision a multi-VM stack when tasks need a companion client."""
     import secrets
 
-    from benchmark_tiers import db_disk_options, merge_client_requirements
+    from benchmark_tiers import merge_client_requirements
+    from db_storage import db_storage_plan
     from companion_picker import pick_client_instance
-    from disk import effective_disk_gib
     from sc_runner import runner
     from sc_runner.resources.multi_vm import MultiVmStackSpec
 
@@ -2188,9 +2178,10 @@ def _try_start_multi_vm_inspect(
     ]
     disk_sources = planned_multi or multi_tasks
     client_req = merge_client_requirements([t.client_requirements(srv_data) for t in disk_sources])
-    disk_need = max(t.disk_gib_required(srv_data) for t in disk_sources)
-    db_disk = int(effective_disk_gib(vendor, srv_data, disk_need))
-    db_disk_opts = db_disk_options(vendor)
+    mem_gib = float(srv_data.memory_amount) / 1024.0
+    storage_plan = db_storage_plan(vendor, mem_gib)
+    db_disk = storage_plan.storage_gib
+    db_disk_opts = storage_plan.multi_vm_disk_opts()
     authkey = secrets.token_bytes(32)
     authkey_b64 = base64.b64encode(authkey).decode("ascii")
     mp_port = 18765

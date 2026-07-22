@@ -12,11 +12,11 @@ from typing import Any
 import docker
 
 from benchmark_tiers import (
-    WORKLOADS,
-    benchbase_scalefactor,
-    multi_vm_profile_ladder,
+    BENCHBASE_RUN_SECONDS,
+    BENCHBASE_WARMUP_SECONDS,
+    BENCHMARK,
+    concurrency_ladder,
     multi_vm_workload_params,
-    wh_per_vu_min,
 )
 from db_dataset_cache import cdn_env_for_benchmark
 from lib import DOCKER_OPTS, Meta, container_remove
@@ -28,8 +28,8 @@ PG_PASSWORD = os.environ.get("SC_DB_PASSWORD", "")
 PG_DB = os.environ.get("SC_DB_NAME", "bench")
 BOOTSTRAP_USER = os.environ.get("SC_DB_BOOTSTRAP_USER", PG_USER)
 BOOTSTRAP_PASSWORD = os.environ.get("SC_DB_BOOTSTRAP_PASSWORD", PG_PASSWORD)
-BOOTSTRAP_DB = os.environ.get("SC_DB_BOOTSTRAP_DATABASE", "postgres")
 BENCHBASE_DB = "benchbase"
+BOOTSTRAP_DB = os.environ.get("SC_DB_BOOTSTRAP_DATABASE", "postgres")
 DB_WAIT_TIMEOUT_SEC = int(os.environ.get("DB_WAIT_TIMEOUT_SEC", "1200"))
 
 _TRACKER_FORWARD_ENV = (
@@ -225,49 +225,8 @@ def _sync_commit_session_settable() -> bool:
         return False
 
 
-def _durability_roles(task) -> list[str]:
-    roles = [PG_USER]
-    if task.tool == "hammerdb":
-        wl = WORKLOADS.get(task.workload_proxy, {}).get("hammerdb", "tpcc")
-        if wl == "tpcc":
-            roles.append("tpcc")
-    return roles
-
-
-def _dbaas_vendor() -> str:
-    return os.environ.get("SC_PROVISION_VENDOR_ID", "").lower()
-
-
-def _needs_workload_role_admin_grant() -> bool:
-    """GCP Cloud SQL requires GRANT ... WITH ADMIN OPTION before SET ROLE on workload roles."""
-    return _dbaas_vendor() == "gcp"
-
-
-def _role_has_admin_grant(cur, role: str) -> bool:
-    cur.execute(
-        """
-        SELECT 1 FROM pg_auth_members m
-        JOIN pg_roles r ON r.oid = m.roleid
-        JOIN pg_roles mbr ON mbr.oid = m.member
-        WHERE r.rolname = %s AND mbr.rolname = %s AND m.admin_option
-        """,
-        (role, PG_USER),
-    )
-    return bool(cur.fetchone())
-
-
-def _gcp_grant_benchmark_role_admin(cur, role: str) -> None:
-    if _role_has_admin_grant(cur, role):
-        return
-    cur.execute(f'GRANT "{role}" TO "{PG_USER}" WITH ADMIN OPTION')
-
-
-def _prepare_workload_role(cur, role: str) -> None:
-    """Vendor-specific prep so the admin user can SET ROLE / ALTER ROLE for workload roles."""
-    if role == PG_USER:
-        return
-    if _needs_workload_role_admin_grant():
-        _gcp_grant_benchmark_role_admin(cur, role)
+def _durability_roles(_task) -> list[str]:
+    return [PG_USER]
 
 
 def _apply_durability(durability: str, roles: list[str], *, sync_settable: bool) -> None:
@@ -299,7 +258,6 @@ def _apply_durability(durability: str, roles: list[str], *, sync_settable: bool)
             cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
             if not cur.fetchone():
                 continue
-            _prepare_workload_role(cur, role)
             if sync_value is None:
                 cur.execute(f'ALTER ROLE "{role}" RESET synchronous_commit')
             else:
@@ -321,21 +279,12 @@ def _fix_public_schema(dbname: str, owner: str) -> None:
     )
     conn.autocommit = True
     with conn.cursor() as cur:
-        if owner != PG_USER and _needs_workload_role_admin_grant():
-            # GCP Cloud SQL: workload role must own public; admin needs SET ROLE first.
-            _prepare_workload_role(cur, owner)
-            cur.execute(f'SET ROLE "{owner}"')
-            cur.execute(f'ALTER SCHEMA public OWNER TO "{owner}"')
-            cur.execute(f'GRANT ALL ON SCHEMA public TO "{owner}"')
-            cur.execute("RESET ROLE")
-        else:
-            # Azure: scadmin stays azure_pg_admin; SET ROLE would drop that privilege.
-            cur.execute(f'ALTER SCHEMA public OWNER TO "{owner}"')
-            cur.execute(f'GRANT ALL ON SCHEMA public TO "{owner}"')
+        cur.execute(f'ALTER SCHEMA public OWNER TO "{owner}"')
+        cur.execute(f'GRANT ALL ON SCHEMA public TO "{owner}"')
     conn.close()
 
 
-def _reset_benchmark_database(dbname: str, owner: str, role_password: str | None = None) -> None:
+def _reset_benchmark_database(dbname: str, owner: str) -> None:
     """Drop and recreate a benchmark database; fix public schema for managed Postgres."""
     import psycopg2
 
@@ -356,11 +305,6 @@ def _reset_benchmark_database(dbname: str, owner: str, role_password: str | None
             (dbname,),
         )
         cur.execute(f'DROP DATABASE IF EXISTS "{dbname}"')
-        if role_password is not None:
-            cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (owner,))
-            if not cur.fetchone():
-                cur.execute(f'CREATE ROLE "{owner}" LOGIN PASSWORD %s', (role_password,))
-            _prepare_workload_role(cur, owner)
         cur.execute(f'CREATE DATABASE "{dbname}" OWNER "{owner}"')
     conn.close()
     _fix_public_schema(dbname, owner)
@@ -368,14 +312,6 @@ def _reset_benchmark_database(dbname: str, owner: str, role_password: str | None
 
 def _ensure_benchbase_db() -> None:
     _reset_benchmark_database(BENCHBASE_DB, PG_USER)
-
-
-def _ensure_hammerdb_prereqs(workload: str) -> None:
-    """Reset HammerDB workload database so buildschema starts from a clean slate."""
-    if workload == "tpcc":
-        _reset_benchmark_database("tpcc", "tpcc", "tpcc")
-    else:
-        raise RuntimeError(f"unsupported HammerDB workload: {workload}")
 
 
 def _provision_env() -> dict[str, str]:
@@ -389,7 +325,10 @@ def _provision_env() -> dict[str, str]:
         "SC_PROVISION_MEMORY_GIB",
         "SC_PROVISION_STORAGE_GIB",
         "SC_PROVISION_STORAGE_EDITION",
+        "SC_PROVISION_STORAGE_TYPE",
         "SC_PROVISION_IOPS_TIER",
+        "SC_PROVISION_DISK_IOPS",
+        "SC_PROVISION_DISK_THROUGHPUT",
         "SC_PROVISION_CLIENT_INSTANCE",
         "SC_PROVISION_REGION",
         "SC_PROVISION_ZONE",
@@ -400,43 +339,29 @@ def _provision_env() -> dict[str, str]:
 
 
 def _benchmark_env(task, params, mem_gib: float, db_vcpus: int, client_vcpus: int) -> dict[str, str]:
-    wl = WORKLOADS.get(task.workload_proxy, {})
-    build_vus = min(params.build_vus, client_vcpus)
     durability = getattr(task, "durability", "durable")
-    profile_vus = multi_vm_profile_ladder(
-        db_vcpus,
-        params.scale_units,
-        task.tool,
-        task.workload_proxy,
-        durability,
-    )
+    profile_vus = concurrency_ladder(db_vcpus)
     env = {
         "SC_DB_HOST": _db_host(),
         "SC_DB_PORT": str(_db_port()),
         "SC_DB_USER": PG_USER,
         "SC_DB_PASSWORD": PG_PASSWORD,
-        "SC_DB_NAME": PG_DB if task.tool == "hammerdb" else BENCHBASE_DB,
+        "SC_DB_NAME": BENCHBASE_DB,
         "SC_DB_VCPUS": str(db_vcpus),
         "SC_DB_MEM_GIB": str(mem_gib),
         "SC_CLIENT_VCPUS": str(client_vcpus),
-        "SC_SHIRT_SIZE": task.shirt_size,
         "SC_DURABILITY": durability,
         "SC_PROFILE": "1",
         "SC_PROFILE_VUS": ",".join(str(v) for v in profile_vus),
-        "SC_BUILD_VUS": str(build_vus),
         "SC_RUN_VUS": str(params.run_vus),
-        "SC_WAREHOUSES": str(params.scale_units),
-        "SC_WH_PER_VU_MIN": str(wh_per_vu_min(db_vcpus)),
+        "SC_RUN_SECONDS": str(BENCHBASE_RUN_SECONDS),
+        "SC_WARMUP_SECONDS": str(BENCHBASE_WARMUP_SECONDS),
         "SC_TOPOLOGY": "dbaas",
         "SC_DB_SSLMODE": _db_sslmode(),
+        "SC_WORKLOAD": BENCHMARK,
+        "SC_SCALEFACTOR": str(params.scale_units),
     }
     env.update(_provision_env())
-    if task.tool == "hammerdb":
-        env["SC_WORKLOAD"] = wl.get("hammerdb", "tpcc")
-    else:
-        bench_name = wl.get("benchmark", "wikipedia")
-        env["SC_WORKLOAD"] = bench_name
-        env["SC_SCALEFACTOR"] = str(benchbase_scalefactor(bench_name, task.shirt_size))
     env.update(cdn_env_for_benchmark())
     return env
 
@@ -467,25 +392,19 @@ def _dbaas_repro_extra(
     sync_settable: bool,
 ) -> dict[str, Any]:
     """Top-level stdout fields useful for reproducing a DBaaS run."""
-    durability = getattr(task, "durability", "durable")
-    profile_vus = multi_vm_profile_ladder(
-        db_vcpus,
-        params.scale_units,
-        task.tool,
-        task.workload_proxy,
-        durability,
-    )
-    extra: dict[str, Any] = {
-        "shirt_size": task.shirt_size,
+    profile_vus = concurrency_ladder(db_vcpus)
+    return {
         "db_vcpus": db_vcpus,
         "client_vcpus": client_vcpus,
         "db_mem_gib": mem_gib,
         "profile_vus": profile_vus,
+        "scalefactor": params.scale_units,
+        "schema_gib": params.schema_gib,
         "benchmark_image": task.image,
         "sslmode": _db_sslmode(),
         "sync_commit_session_settable": sync_settable,
+        "durability": getattr(task, "durability", "durable"),
     }
-    return extra
 
 
 def run_dbaas_task(
@@ -500,32 +419,15 @@ def run_dbaas_task(
     mem_gib = float(os.environ.get("MEM_GIB") or 0) or _mem_gib()
     db_vcpus = int(float(os.environ.get("SC_PROVISION_CPU_COUNT", os.environ.get("SC_DB_VCPUS", "4"))))
     client_vcpus = int(os.cpu_count() or 4)
-    params = multi_vm_workload_params(
-        task.workload_proxy,
-        task.tool,
-        task.shirt_size,
-        db_vcpus,
-        mem_gib,
-        durability=getattr(task, "durability", "durable"),
-    )
+    params = multi_vm_workload_params(db_vcpus, mem_gib)
 
-    if task.tool == "benchbase":
-        try:
-            _ensure_benchbase_db()
-        except Exception as exc:
-            meta.error_msg = f"benchbase db setup failed: {exc}"
-            meta.end = datetime.now()
-            meta.exit_code = 1
-            return None, b"", str(exc).encode()
-    elif task.tool == "hammerdb":
-        try:
-            wl = WORKLOADS.get(task.workload_proxy, {}).get("hammerdb", "tpcc")
-            _ensure_hammerdb_prereqs(wl)
-        except Exception as exc:
-            meta.error_msg = f"hammerdb db setup failed: {exc}"
-            meta.end = datetime.now()
-            meta.exit_code = 1
-            return None, b"", str(exc).encode()
+    try:
+        _ensure_benchbase_db()
+    except Exception as exc:
+        meta.error_msg = f"benchbase db setup failed: {exc}"
+        meta.end = datetime.now()
+        meta.exit_code = 1
+        return None, b"", str(exc).encode()
 
     durability = getattr(task, "durability", "durable")
     try:
@@ -537,7 +439,6 @@ def run_dbaas_task(
         return None, b"", str(exc).encode()
 
     env = _benchmark_env(task, params, mem_gib, db_vcpus, client_vcpus)
-    env["SC_HAMMERDB_CLI_TIMEOUT"] = str(max(3600, int(task.timeout.total_seconds()) - 180))
     env.update(_tracker_env(task))
     docker_opts = dict(DOCKER_OPTS)
     docker_opts["environment"] = env
@@ -577,7 +478,7 @@ def run_dbaas_task(
             port=_db_port(),
             user=PG_USER,
             password=PG_PASSWORD,
-            dbname=PG_DB if task.tool == "hammerdb" else BENCHBASE_DB,
+            dbname=BENCHBASE_DB,
             connect_kwargs=_db_connect_kwargs(),
         )
         stdout = merge_postgres_into_stdout(

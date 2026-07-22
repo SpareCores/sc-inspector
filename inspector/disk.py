@@ -17,7 +17,7 @@ def effective_disk_gib(vendor: str, srv, required_gib: float) -> float:
     if vendor in DISK_CONFIGURABLE_VENDORS:
         if required_gib <= 0:
             return float(VOLUME_SIZE)
-        # Reserve headroom so shirt_size_feasible(required) passes at runtime.
+        # Reserve headroom so disk_feasible(required) passes at runtime.
         return max(VOLUME_SIZE, math.ceil(required_gib / DISK_USABLE_FRAC))
     return float(srv.storage_size or 0)
 
