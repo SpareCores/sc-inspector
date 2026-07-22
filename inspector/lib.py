@@ -1161,7 +1161,11 @@ def run_task(
             if not failed:
                 for t in task.transform_output:
                     meta.outputs.extend(t(meta, task, task_dir, stdout, stderr))
+            # S3-only bulky artifacts: upload+delete before the taskgroup git push.
             upload_resource_tracker_metrics(task.name, task_dir)
+            from s3_runs import upload_postgres_log
+
+            upload_postgres_log(task.name, task_dir)
             write_meta(meta, os.path.join(task_dir, META_NAME))
         except Exception:
             raise

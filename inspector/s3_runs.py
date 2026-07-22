@@ -205,6 +205,19 @@ def upload_task_artifact(
         return False
 
 
+POSTGRES_LOG_FILENAME = "postgres.log"
+
+
+def upload_postgres_log(task_name: str, task_dir: str | os.PathLike) -> None:
+    """Upload Postgres container logs to S3 and remove the local copy (not committed to git)."""
+    upload_task_artifact(
+        task_name,
+        task_dir,
+        POSTGRES_LOG_FILENAME,
+        delete_after=True,
+    )
+
+
 def upload_task_logs_to_s3(data_dir: str) -> None:
     """Upload per-task stdout/stderr, resource-tracker metrics, and postgres.log to S3."""
     from resource_tracker import RESOURCE_TRACKER_OUTPUT_FILENAME
@@ -214,17 +227,18 @@ def upload_task_logs_to_s3(data_dir: str) -> None:
         return
     prefix = post["prefix"]
     uploaded = 0
+    s3_only = {RESOURCE_TRACKER_OUTPUT_FILENAME, POSTGRES_LOG_FILENAME}
     for name in sorted(os.listdir(data_dir)):
         task_dir = os.path.join(data_dir, name)
         if not os.path.isdir(task_dir):
             continue
-        for stream in ("stdout", "stderr", RESOURCE_TRACKER_OUTPUT_FILENAME, "postgres.log"):
+        for stream in ("stdout", "stderr", RESOURCE_TRACKER_OUTPUT_FILENAME, POSTGRES_LOG_FILENAME):
             if upload_task_artifact(
                 name,
                 task_dir,
                 stream,
                 post=post,
-                delete_after=(stream in {RESOURCE_TRACKER_OUTPUT_FILENAME, "postgres.log"}),
+                delete_after=(stream in s3_only),
             ):
                 uploaded += 1
     logging.info("Uploaded %d task artifact(s) to S3 under %s", uploaded, prefix)
