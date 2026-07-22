@@ -3,7 +3,8 @@
 BenchBase Wikipedia only. Schema scales with managed-instance RAM
 (~1/4, max 16 GiB). Concurrency: 1, ncpus/2, ncpus. Timed rungs: 5 minutes.
 
-Both async (synchronous_commit=off) and durable (on) are measured.
+Wikipedia is read-heavy → durable only for now. Async task kept commented so
+DbaasDbTask(durability="async") can be re-enabled later.
 """
 
 from datetime import timedelta
@@ -31,11 +32,11 @@ _COMMON = dict(
     timeout=timedelta(minutes=90),
 )
 
-benchbase_postgres_dbaas_read_heavy_async = DbaasDbTask(
-    **_COMMON,
-    priority=1.0,
-    durability="async",
-)
+# benchbase_postgres_dbaas_read_heavy_async = DbaasDbTask(
+#     **_COMMON,
+#     priority=1.0,
+#     durability="async",
+# )
 
 benchbase_postgres_dbaas_read_heavy_durable = DbaasDbTask(
     **_COMMON,

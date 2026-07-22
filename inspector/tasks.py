@@ -152,10 +152,10 @@ POSTGRES_MULTI_ROLLOUT = {
     ("azure", "Standard_E16ds_v5"),
     ("azure", "Standard_E8ds_v5"),
     ("gcp", "n2-standard-8"),
-    ("gcp", "n2-highmem-8"),
-    ("gcp", "n2-standard-16"),
-    ("gcp", "n2-highmem-16"),
-    ("gcp", "c2d-highmem-8"),
+    # ("gcp", "n2-highmem-8"),
+    # ("gcp", "n2-standard-16"),
+    # ("gcp", "n2-highmem-16"),
+    # ("gcp", "c2d-highmem-8"),
 }
 
 # ---------------------------------------------------------------------------
@@ -163,7 +163,8 @@ POSTGRES_MULTI_ROLLOUT = {
 #
 # Schema ≈ min(25% RAM, 16 GiB) so it fits under pgtune shared_buffers.
 # Concurrency ladder: 1, ncpus/2, ncpus. Each timed rung is 5 minutes.
-# Both async (synchronous_commit=off) and durable (on) are measured.
+# Wikipedia is read-heavy → durable only for now. Async task kept below
+# (commented) so MultiVmDbTask(durability="async") can be re-enabled later.
 # ---------------------------------------------------------------------------
 
 _POSTGRES_MULTI_COMMON = dict(
@@ -176,11 +177,11 @@ _POSTGRES_MULTI_COMMON = dict(
     timeout=timedelta(minutes=90),
 )
 
-benchbase_postgres_multi_read_heavy_async = MultiVmDbTask(
-    **_POSTGRES_MULTI_COMMON,
-    priority=1.0,
-    durability="async",
-)
+# benchbase_postgres_multi_read_heavy_async = MultiVmDbTask(
+#     **_POSTGRES_MULTI_COMMON,
+#     priority=1.0,
+#     durability="async",
+# )
 
 benchbase_postgres_multi_read_heavy_durable = MultiVmDbTask(
     **_POSTGRES_MULTI_COMMON,
