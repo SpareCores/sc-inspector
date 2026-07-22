@@ -142,7 +142,21 @@ virtualization = DockerTask(
     timeout=timedelta(minutes=5),
 )
 
-POSTGRES_MULTI_ROLLOUT = {("azure", "Standard_F16ams_v6"), ("azure", "Standard_E16ds_v5"), ("azure", "Standard_E8ds_v5")}
+# Azure: keep prior validation SKUs. GCP: comparison matrix (see README-db.md):
+#   A) same CPU+RAM, different cores — n2-highmem-8 (8c/64G) vs n2-standard-16 (16c/64G)
+#   B) same CPU+cores, different RAM — n2-standard-8 (8c/32G) vs n2-highmem-8 (8c/64G)
+#   C) same shape, Intel vs AMD     — n2-highmem-8 vs c2d-highmem-8 (both 8c/64G)
+#   + n2-highmem-16 (16c/128G) peers Cloud SQL db-perf-optimized-N-16
+POSTGRES_MULTI_ROLLOUT = {
+    ("azure", "Standard_F16ams_v6"),
+    ("azure", "Standard_E16ds_v5"),
+    ("azure", "Standard_E8ds_v5"),
+    ("gcp", "n2-standard-8"),
+    ("gcp", "n2-highmem-8"),
+    ("gcp", "n2-standard-16"),
+    ("gcp", "n2-highmem-16"),
+    ("gcp", "c2d-highmem-8"),
+}
 
 # ---------------------------------------------------------------------------
 # Multi-VM Postgres — BenchBase Wikipedia (RAM-scaled working set)

@@ -32,6 +32,26 @@ class ManagedDbTarget:
         return f"{self.native_id}/postgres/{self.engine_version}/{self.ha_mode}"
 
 
+_GCP_POC_REGIONS = [
+    # PoC subset of regions from sc-scratch/attila/managed_dbs/gcp.json (tier POSTGRES_18).
+    "us-central1",
+    "us-east1",
+    "europe-west1",
+]
+
+_GCP_POC_ZONES = [
+    "us-central1-a",
+    "us-central1-b",
+    "us-central1-c",
+    "us-central1-f",
+    "us-east1-b",
+    "us-east1-c",
+    "us-east1-d",
+    "europe-west1-b",
+    "europe-west1-c",
+    "europe-west1-d",
+]
+
 STATIC_MANAGED_DB_TARGETS: tuple[ManagedDbTarget, ...] = (
     ManagedDbTarget(
         vendor_id="azure",
@@ -48,6 +68,18 @@ STATIC_MANAGED_DB_TARGETS: tuple[ManagedDbTarget, ...] = (
     ManagedDbTarget(
         vendor_id="gcp",
         engine="postgres",
+        native_id="db-perf-optimized-N-8",
+        sku_id="db-perf-optimized-N-8:POSTGRES_18",
+        engine_version="18",
+        ha_mode="standalone",
+        cpu_count=8,
+        memory_gib=64,
+        edition="PerformanceOptimized",
+        sync_commit_session_settable=True,
+    ),
+    ManagedDbTarget(
+        vendor_id="gcp",
+        engine="postgres",
         native_id="db-perf-optimized-N-16",
         sku_id="db-perf-optimized-N-16:POSTGRES_18",
         engine_version="18",
@@ -55,6 +87,18 @@ STATIC_MANAGED_DB_TARGETS: tuple[ManagedDbTarget, ...] = (
         cpu_count=16,
         memory_gib=128,
         edition="PerformanceOptimized",
+        sync_commit_session_settable=True,
+    ),
+    ManagedDbTarget(
+        vendor_id="gcp",
+        engine="postgres",
+        native_id="db-memory-optimized-N-8",
+        sku_id="db-memory-optimized-N-8:POSTGRES_18",
+        engine_version="18",
+        ha_mode="standalone",
+        cpu_count=8,
+        memory_gib=256,
+        edition="MemoryOptimized",
         sync_commit_session_settable=True,
     ),
 )
@@ -66,27 +110,15 @@ STATIC_TARGET_REGIONS: dict[tuple[str, str], list[str]] = {
         "centralus",
         "westus2",
     ],
-    ("gcp", "db-perf-optimized-N-16/postgres/18/standalone"): [
-        # PoC subset of regions from sc-scratch/attila/managed_dbs/gcp.json (tier POSTGRES_18).
-        "us-central1",
-        "us-east1",
-        "europe-west1",
-    ],
+    ("gcp", "db-perf-optimized-N-8/postgres/18/standalone"): list(_GCP_POC_REGIONS),
+    ("gcp", "db-perf-optimized-N-16/postgres/18/standalone"): list(_GCP_POC_REGIONS),
+    ("gcp", "db-memory-optimized-N-8/postgres/18/standalone"): list(_GCP_POC_REGIONS),
 }
 
 STATIC_TARGET_ZONES: dict[tuple[str, str], list[str]] = {
-    ("gcp", "db-perf-optimized-N-16/postgres/18/standalone"): [
-        "us-central1-a",
-        "us-central1-b",
-        "us-central1-c",
-        "us-central1-f",
-        "us-east1-b",
-        "us-east1-c",
-        "us-east1-d",
-        "europe-west1-b",
-        "europe-west1-c",
-        "europe-west1-d",
-    ],
+    ("gcp", "db-perf-optimized-N-8/postgres/18/standalone"): list(_GCP_POC_ZONES),
+    ("gcp", "db-perf-optimized-N-16/postgres/18/standalone"): list(_GCP_POC_ZONES),
+    ("gcp", "db-memory-optimized-N-8/postgres/18/standalone"): list(_GCP_POC_ZONES),
 }
 
 

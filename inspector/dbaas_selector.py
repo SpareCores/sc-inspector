@@ -27,6 +27,8 @@ def stack_slug(target: ManagedDbTarget) -> str:
     native = target.native_id.lower().replace("_", "")
     if native.startswith("db-perf-optimized-"):
         native = "perfopt" + native.removeprefix("db-perf-optimized-").replace("-", "")
+    elif native.startswith("db-memory-optimized-"):
+        native = "memopt" + native.removeprefix("db-memory-optimized-").replace("-", "")
     elif native.startswith("db-custom-"):
         native = "dbc" + native.removeprefix("db-custom-").replace("-", "")
     else:
