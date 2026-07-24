@@ -62,6 +62,17 @@ CLEANUP_BOOT_SLACK = timedelta(hours=2)
 CLEANUP_DESTROY_RETRY = timedelta(hours=24)
 DOCKER_OPTS = dict(detach=True, privileged=True, network_mode="host")
 DOCKER_OPTS_GPU = dict(device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])])
+# Postgres server + BenchBase/pgbench clients on large hosts: max_connections ×
+# max_worker_processes needs tens of thousands of FDs (c3d-highcpu-360 ≈ 59k).
+# memlock=-1 and unconfined seccomp unlock huge pages / io_uring (same as
+# sc-db-benchmark-tmp DOCKER_PRIV_FLAGS).
+DB_DOCKER_OPTS = DOCKER_OPTS | dict(
+    security_opt=["seccomp=unconfined"],
+    ulimits=[
+        docker.types.Ulimit(name="nofile", soft=1048576, hard=1048576),
+        docker.types.Ulimit(name="memlock", soft=-1, hard=-1),
+    ],
+)
 # filter error_msg which is written to meta.json for these, we don't want to leak information
 FILTER_ERROR_MSG = {
     re.compile(r"Submit a request for Quota increase at https.*to succeed\."),

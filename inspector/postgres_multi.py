@@ -24,7 +24,7 @@ from benchmark_tiers import (
 )
 from companion_protocol import BenchmarkResult, Ping, Pong, RunBenchmark, Shutdown
 from db_dataset_cache import cdn_env_for_benchmark
-from lib import DOCKER_OPTS, Meta, container_remove
+from lib import DB_DOCKER_OPTS, Meta, container_remove
 from pg_repro import merge_postgres_into_stdout, safe_collect_postgres_repro
 from pgtune_leopard import generate_for_host
 from resource_tracker import RESOURCE_TRACKER_OUTPUT_FILENAME
@@ -231,7 +231,7 @@ def _start_postgres(
             "POSTGRES_DB": PG_DB,
             **tracker_env,
         },
-        **DOCKER_OPTS,
+        **(getattr(task, "docker_opts", None) or DB_DOCKER_OPTS),
     )
     _wait_pg_ready(container)
     return container

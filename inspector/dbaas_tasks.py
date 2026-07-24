@@ -9,7 +9,7 @@ DbaasDbTask(durability="async") can be re-enabled later.
 
 from datetime import timedelta
 
-from lib import DbaasDbTask
+from lib import DB_DOCKER_OPTS, DbaasDbTask
 
 # GCP DBaaS mirrors the multi-VM matrix where Cloud SQL shapes allow
 # (Enterprise Plus fixed 8 GiB/vCPU on perf-optimized; see README-db.md):
@@ -30,6 +30,8 @@ _COMMON = dict(
     workload_proxy="read_heavy",
     image="ghcr.io/sparecores/benchmark-benchbase-postgres:main",
     timeout=timedelta(minutes=90),
+    # BenchBase client: many terminals need elevated nofile (see DB_DOCKER_OPTS)
+    docker_opts=DB_DOCKER_OPTS,
 )
 
 # benchbase_postgres_dbaas_read_heavy_async = DbaasDbTask(

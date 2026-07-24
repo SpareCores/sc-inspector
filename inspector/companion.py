@@ -15,7 +15,7 @@ from pathlib import Path
 import docker
 
 from companion_protocol import BenchmarkResult, Ping, Pong, RunBenchmark, Shutdown
-from lib import DOCKER_OPTS
+from lib import DB_DOCKER_OPTS
 from resource_tracker import RESOURCE_TRACKER_OUTPUT_FILENAME, uses_resource_tracker
 
 CONNECT_ACCEPT_DEADLINE_SEC = int(os.environ.get("MP_ACCEPT_DEADLINE_SEC", "600"))
@@ -121,7 +121,7 @@ def _docker_run(msg: RunBenchmark) -> BenchmarkResult:
             env["TRACKER_CONTAINER_IMAGE"] = msg.image
 
         run_kwargs = {
-            **DOCKER_OPTS,
+            **DB_DOCKER_OPTS,
             "environment": env,
             "volumes": {host_out: {"bind": str(metrics_dir), "mode": "rw"}},
             "entrypoint": entrypoint,

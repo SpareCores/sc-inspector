@@ -4,7 +4,7 @@ from datetime import timedelta
 import parse
 import psutil
 import transform
-from lib import DOCKER_OPTS, DockerTask, MultiVmDbTask, Task, VllmDockerTask
+from lib import DOCKER_OPTS, DB_DOCKER_OPTS, DockerTask, MultiVmDbTask, Task, VllmDockerTask
 
 # vLLM CPU uses multiprocessing; default Docker /dev/shm (64 MiB) is too small.
 VLLM_DOCKER_OPTS = DOCKER_OPTS | {
@@ -175,6 +175,8 @@ _POSTGRES_MULTI_COMMON = dict(
     image="ghcr.io/sparecores/benchmark-benchbase-postgres:main",
     # load + up to 3×(2 min warmup + 5 min run) ≈ ~40+ min; keep headroom
     timeout=timedelta(minutes=90),
+    # High nofile / memlock / seccomp — see DB_DOCKER_OPTS in lib.py
+    docker_opts=DB_DOCKER_OPTS,
 )
 
 # benchbase_postgres_multi_read_heavy_async = MultiVmDbTask(

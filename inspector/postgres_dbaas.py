@@ -19,7 +19,7 @@ from benchmark_tiers import (
     multi_vm_workload_params,
 )
 from db_dataset_cache import cdn_env_for_benchmark
-from lib import DOCKER_OPTS, Meta, container_remove
+from lib import DB_DOCKER_OPTS, Meta, container_remove
 from pg_repro import merge_postgres_into_stdout, safe_collect_postgres_repro
 from resource_tracker import configure_resource_tracker_docker_opts
 
@@ -440,7 +440,7 @@ def run_dbaas_task(
 
     env = _benchmark_env(task, params, mem_gib, db_vcpus, client_vcpus)
     env.update(_tracker_env(task))
-    docker_opts = dict(DOCKER_OPTS)
+    docker_opts = dict(getattr(task, "docker_opts", None) or DB_DOCKER_OPTS)
     docker_opts["environment"] = env
     docker_opts["network_mode"] = "host"
     task_dir = os.path.join(data_dir, task.name)
