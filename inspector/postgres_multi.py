@@ -16,11 +16,16 @@ from typing import Any
 import docker
 
 from benchmark_tiers import (
-    BENCHBASE_RUN_SECONDS,
-    BENCHBASE_WARMUP_SECONDS,
-    BENCHMARK,
+    DB_RUN_SECONDS,
+    DB_SETTLE_SECONDS,
+    DB_WARMUP_SECONDS,
+    IMPROVE_PCT,
+    PGBENCH_GIB_PER_SCALE,
+    PGBENCH_RO_SCALE,
     concurrency_ladder,
-    multi_vm_workload_params,
+    concurrency_search_cap,
+    max_connections_for_vcpus,
+    pgbench_tpcb_scale,
 )
 from companion_protocol import BenchmarkResult, Ping, Pong, RunBenchmark, Shutdown
 from db_dataset_cache import cdn_env_for_benchmark
@@ -35,7 +40,6 @@ PG_IMAGE = "ghcr.io/sparecores/benchmark-postgres-server:main"
 PG_USER = "postgres"
 PG_PASSWORD = "postgres"
 PG_DB = "bench"
-BENCHBASE_DB = "benchbase"
 POSTGRES_LOG_FILENAME = "postgres.log"
 
 
@@ -153,13 +157,18 @@ def pg_guc_settings(
     """Return (name→value GUCs, pgtune share URL) for multi-VM Postgres.
 
     GUCs match https://pgtune.leopard.in.ua/ form defaults (dbType=web,
-    hdType=ssd, dbVersion=18) with only RAM/CPU from the host — same as
-    run4-wikipedia. Durability overrides ``synchronous_commit``.
+    hdType=ssd, dbVersion=18) with only RAM/CPU from the host. Durability
+    overrides ``synchronous_commit``.
     """
     cpu = max(1, int(vcpus if vcpus is not None else os.cpu_count() or 4))
     result = generate_for_host(mem_gib=mem_gib, cpu_num=cpu)
     settings = dict(result.settings)
     settings["synchronous_commit"] = "off" if durability == "async" else "on"
+    # Headroom for geometric search past nproc (pgbench clients).
+    need = max_connections_for_vcpus(cpu)
+    cur = int(str(settings.get("max_connections", "100")).split()[0])
+    if need > cur:
+        settings["max_connections"] = str(need)
     return settings, result.share_url
 
 
@@ -263,33 +272,37 @@ def _wait_pg_ready(container, timeout: int = 120) -> None:
     raise TimeoutError(f"postgres did not become ready: {last_err}")
 
 
-def _ensure_database(container, name: str) -> None:
-    proc = container.exec_run(
-        [
-            "psql",
-            "-U",
-            PG_USER,
-            "-d",
-            PG_DB,
-            "-v",
-            "ON_ERROR_STOP=1",
-            "-c",
-            f"CREATE DATABASE {name}",
-        ],
-        environment={"PGPASSWORD": PG_PASSWORD},
-    )
-    if proc.exit_code == 0:
-        return
-    out = proc.output.decode("utf-8", errors="replace") if proc.output else ""
-    if "already exists" in out.lower():
-        return
-    raise RuntimeError(f"CREATE DATABASE {name} failed: {out}")
+def _task_kind(task) -> str:
+    """Classify multi-VM / DBaaS DB tasks for env + sizing."""
+    family = (getattr(task, "benchmark_family", "") or "").lower()
+    name = (getattr(task, "name", "") or "").lower()
+    blob = f"{family} {name}"
+    if "pgbench" in blob and "tpcb" in blob:
+        return "pgbench_tpcb"
+    if "pgbench" in blob:
+        return "pgbench_ro"
+    raise ValueError(f"unsupported DB benchmark task: {getattr(task, 'name', task)!r}")
+
+
+def _profile_env(db_vcpus: int) -> dict[str, str]:
+    anchors = concurrency_ladder(db_vcpus)
+    return {
+        "SC_PROFILE": "1",
+        "SC_PROFILE_VUS": ",".join(str(v) for v in anchors),
+        "SC_PROFILE_SEARCH": "1",
+        "SC_PROFILE_IMPROVE_PCT": str(IMPROVE_PCT),
+        "SC_PROFILE_MAX_CLIENTS": str(concurrency_search_cap(db_vcpus)),
+        "SC_WARMUP_ONCE": "1",
+        "SC_WARMUP_SECONDS": str(DB_WARMUP_SECONDS),
+        "SC_SETTLE_SECONDS": str(DB_SETTLE_SECONDS),
+        "SC_RUN_SECONDS": str(DB_RUN_SECONDS),
+        "SC_RUN_VUS": str(anchors[-1]),
+    }
 
 
 def _benchmark_env(
     task,
     db_host: str,
-    params,
     mem_gib: float,
     db_vcpus: int,
     client_vcpus: int,
@@ -297,27 +310,41 @@ def _benchmark_env(
     requested_gucs: dict[str, str] | None = None,
 ) -> dict[str, str]:
     durability = getattr(task, "durability", "durable")
-    profile_vus = concurrency_ladder(db_vcpus)
+    kind = _task_kind(task)
     env = {
         "SC_DB_HOST": db_host,
         "SC_DB_PORT": "5432",
         "SC_DB_USER": PG_USER,
         "SC_DB_PASSWORD": PG_PASSWORD,
-        "SC_DB_NAME": BENCHBASE_DB,
         "SC_DB_VCPUS": str(db_vcpus),
         "SC_DB_MEM_GIB": str(mem_gib),
         "SC_CLIENT_VCPUS": str(client_vcpus),
         "SC_DURABILITY": durability,
-        "SC_PROFILE": "1",
-        "SC_PROFILE_VUS": ",".join(str(v) for v in profile_vus),
-        "SC_RUN_VUS": str(params.run_vus),
-        "SC_RUN_SECONDS": str(BENCHBASE_RUN_SECONDS),
-        "SC_WARMUP_SECONDS": str(BENCHBASE_WARMUP_SECONDS),
         "SC_TOPOLOGY": "multi_vm",
         "SC_PG_IMAGE": PG_IMAGE,
-        "SC_WORKLOAD": BENCHMARK,
-        "SC_SCALEFACTOR": str(params.scale_units),
+        **_profile_env(db_vcpus),
     }
+    if kind == "pgbench_ro":
+        scale = PGBENCH_RO_SCALE
+        env.update(
+            {
+                "SC_WORKLOAD": "pgbench_ro",
+                "SC_SCALEFACTOR": str(scale),
+                "SC_DB_NAME": PG_DB,
+                "SC_PGBENCH_DB": "pgbench",
+            }
+        )
+    else:
+        scale = pgbench_tpcb_scale(mem_gib, db_vcpus)
+        env.update(
+            {
+                "SC_WORKLOAD": "pgbench_tpcb",
+                "SC_SCALEFACTORS": str(scale),
+                "SC_SCALEFACTOR": str(scale),
+                "SC_DB_NAME": PG_DB,
+                "SC_PGBENCH_DB": "pgbench",
+            }
+        )
     if requested_gucs:
         env["SC_PG_GUCS_REQUESTED"] = json.dumps(requested_gucs, sort_keys=True)
     provisioned_gib = os.environ.get("PROVISIONED_DISK_GIB", "").strip()
@@ -341,22 +368,31 @@ def _multi_vm_repro_extra(
     mem_gib: float,
     db_vcpus: int,
     client_vcpus: int,
-    params,
     pgtune_share_url: str = "",
 ) -> dict[str, Any]:
     """Top-level stdout fields useful for reproducing a multi-VM run."""
     profile_vus = concurrency_ladder(db_vcpus)
+    kind = _task_kind(task)
     extra: dict[str, Any] = {
         "db_vcpus": db_vcpus,
         "client_vcpus": client_vcpus,
         "db_mem_gib": mem_gib,
         "profile_vus": profile_vus,
-        "scalefactor": params.scale_units,
-        "schema_gib": params.schema_gib,
+        "profile_search": True,
+        "profile_max_clients": concurrency_search_cap(db_vcpus),
         "pg_image": PG_IMAGE,
         "benchmark_image": task.image,
         "durability": getattr(task, "durability", "durable"),
+        "workload_kind": kind,
     }
+    if kind == "pgbench_ro":
+        scale = PGBENCH_RO_SCALE
+        extra["scalefactor"] = scale
+        extra["schema_gib"] = scale * PGBENCH_GIB_PER_SCALE
+    else:
+        scale = pgbench_tpcb_scale(mem_gib, db_vcpus)
+        extra["scalefactor"] = scale
+        extra["schema_gib"] = scale * PGBENCH_GIB_PER_SCALE
     if pgtune_share_url:
         extra["pgtune_share_url"] = pgtune_share_url
     provisioned_gib = os.environ.get("PROVISIONED_DISK_GIB", "").strip()
@@ -394,7 +430,6 @@ def run_multi_vm_task(
     vcpus = int(os.cpu_count() or 4)
     client_vcpus = _client_vcpus(vcpus)
     durability = getattr(task, "durability", "durable")
-    params = multi_vm_workload_params(vcpus, mem_gib)
     db_host = _local_private_ip()
     requested_gucs, pgtune_share_url = pg_guc_settings(
         mem_gib, durability=durability, vcpus=vcpus
@@ -402,7 +437,6 @@ def run_multi_vm_task(
 
     try:
         pg_container = _start_postgres(task, mem_gib, durability, vcpus=vcpus)
-        _ensure_database(pg_container, BENCHBASE_DB)
     except Exception as exc:
         meta.error_msg = f"postgres start failed: {exc}"
         meta.end = datetime.now()
@@ -415,7 +449,6 @@ def run_multi_vm_task(
         env=_benchmark_env(
             task,
             db_host,
-            params,
             mem_gib,
             vcpus,
             client_vcpus,
@@ -470,7 +503,6 @@ def run_multi_vm_task(
             mem_gib=mem_gib,
             db_vcpus=vcpus,
             client_vcpus=client_vcpus,
-            params=params,
             pgtune_share_url=pgtune_share_url,
         ),
     )

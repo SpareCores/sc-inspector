@@ -12,11 +12,15 @@ from typing import Any
 import docker
 
 from benchmark_tiers import (
-    BENCHBASE_RUN_SECONDS,
-    BENCHBASE_WARMUP_SECONDS,
-    BENCHMARK,
+    DB_RUN_SECONDS,
+    DB_SETTLE_SECONDS,
+    DB_WARMUP_SECONDS,
+    IMPROVE_PCT,
+    PGBENCH_GIB_PER_SCALE,
+    PGBENCH_RO_SCALE,
     concurrency_ladder,
-    multi_vm_workload_params,
+    concurrency_search_cap,
+    pgbench_tpcb_scale,
 )
 from db_dataset_cache import cdn_env_for_benchmark
 from lib import DB_DOCKER_OPTS, Meta, container_remove
@@ -28,7 +32,6 @@ PG_PASSWORD = os.environ.get("SC_DB_PASSWORD", "")
 PG_DB = os.environ.get("SC_DB_NAME", "bench")
 BOOTSTRAP_USER = os.environ.get("SC_DB_BOOTSTRAP_USER", PG_USER)
 BOOTSTRAP_PASSWORD = os.environ.get("SC_DB_BOOTSTRAP_PASSWORD", PG_PASSWORD)
-BENCHBASE_DB = "benchbase"
 BOOTSTRAP_DB = os.environ.get("SC_DB_BOOTSTRAP_DATABASE", "postgres")
 DB_WAIT_TIMEOUT_SEC = int(os.environ.get("DB_WAIT_TIMEOUT_SEC", "1200"))
 
@@ -265,54 +268,6 @@ def _apply_durability(durability: str, roles: list[str], *, sync_settable: bool)
     conn.close()
 
 
-def _fix_public_schema(dbname: str, owner: str) -> None:
-    import psycopg2
-
-    conn = psycopg2.connect(
-        host=_db_host(),
-        port=_db_port(),
-        user=PG_USER,
-        password=PG_PASSWORD,
-        dbname=dbname,
-        connect_timeout=30,
-        **_db_connect_kwargs(),
-    )
-    conn.autocommit = True
-    with conn.cursor() as cur:
-        cur.execute(f'ALTER SCHEMA public OWNER TO "{owner}"')
-        cur.execute(f'GRANT ALL ON SCHEMA public TO "{owner}"')
-    conn.close()
-
-
-def _reset_benchmark_database(dbname: str, owner: str) -> None:
-    """Drop and recreate a benchmark database; fix public schema for managed Postgres."""
-    import psycopg2
-
-    conn = psycopg2.connect(
-        host=_db_host(),
-        port=_db_port(),
-        user=PG_USER,
-        password=PG_PASSWORD,
-        dbname=PG_DB,
-        connect_timeout=30,
-        **_db_connect_kwargs(),
-    )
-    conn.autocommit = True
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
-            "WHERE datname = %s AND pid <> pg_backend_pid()",
-            (dbname,),
-        )
-        cur.execute(f'DROP DATABASE IF EXISTS "{dbname}"')
-        cur.execute(f'CREATE DATABASE "{dbname}" OWNER "{owner}"')
-    conn.close()
-    _fix_public_schema(dbname, owner)
-
-
-def _ensure_benchbase_db() -> None:
-    _reset_benchmark_database(BENCHBASE_DB, PG_USER)
-
 
 def _provision_env() -> dict[str, str]:
     keys = (
@@ -338,32 +293,110 @@ def _provision_env() -> dict[str, str]:
     return {key: os.environ[key] for key in keys if os.environ.get(key)}
 
 
-def _benchmark_env(task, params, mem_gib: float, db_vcpus: int, client_vcpus: int) -> dict[str, str]:
+def _task_kind(task) -> str:
+    family = (getattr(task, "benchmark_family", "") or "").lower()
+    name = (getattr(task, "name", "") or "").lower()
+    blob = f"{family} {name}"
+    if "pgbench" in blob and "tpcb" in blob:
+        return "pgbench_tpcb"
+    if "pgbench" in blob:
+        return "pgbench_ro"
+    raise ValueError(f"unsupported DB benchmark task: {getattr(task, 'name', task)!r}")
+
+
+def _profile_env(db_vcpus: int) -> dict[str, str]:
+    anchors = concurrency_ladder(db_vcpus)
+    return {
+        "SC_PROFILE": "1",
+        "SC_PROFILE_VUS": ",".join(str(v) for v in anchors),
+        "SC_PROFILE_SEARCH": "1",
+        "SC_PROFILE_IMPROVE_PCT": str(IMPROVE_PCT),
+        "SC_PROFILE_MAX_CLIENTS": str(concurrency_search_cap(db_vcpus)),
+        "SC_WARMUP_ONCE": "1",
+        "SC_WARMUP_SECONDS": str(DB_WARMUP_SECONDS),
+        "SC_SETTLE_SECONDS": str(DB_SETTLE_SECONDS),
+        "SC_RUN_SECONDS": str(DB_RUN_SECONDS),
+        "SC_RUN_VUS": str(anchors[-1]),
+    }
+
+
+def _benchmark_env(task, mem_gib: float, db_vcpus: int, client_vcpus: int) -> dict[str, str]:
     durability = getattr(task, "durability", "durable")
-    profile_vus = concurrency_ladder(db_vcpus)
+    kind = _task_kind(task)
     env = {
         "SC_DB_HOST": _db_host(),
         "SC_DB_PORT": str(_db_port()),
         "SC_DB_USER": PG_USER,
         "SC_DB_PASSWORD": PG_PASSWORD,
-        "SC_DB_NAME": BENCHBASE_DB,
         "SC_DB_VCPUS": str(db_vcpus),
         "SC_DB_MEM_GIB": str(mem_gib),
         "SC_CLIENT_VCPUS": str(client_vcpus),
         "SC_DURABILITY": durability,
-        "SC_PROFILE": "1",
-        "SC_PROFILE_VUS": ",".join(str(v) for v in profile_vus),
-        "SC_RUN_VUS": str(params.run_vus),
-        "SC_RUN_SECONDS": str(BENCHBASE_RUN_SECONDS),
-        "SC_WARMUP_SECONDS": str(BENCHBASE_WARMUP_SECONDS),
         "SC_TOPOLOGY": "dbaas",
         "SC_DB_SSLMODE": _db_sslmode(),
-        "SC_WORKLOAD": BENCHMARK,
-        "SC_SCALEFACTOR": str(params.scale_units),
+        **_profile_env(db_vcpus),
     }
+    # pgbench respects libpq PGSSLMODE
+    env["PGSSLMODE"] = _db_sslmode()
+    if kind == "pgbench_ro":
+        scale = PGBENCH_RO_SCALE
+        env.update(
+            {
+                "SC_WORKLOAD": "pgbench_ro",
+                "SC_SCALEFACTOR": str(scale),
+                "SC_DB_NAME": PG_DB,
+                "SC_PGBENCH_DB": "pgbench",
+            }
+        )
+    else:
+        scale = pgbench_tpcb_scale(mem_gib, db_vcpus)
+        env.update(
+            {
+                "SC_WORKLOAD": "pgbench_tpcb",
+                "SC_SCALEFACTORS": str(scale),
+                "SC_SCALEFACTOR": str(scale),
+                "SC_DB_NAME": PG_DB,
+                "SC_PGBENCH_DB": "pgbench",
+            }
+        )
     env.update(_provision_env())
     env.update(cdn_env_for_benchmark())
     return env
+
+
+def _dbaas_repro_extra(
+    task,
+    *,
+    mem_gib: float,
+    db_vcpus: int,
+    client_vcpus: int,
+    sync_settable: bool,
+) -> dict[str, Any]:
+    """Top-level stdout fields useful for reproducing a DBaaS run."""
+    profile_vus = concurrency_ladder(db_vcpus)
+    kind = _task_kind(task)
+    extra: dict[str, Any] = {
+        "db_vcpus": db_vcpus,
+        "client_vcpus": client_vcpus,
+        "db_mem_gib": mem_gib,
+        "profile_vus": profile_vus,
+        "profile_search": True,
+        "profile_max_clients": concurrency_search_cap(db_vcpus),
+        "benchmark_image": task.image,
+        "sslmode": _db_sslmode(),
+        "sync_commit_session_settable": sync_settable,
+        "durability": getattr(task, "durability", "durable"),
+        "workload_kind": kind,
+    }
+    if kind == "pgbench_ro":
+        scale = PGBENCH_RO_SCALE
+        extra["scalefactor"] = scale
+        extra["schema_gib"] = scale * PGBENCH_GIB_PER_SCALE
+    else:
+        scale = pgbench_tpcb_scale(mem_gib, db_vcpus)
+        extra["scalefactor"] = scale
+        extra["schema_gib"] = scale * PGBENCH_GIB_PER_SCALE
+    return extra
 
 
 def _tracker_env(task) -> dict[str, str]:
@@ -382,31 +415,6 @@ def _tracker_env(task) -> dict[str, str]:
     return env
 
 
-def _dbaas_repro_extra(
-    task,
-    *,
-    mem_gib: float,
-    db_vcpus: int,
-    client_vcpus: int,
-    params,
-    sync_settable: bool,
-) -> dict[str, Any]:
-    """Top-level stdout fields useful for reproducing a DBaaS run."""
-    profile_vus = concurrency_ladder(db_vcpus)
-    return {
-        "db_vcpus": db_vcpus,
-        "client_vcpus": client_vcpus,
-        "db_mem_gib": mem_gib,
-        "profile_vus": profile_vus,
-        "scalefactor": params.scale_units,
-        "schema_gib": params.schema_gib,
-        "benchmark_image": task.image,
-        "sslmode": _db_sslmode(),
-        "sync_commit_session_settable": sync_settable,
-        "durability": getattr(task, "durability", "durable"),
-    }
-
-
 def run_dbaas_task(
     meta: Meta,
     task,
@@ -419,15 +427,6 @@ def run_dbaas_task(
     mem_gib = float(os.environ.get("MEM_GIB") or 0) or _mem_gib()
     db_vcpus = int(float(os.environ.get("SC_PROVISION_CPU_COUNT", os.environ.get("SC_DB_VCPUS", "4"))))
     client_vcpus = int(os.cpu_count() or 4)
-    params = multi_vm_workload_params(db_vcpus, mem_gib)
-
-    try:
-        _ensure_benchbase_db()
-    except Exception as exc:
-        meta.error_msg = f"benchbase db setup failed: {exc}"
-        meta.end = datetime.now()
-        meta.exit_code = 1
-        return None, b"", str(exc).encode()
 
     durability = getattr(task, "durability", "durable")
     try:
@@ -438,7 +437,7 @@ def run_dbaas_task(
         meta.exit_code = 1
         return None, b"", str(exc).encode()
 
-    env = _benchmark_env(task, params, mem_gib, db_vcpus, client_vcpus)
+    env = _benchmark_env(task, mem_gib, db_vcpus, client_vcpus)
     env.update(_tracker_env(task))
     docker_opts = dict(getattr(task, "docker_opts", None) or DB_DOCKER_OPTS)
     docker_opts["environment"] = env
@@ -478,7 +477,7 @@ def run_dbaas_task(
             port=_db_port(),
             user=PG_USER,
             password=PG_PASSWORD,
-            dbname=BENCHBASE_DB,
+            dbname=PG_DB,
             connect_kwargs=_db_connect_kwargs(),
         )
         stdout = merge_postgres_into_stdout(
@@ -489,7 +488,6 @@ def run_dbaas_task(
                 mem_gib=mem_gib,
                 db_vcpus=db_vcpus,
                 client_vcpus=client_vcpus,
-                params=params,
                 sync_settable=sync_settable,
             ),
         )

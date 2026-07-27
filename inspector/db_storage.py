@@ -22,7 +22,7 @@ DISK_USABLE_FRAC = 0.85
 MIN_STORAGE_GIB = 64
 
 # Shared performance target (Azure PremiumV2 / future AWS gp3 / Hyperdisk).
-# P30-equivalent: enough that durable wikipedia is not trivially IOPS-starved,
+# P30-equivalent: enough that durable pgbench is not trivially IOPS-starved,
 # while staying within PremiumV2 limits on the 64 GiB floor.
 TARGET_IOPS = 5000
 TARGET_THROUGHPUT_MB_S = 200

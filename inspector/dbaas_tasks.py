@@ -1,10 +1,11 @@
 """DBaaS Postgres benchmark task definitions (mirror of multi-VM in tasks.py).
 
-BenchBase Wikipedia only. Schema scales with managed-instance RAM
-(~1/4, max 16 GiB). Concurrency: 1, ncpus/2, ncpus. Timed rungs: 5 minutes.
+Concurrency: geometric anchors {1, V/4, V/2, V} + upward search while TPM
+improves ≥5%. Warmup once, then short settle; 5 min measure windows.
 
-Wikipedia is read-heavy → durable only for now. Async task kept commented so
-DbaasDbTask(durability="async") can be re-enabled later.
+Workloads (pgbench only for now):
+  * RO (-S), fixed ~1 GiB — durable
+  * TPC-B (tpcb-like), V-selected size ≤ cache budget — async
 """
 
 from datetime import timedelta
@@ -23,25 +24,34 @@ DBAAS_ROLLOUT = {
     ("gcp", "db-memory-optimized-N-8/postgres/18/standalone"),
 }
 
-_COMMON = dict(
+_PGBENCH_RO = dict(
     parallel=False,
     dbaas_only=DBAAS_ROLLOUT,
-    benchmark_family="benchbase_postgres_dbaas",
+    benchmark_family="pgbench_postgres_dbaas",
     workload_proxy="read_heavy",
-    image="ghcr.io/sparecores/benchmark-benchbase-postgres:main",
-    timeout=timedelta(minutes=90),
-    # BenchBase client: many terminals need elevated nofile (see DB_DOCKER_OPTS)
+    image="ghcr.io/sparecores/benchmark-pgbench-postgres:main",
+    timeout=timedelta(minutes=120),
     docker_opts=DB_DOCKER_OPTS,
 )
 
-# benchbase_postgres_dbaas_read_heavy_async = DbaasDbTask(
-#     **_COMMON,
-#     priority=1.0,
-#     durability="async",
-# )
-
-benchbase_postgres_dbaas_read_heavy_durable = DbaasDbTask(
-    **_COMMON,
-    priority=1.01,
+pgbench_postgres_dbaas_ro_durable = DbaasDbTask(
+    **_PGBENCH_RO,
+    priority=1.02,
     durability="durable",
+)
+
+_PGBENCH_TPCB = dict(
+    parallel=False,
+    dbaas_only=DBAAS_ROLLOUT,
+    benchmark_family="pgbench_postgres_dbaas_tpcb",
+    workload_proxy="write_heavy",
+    image="ghcr.io/sparecores/benchmark-pgbench-postgres:main",
+    timeout=timedelta(minutes=180),
+    docker_opts=DB_DOCKER_OPTS,
+)
+
+pgbench_postgres_dbaas_tpcb_async = DbaasDbTask(
+    **_PGBENCH_TPCB,
+    priority=1.03,
+    durability="async",
 )

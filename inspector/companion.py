@@ -27,7 +27,7 @@ DEFAULT_BENCHMARK_COMMAND = [
     "/benchmark/benchmark.py",
 ]
 # Forward from the companion host into nested benchmark containers without passing
-# the full os.environ (that clobbers image PATH, e.g. BenchBase Java).
+# the full os.environ (that clobbers image PATH).
 _TRACKER_FORWARD_ENV = (
     "SENTINEL_API_TOKEN",
     "SENTINEL_API_BASE",
@@ -96,7 +96,7 @@ def _benchmark_command(msg: RunBenchmark) -> tuple[list[str], list[str]]:
 
 def _docker_run(msg: RunBenchmark) -> BenchmarkResult:
     # Use only benchmark-specific env plus explicit tracker forwarding; passing the
-    # full host os.environ overwrites image PATH (e.g. BenchBase Java).
+    # full host os.environ overwrites image PATH.
     host_out, metrics_dir = _benchmark_output_dirs()
     tracker_path = metrics_dir / RESOURCE_TRACKER_OUTPUT_FILENAME
     benchmark_metrics_path = metrics_dir / "metrics.json"

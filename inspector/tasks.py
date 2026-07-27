@@ -159,36 +159,44 @@ POSTGRES_MULTI_ROLLOUT = {
 }
 
 # ---------------------------------------------------------------------------
-# Multi-VM Postgres — BenchBase Wikipedia (RAM-scaled working set)
-#
-# Schema ≈ min(25% RAM, 16 GiB) so it fits under pgtune shared_buffers.
-# Concurrency ladder: 1, ncpus/2, ncpus. Each timed rung is 5 minutes.
-# Wikipedia is read-heavy → durable only for now. Async task kept below
-# (commented) so MultiVmDbTask(durability="async") can be re-enabled later.
+# Multi-VM Postgres — pgbench RO (-S), fixed ~1 GiB (scale 65)
 # ---------------------------------------------------------------------------
 
-_POSTGRES_MULTI_COMMON = dict(
+_PGBENCH_MULTI_RO = dict(
     parallel=False,
     servers_only=POSTGRES_MULTI_ROLLOUT,
-    benchmark_family="benchbase_postgres_multi",
+    benchmark_family="pgbench_postgres_multi",
     workload_proxy="read_heavy",
-    image="ghcr.io/sparecores/benchmark-benchbase-postgres:main",
-    # load + up to 3×(2 min warmup + 5 min run) ≈ ~40+ min; keep headroom
-    timeout=timedelta(minutes=90),
-    # High nofile / memlock / seccomp — see DB_DOCKER_OPTS in lib.py
+    image="ghcr.io/sparecores/benchmark-pgbench-postgres:main",
+    timeout=timedelta(minutes=120),
     docker_opts=DB_DOCKER_OPTS,
 )
 
-# benchbase_postgres_multi_read_heavy_async = MultiVmDbTask(
-#     **_POSTGRES_MULTI_COMMON,
-#     priority=1.0,
-#     durability="async",
-# )
-
-benchbase_postgres_multi_read_heavy_durable = MultiVmDbTask(
-    **_POSTGRES_MULTI_COMMON,
-    priority=1.01,
+pgbench_postgres_multi_ro_durable = MultiVmDbTask(
+    **_PGBENCH_MULTI_RO,
+    priority=1.02,
     durability="durable",
+)
+
+# ---------------------------------------------------------------------------
+# Multi-VM Postgres — pgbench TPC-B (tpcb-like), async
+# Size: smallest SCHEMA_SIZE_GIB rung covering search_cap(V), ≤¼ RAM.
+# ---------------------------------------------------------------------------
+
+_PGBENCH_MULTI_TPCB = dict(
+    parallel=False,
+    servers_only=POSTGRES_MULTI_ROLLOUT,
+    benchmark_family="pgbench_postgres_multi_tpcb",
+    workload_proxy="write_heavy",
+    image="ghcr.io/sparecores/benchmark-pgbench-postgres:main",
+    timeout=timedelta(minutes=180),
+    docker_opts=DB_DOCKER_OPTS,
+)
+
+pgbench_postgres_multi_tpcb_async = MultiVmDbTask(
+    **_PGBENCH_MULTI_TPCB,
+    priority=1.03,
+    durability="async",
 )
 
 # We use this benchmark to determine the "SCore" of a given instance. This should represent the relative
