@@ -64,8 +64,7 @@ DOCKER_OPTS = dict(detach=True, privileged=True, network_mode="host")
 DOCKER_OPTS_GPU = dict(device_requests=[docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])])
 # Postgres server + pgbench clients on large hosts: max_connections ×
 # max_worker_processes needs tens of thousands of FDs (c3d-highcpu-360 ≈ 59k).
-# memlock=-1 and unconfined seccomp unlock huge pages / io_uring (same as
-# sc-db-benchmark-tmp DOCKER_PRIV_FLAGS).
+# memlock=-1 and unconfined seccomp unlock huge pages / io_uring.
 DB_DOCKER_OPTS = DOCKER_OPTS | dict(
     security_opt=["seccomp=unconfined"],
     ulimits=[

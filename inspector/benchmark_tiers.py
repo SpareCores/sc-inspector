@@ -30,8 +30,8 @@ SCHEMA_RAM_FRAC = 0.25
 SCHEMA_SIZE_GIB: tuple[float, ...] = (1.0, 4.0, 16.0, 64.0)
 MIN_MEM_GIB = 2.0
 
-# Calibrated in sc-db-benchmark-tmp RESULTS: 2 min warmup + 5 min measure
-# is enough for SKU ranking; longer windows mainly shrink variance.
+# Calibrated: 2 min warmup + 5 min measure is enough for SKU ranking;
+# longer windows mainly shrink variance (see README-db.md design decisions).
 DB_RUN_SECONDS = 300
 DB_WARMUP_SECONDS = 120
 # After the first warmup, later rungs only need a short settle (connection storm).
@@ -69,7 +69,7 @@ GEOMETRIC_CONCURRENCY_LADDER: tuple[int, ...] = (
     3072,
 )
 
-# pgbench: scale 65 → ~980 MB (sc-db-benchmark-tmp run6–10).
+# pgbench: scale 65 → ~980 MB (fixed RO dataset).
 PGBENCH_RO_SCALE = 65
 PGBENCH_GIB_PER_SCALE = 0.9567 / 65
 
