@@ -177,9 +177,20 @@ def pg_guc_settings(
     return settings, result.share_url
 
 
-def pg_gucs(mem_gib: float, durability: str = "durable", *, vcpus: int | None = None) -> list[str]:
+def pg_gucs(
+    mem_gib: float,
+    durability: str = "durable",
+    *,
+    vcpus: int | None = None,
+    min_max_connections: int | None = None,
+) -> list[str]:
     args: list[str] = []
-    settings, _ = pg_guc_settings(mem_gib, durability=durability, vcpus=vcpus)
+    settings, _ = pg_guc_settings(
+        mem_gib,
+        durability=durability,
+        vcpus=vcpus,
+        min_max_connections=min_max_connections,
+    )
     for name, value in settings.items():
         if name == "listen_addresses":
             continue  # set explicitly in _start_postgres
@@ -213,12 +224,22 @@ def _wait_pg_port_free(port: int = 5432, timeout: float = 30) -> None:
 
 
 def _start_postgres(
-    task, mem_gib: float, durability: str, *, vcpus: int
+    task,
+    mem_gib: float,
+    durability: str,
+    *,
+    vcpus: int,
+    min_max_connections: int | None = None,
 ) -> docker.models.containers.Container:
     _cleanup_stale_postgres(task)
     _wait_pg_port_free()
     d = docker.from_env(timeout=1800)
-    gucs = pg_gucs(mem_gib, durability=durability, vcpus=vcpus)
+    gucs = pg_gucs(
+        mem_gib,
+        durability=durability,
+        vcpus=vcpus,
+        min_max_connections=min_max_connections,
+    )
     cmd = [
         "postgres",
         "-c",
@@ -445,19 +466,29 @@ def run_multi_vm_task(
     durability = getattr(task, "durability", "durable")
     kind = _task_kind(task)
     db_host = _local_private_ip()
-    tpcb_max_connections = None
+    # Server must allow every client the driver may open: RO adaptive tail
+    # uses CONCURRENCY_LADDER_MAX; TPC-B uses the memory-derived scale cap.
+    min_max_connections = max_connections_for_vcpus(vcpus)
     if kind == "pgbench_tpcb":
-        # Keep server-side max_connections aligned with the memory-derived TPC-B cap.
-        tpcb_max_connections = pgbench_tpcb_max_clients(mem_gib, vcpus) + 50
+        min_max_connections = max(
+            min_max_connections,
+            pgbench_tpcb_max_clients(mem_gib, vcpus) + 50,
+        )
     requested_gucs, pgtune_share_url = pg_guc_settings(
         mem_gib,
         durability=durability,
         vcpus=vcpus,
-        min_max_connections=tpcb_max_connections,
+        min_max_connections=min_max_connections,
     )
 
     try:
-        pg_container = _start_postgres(task, mem_gib, durability, vcpus=vcpus)
+        pg_container = _start_postgres(
+            task,
+            mem_gib,
+            durability,
+            vcpus=vcpus,
+            min_max_connections=min_max_connections,
+        )
     except Exception as exc:
         meta.error_msg = f"postgres start failed: {exc}"
         meta.end = datetime.now()

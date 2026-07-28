@@ -119,8 +119,15 @@ def concurrency_search_cap(vcpus: int) -> int:
 
 
 def max_connections_for_vcpus(vcpus: int) -> int:
-    """Postgres ``max_connections`` headroom for the highest search rung."""
-    return concurrency_search_cap(vcpus) + 50
+    """Postgres ``max_connections`` floor for multi-VM pgbench.
+
+    RO adaptive extension can climb to ``CONCURRENCY_LADDER_MAX`` (see
+    ``SC_PROFILE_HARD_MAX_CLIENTS``), so the server must allow that many
+    client backends plus a small reserve for autovacuum / admin.
+    ``vcpus`` is kept for API symmetry with the other sizing helpers.
+    """
+    _ = vcpus
+    return CONCURRENCY_LADDER_MAX + 50
 
 
 def pgbench_tpcb_scale(mem_gib: float, vcpus: int) -> int:
