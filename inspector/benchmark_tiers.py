@@ -24,6 +24,13 @@ DISK_SCHEMA_RATIO = 2.0
 BUILD_VU_CAP = 64
 CLIENT_MIN_VCPUS = 4
 CLIENT_ABSOLUTE_MAX_VCPUS = 2048
+# Remote RO companion calibration (n2-standard-128 + n2d-highcpu-64 client,
+# 2026-07-28): planned search cap was 512 but adaptive RO peaked at 1536
+# clients; the V/2 companion was softirq-bound (~16% idle, ~30% softirq) while
+# the DB still had ~37% idle and backends mostly ClientRead. Size the client
+# for that adaptive design concurrency at ~20 clients/vCPU (≈70% busy target).
+RO_ADAPTIVE_DESIGN_MULT = 3
+CLIENTS_PER_CLIENT_VCPU = 20
 
 SCHEMA_RAM_FRAC = 0.25
 # Few fixed sizes for cross-SKU compare. 64 GiB ≥ gib(ladder_max clients).
@@ -152,15 +159,40 @@ def pgbench_tpcb_max_clients(mem_gib: float, vcpus: int) -> int:
     return min(pgbench_tpcb_scale(mem_gib, vcpus), CONCURRENCY_LADDER_MAX)
 
 
+def companion_design_clients(db_vcpus: int) -> int:
+    """Concurrency the companion must drive without becoming the bottleneck.
+
+    Planned search stops at ``concurrency_search_cap(V)``, but RO adaptive
+    extension (``SC_PROFILE_HARD_MAX_CLIENTS``) can climb further while TPM
+    keeps improving. Empirically that peak was ~``RO_ADAPTIVE_DESIGN_MULT`` ×
+    the planned cap on a large multi-VM RO run — size for that, snapped to the
+    geometric ladder and capped at ladder max.
+    """
+    planned = concurrency_search_cap(db_vcpus)
+    return min(
+        CONCURRENCY_LADDER_MAX,
+        rung(RO_ADAPTIVE_DESIGN_MULT * planned),
+    )
+
+
 def companion_client_vcpus(build_vus: int, db_vcpus: int) -> int:
+    """Minimum companion vCPUs so remote pgbench is not client-bound.
+
+    Takes the max of:
+      * a small absolute floor,
+      * ``db_vcpus / 2`` (legacy floor; keeps mid-size SKUs from shrinking),
+      * cores to drive ``companion_design_clients`` at ``CLIENTS_PER_CLIENT_VCPU``,
+      * a light build/init budget.
+    Never exceeds ``min(CLIENT_ABSOLUTE_MAX_VCPUS, db_vcpus)``.
+    """
     db_vcpus = max(1, int(db_vcpus))
     cap = min(CLIENT_ABSOLUTE_MAX_VCPUS, db_vcpus)
     min_vcpus = min(CLIENT_MIN_VCPUS, db_vcpus)
     db_floor = max(min_vcpus, (db_vcpus + 1) // 2)
     build_need = (int(build_vus) + 3) // 4
-    # High client counts multiplex well (run10: ~540 clients on ~47 busy cores).
-    search_need = (concurrency_search_cap(db_vcpus) + 9) // 10
-    return min(cap, max(db_floor, build_need, search_need))
+    design_c = companion_design_clients(db_vcpus)
+    drive_need = (design_c + CLIENTS_PER_CLIENT_VCPU - 1) // CLIENTS_PER_CLIENT_VCPU
+    return min(cap, max(db_floor, build_need, drive_need))
 
 
 def client_req(db_srv) -> ClientRequirements:
