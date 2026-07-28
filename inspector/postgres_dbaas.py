@@ -12,6 +12,7 @@ from typing import Any
 import docker
 
 from benchmark_tiers import (
+    CONCURRENCY_LADDER_MAX,
     DB_RUN_SECONDS,
     DB_SETTLE_SECONDS,
     DB_WARMUP_SECONDS,
@@ -20,6 +21,7 @@ from benchmark_tiers import (
     PGBENCH_RO_SCALE,
     concurrency_ladder,
     concurrency_search_cap,
+    pgbench_tpcb_max_clients,
     pgbench_tpcb_scale,
 )
 from db_dataset_cache import cdn_env_for_benchmark
@@ -312,6 +314,8 @@ def _profile_env(db_vcpus: int) -> dict[str, str]:
         "SC_PROFILE_SEARCH": "1",
         "SC_PROFILE_IMPROVE_PCT": str(IMPROVE_PCT),
         "SC_PROFILE_MAX_CLIENTS": str(concurrency_search_cap(db_vcpus)),
+        # RO adaptive extension can use the full shared ladder.
+        "SC_PROFILE_HARD_MAX_CLIENTS": str(CONCURRENCY_LADDER_MAX),
         "SC_WARMUP_ONCE": "1",
         "SC_WARMUP_SECONDS": str(DB_WARMUP_SECONDS),
         "SC_SETTLE_SECONDS": str(DB_SETTLE_SECONDS),
@@ -350,11 +354,14 @@ def _benchmark_env(task, mem_gib: float, db_vcpus: int, client_vcpus: int) -> di
         )
     else:
         scale = pgbench_tpcb_scale(mem_gib, db_vcpus)
+        max_clients = pgbench_tpcb_max_clients(mem_gib, db_vcpus)
         env.update(
             {
                 "SC_WORKLOAD": "pgbench_tpcb",
                 "SC_SCALEFACTORS": str(scale),
                 "SC_SCALEFACTOR": str(scale),
+                "SC_PROFILE_MAX_CLIENTS": str(max_clients),
+                "SC_PROFILE_HARD_MAX_CLIENTS": str(max_clients),
                 "SC_DB_NAME": PG_DB,
                 "SC_PGBENCH_DB": "pgbench",
             }
@@ -382,6 +389,7 @@ def _dbaas_repro_extra(
         "profile_vus": profile_vus,
         "profile_search": True,
         "profile_max_clients": concurrency_search_cap(db_vcpus),
+        "profile_hard_max_clients": CONCURRENCY_LADDER_MAX,
         "benchmark_image": task.image,
         "sslmode": _db_sslmode(),
         "sync_commit_session_settable": sync_settable,
@@ -396,6 +404,8 @@ def _dbaas_repro_extra(
         scale = pgbench_tpcb_scale(mem_gib, db_vcpus)
         extra["scalefactor"] = scale
         extra["schema_gib"] = scale * PGBENCH_GIB_PER_SCALE
+        extra["profile_max_clients"] = pgbench_tpcb_max_clients(mem_gib, db_vcpus)
+        extra["profile_hard_max_clients"] = extra["profile_max_clients"]
     return extra
 
 

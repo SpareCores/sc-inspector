@@ -68,6 +68,7 @@ GEOMETRIC_CONCURRENCY_LADDER: tuple[int, ...] = (
     2048,
     3072,
 )
+CONCURRENCY_LADDER_MAX = GEOMETRIC_CONCURRENCY_LADDER[-1]
 
 # pgbench: scale 65 → ~980 MB (fixed RO dataset).
 PGBENCH_RO_SCALE = 65
@@ -114,7 +115,7 @@ def concurrency_ladder(vcpus: int) -> list[int]:
 def concurrency_search_cap(vcpus: int) -> int:
     """Upper bound for upward search (inclusive)."""
     v = max(1, int(vcpus))
-    return min(GEOMETRIC_CONCURRENCY_LADDER[-1], rung(SEARCH_VCPU_MULT * v))
+    return min(CONCURRENCY_LADDER_MAX, rung(SEARCH_VCPU_MULT * v))
 
 
 def max_connections_for_vcpus(vcpus: int) -> int:
@@ -137,6 +138,11 @@ def pgbench_tpcb_scale(mem_gib: float, vcpus: int) -> int:
     covering = [g for g in fitting if g + 1e-9 >= need_gib]
     gib = covering[0] if covering else fitting[-1]
     return max(1, int(round(gib / PGBENCH_GIB_PER_SCALE)))
+
+
+def pgbench_tpcb_max_clients(mem_gib: float, vcpus: int) -> int:
+    """TPC-B concurrency cap derived from the cache-resident max scale."""
+    return min(pgbench_tpcb_scale(mem_gib, vcpus), CONCURRENCY_LADDER_MAX)
 
 
 def companion_client_vcpus(build_vus: int, db_vcpus: int) -> int:

@@ -16,6 +16,7 @@ from typing import Any
 import docker
 
 from benchmark_tiers import (
+    CONCURRENCY_LADDER_MAX,
     DB_RUN_SECONDS,
     DB_SETTLE_SECONDS,
     DB_WARMUP_SECONDS,
@@ -25,6 +26,7 @@ from benchmark_tiers import (
     concurrency_ladder,
     concurrency_search_cap,
     max_connections_for_vcpus,
+    pgbench_tpcb_max_clients,
     pgbench_tpcb_scale,
 )
 from companion_protocol import BenchmarkResult, Ping, Pong, RunBenchmark, Shutdown
@@ -153,6 +155,7 @@ def pg_guc_settings(
     durability: str = "durable",
     *,
     vcpus: int | None = None,
+    min_max_connections: int | None = None,
 ) -> tuple[dict[str, str], str]:
     """Return (name→value GUCs, pgtune share URL) for multi-VM Postgres.
 
@@ -166,6 +169,8 @@ def pg_guc_settings(
     settings["synchronous_commit"] = "off" if durability == "async" else "on"
     # Headroom for geometric search past nproc (pgbench clients).
     need = max_connections_for_vcpus(cpu)
+    if min_max_connections is not None:
+        need = max(need, int(min_max_connections))
     cur = int(str(settings.get("max_connections", "100")).split()[0])
     if need > cur:
         settings["max_connections"] = str(need)
@@ -292,6 +297,8 @@ def _profile_env(db_vcpus: int) -> dict[str, str]:
         "SC_PROFILE_SEARCH": "1",
         "SC_PROFILE_IMPROVE_PCT": str(IMPROVE_PCT),
         "SC_PROFILE_MAX_CLIENTS": str(concurrency_search_cap(db_vcpus)),
+        # RO adaptive extension can use the full shared ladder.
+        "SC_PROFILE_HARD_MAX_CLIENTS": str(CONCURRENCY_LADDER_MAX),
         "SC_WARMUP_ONCE": "1",
         "SC_WARMUP_SECONDS": str(DB_WARMUP_SECONDS),
         "SC_SETTLE_SECONDS": str(DB_SETTLE_SECONDS),
@@ -336,11 +343,14 @@ def _benchmark_env(
         )
     else:
         scale = pgbench_tpcb_scale(mem_gib, db_vcpus)
+        max_clients = pgbench_tpcb_max_clients(mem_gib, db_vcpus)
         env.update(
             {
                 "SC_WORKLOAD": "pgbench_tpcb",
                 "SC_SCALEFACTORS": str(scale),
                 "SC_SCALEFACTOR": str(scale),
+                "SC_PROFILE_MAX_CLIENTS": str(max_clients),
+                "SC_PROFILE_HARD_MAX_CLIENTS": str(max_clients),
                 "SC_DB_NAME": PG_DB,
                 "SC_PGBENCH_DB": "pgbench",
             }
@@ -380,6 +390,7 @@ def _multi_vm_repro_extra(
         "profile_vus": profile_vus,
         "profile_search": True,
         "profile_max_clients": concurrency_search_cap(db_vcpus),
+        "profile_hard_max_clients": CONCURRENCY_LADDER_MAX,
         "pg_image": PG_IMAGE,
         "benchmark_image": task.image,
         "durability": getattr(task, "durability", "durable"),
@@ -393,6 +404,8 @@ def _multi_vm_repro_extra(
         scale = pgbench_tpcb_scale(mem_gib, db_vcpus)
         extra["scalefactor"] = scale
         extra["schema_gib"] = scale * PGBENCH_GIB_PER_SCALE
+        extra["profile_max_clients"] = pgbench_tpcb_max_clients(mem_gib, db_vcpus)
+        extra["profile_hard_max_clients"] = extra["profile_max_clients"]
     if pgtune_share_url:
         extra["pgtune_share_url"] = pgtune_share_url
     provisioned_gib = os.environ.get("PROVISIONED_DISK_GIB", "").strip()
@@ -430,9 +443,17 @@ def run_multi_vm_task(
     vcpus = int(os.cpu_count() or 4)
     client_vcpus = _client_vcpus(vcpus)
     durability = getattr(task, "durability", "durable")
+    kind = _task_kind(task)
     db_host = _local_private_ip()
+    tpcb_max_connections = None
+    if kind == "pgbench_tpcb":
+        # Keep server-side max_connections aligned with the memory-derived TPC-B cap.
+        tpcb_max_connections = pgbench_tpcb_max_clients(mem_gib, vcpus) + 50
     requested_gucs, pgtune_share_url = pg_guc_settings(
-        mem_gib, durability=durability, vcpus=vcpus
+        mem_gib,
+        durability=durability,
+        vcpus=vcpus,
+        min_max_connections=tpcb_max_connections,
     )
 
     try:
