@@ -548,8 +548,17 @@ def cleanup_s3_stack(vendor: str, records: list, *, data_dir: str | None = None)
     resource_opts = _resource_opts_for_record(vendor, record)
 
     if data_dir:
+        dbaas_key = (
+            record.instance_key
+            if getattr(record, "topology", "") == "dbaas" and record.instance_key
+            else None
+        )
         block_reason = lib.active_run_blocks_s3_cleanup(
-            vendor, record.instance, records, data_dir
+            vendor,
+            record.instance,
+            records,
+            data_dir,
+            instance_key=dbaas_key,
         )
         if block_reason:
             logging.warning(
@@ -737,6 +746,9 @@ def cleanup(ctx, threads, vendor):
     data_dir = os.path.join(ctx.parent.params["repo_path"], "data")
 
     records = s3_runs.list_completed_runs(vendor=vendor)
+    # DBaaS finished markers are owned by cleanup-dbaas / cleanup-sweep; this
+    # job only sees multi-VM records (avoids destroying with data/ metas).
+    records = [r for r in records if r.topology != "dbaas"]
     logging.info(
         "Found %d completed S3 run record(s) to clean up%s",
         len(records),

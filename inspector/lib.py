@@ -1464,17 +1464,30 @@ def active_run_blocks_s3_cleanup(
     instance: str,
     records: list[Any],
     data_dir: str | os.PathLike,
+    *,
+    instance_key: str | None = None,
 ) -> str | None:
-    """Return a reason to skip S3-driven destroy when git shows a newer active run."""
+    """Return a reason to skip S3-driven destroy when git shows a newer active run.
+
+    For multi-VM, ``data_dir`` is the repo ``data/`` root and metas live under
+    ``data/<vendor>/<instance>/``. For DBaaS, pass ``instance_key`` and set
+    ``data_dir`` to the managed-DB directory
+    (``dbaas/<vendor>/<instance_key>/``); do not join vendor/client again.
+    """
     terminated = [_as_utc(r.terminated_at) for r in records if r.terminated_at]
     if not terminated:
         return None
     latest_terminated = max(terminated)
-    server_data_dir = os.path.join(data_dir, vendor, instance)
-    if not os.path.isdir(server_data_dir):
+    if instance_key:
+        task_data_dir = data_dir
+        tasks = _applicable_dbaas_tasks(vendor, instance_key)
+    else:
+        task_data_dir = os.path.join(data_dir, vendor, instance)
+        tasks = _applicable_tasks(vendor, instance)
+    if not os.path.isdir(task_data_dir):
         return None
-    for task in _applicable_tasks(vendor, instance):
-        meta = load_task_meta(task, data_dir=server_data_dir)
+    for task in tasks:
+        meta = load_task_meta(task, data_dir=task_data_dir)
         started = _as_utc(meta.start)
         if started and meta.end is None and started > latest_terminated:
             return (
