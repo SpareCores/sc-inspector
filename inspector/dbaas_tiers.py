@@ -33,7 +33,7 @@ def provision_spec(target: ManagedDbTarget) -> dict[str, Any]:
     """Return provision parameters sized from the managed instance's memory."""
     mem_gib = float(target.memory_gib or 0) or 16.0
     schema_gib = target_schema_gib(mem_gib)
-    plan = db_storage_plan(target.vendor_id, mem_gib)
+    plan = db_storage_plan(target.vendor_id, mem_gib, vcpus=int(target.cpu_count))
     storage = dbaas_storage_fields(plan)
     if target.vendor_id == "gcp":
         return _provision_spec_gcp(target, storage, schema_gib)

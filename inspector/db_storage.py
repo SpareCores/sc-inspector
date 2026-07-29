@@ -1,9 +1,15 @@
 """Shared DB storage sizing for multi-VM and DBaaS (apples-to-apples I/O).
 
-Both topologies provision the same ``storage_gib`` and the same performance
-target for a given vendor. Azure uses Premium SSD v2 with explicit IOPS /
-throughput; GCP uses PD-SSD where performance is size-derived, so matching
-size is the contract. AWS (gp3) is stubbed for a later rollout.
+Both topologies use ``disk_profiles.provision_for_vcpus()`` to derive a
+size and performance target that scales with the VM.  This ensures:
+  * Small instances don't overprovision storage.
+  * Large instances have enough I/O headroom that benchmarks measure
+    compute, not disk bottlenecks.
+  * Cross-vendor parity: all vendors get a similar MB/s-per-vCPU budget.
+
+For size-derived types (GCP pd-ssd) the result is a larger disk; for
+independently-provisioned types (Azure PremiumV2, AWS gp3) it's explicit
+IOPS/throughput values.  See ``disk_profiles.py`` for the full model.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from benchmark_tiers import DISK_SCHEMA_RATIO, target_schema_gib
+from disk_profiles import DiskProvision, provision_for_vcpus
 
 # Usable fraction of the provisioned volume (OS/reserved headroom).
 DISK_USABLE_FRAC = 0.85
@@ -21,12 +28,14 @@ DISK_USABLE_FRAC = 0.85
 # DBaaS as well so GCP size-derived IOPS match.
 MIN_STORAGE_GIB = 64
 
-# Shared performance target (Azure PremiumV2 / future AWS gp3 / Hyperdisk).
-# P30-equivalent: enough that durable pgbench is not trivially IOPS-starved,
-# while staying within PremiumV2 limits on the 64 GiB floor.
-TARGET_IOPS = 5000
-TARGET_THROUGHPUT_MB_S = 200
 AZURE_IOPS_TIER = "P30"  # Flexible Server maps tier → IOPS/throughput
+
+# Default disk types per vendor (used when no override is set).
+DEFAULT_DISK_TYPES: dict[str, str] = {
+    "gcp": "pd-ssd",
+    "azure": "PremiumV2_LRS",
+    "aws": "gp3",
+}
 
 
 @dataclass(frozen=True)
@@ -40,6 +49,9 @@ class DbStoragePlan:
     iops: int | None
     throughput_mb_s: int | None
     iops_tier: str  # Azure Flexible Server tier label; empty elsewhere
+    # Effective performance (informational, from disk_profiles)
+    effective_write_iops: int | None
+    effective_write_mbps: int | None
 
     def multi_vm_disk_opts(self) -> dict[str, Any]:
         """Args for ``MultiVmStackSpec`` / ``db_disk_options`` consumers."""
@@ -57,22 +69,66 @@ def storage_gib_for_mem(mem_gib: float) -> int:
     return max(MIN_STORAGE_GIB, int(math.ceil(need / DISK_USABLE_FRAC)))
 
 
-def _azure_plan(storage_gib: int) -> DbStoragePlan:
-    # PremiumV2: IOPS/throughput are independently provisioned (size only caps max).
+def db_storage_plan(vendor: str, mem_gib: float, vcpus: int = 0) -> DbStoragePlan:
+    """Return the shared storage plan for ``vendor`` at ``mem_gib`` / ``vcpus``.
+
+    When ``vcpus`` > 0, uses ``disk_profiles.provision_for_vcpus()`` to ensure
+    sufficient I/O headroom.  The final size is the max of the schema-derived
+    minimum and the I/O-scaled provision.
+    """
+    schema_min_gib = storage_gib_for_mem(mem_gib)
+    vendor_lower = (vendor or "").lower()
+    disk_type = DEFAULT_DISK_TYPES.get(vendor_lower, "")
+
+    if vcpus > 0 and disk_type:
+        provision = provision_for_vcpus(
+            vendor_lower, disk_type, vcpus, min_size_gib=schema_min_gib
+        )
+        plan = _plan_from_provision(provision, vendor_lower)
+    elif vendor_lower == "gcp":
+        plan = _gcp_plan(schema_min_gib)
+    elif vendor_lower == "azure":
+        plan = _azure_plan(schema_min_gib, vcpus)
+    elif vendor_lower == "aws":
+        plan = _aws_plan(schema_min_gib, vcpus)
+    else:
+        plan = DbStoragePlan(
+            vendor=vendor_lower,
+            storage_gib=schema_min_gib,
+            storage_type="",
+            storage_edition="",
+            iops=None,
+            throughput_mb_s=None,
+            iops_tier="",
+            effective_write_iops=None,
+            effective_write_mbps=None,
+        )
+    return _apply_env_overrides(plan)
+
+
+def _plan_from_provision(p: DiskProvision, vendor: str) -> DbStoragePlan:
+    """Convert a DiskProvision to a DbStoragePlan."""
+    edition_map = {
+        ("gcp", "pd-ssd"): "PD_SSD",
+        ("azure", "PremiumV2_LRS"): "ManagedDiskV2",
+        ("aws", "gp3"): "gp3",
+    }
+    edition = edition_map.get((vendor, p.disk_type), p.disk_type)
+    iops_tier = AZURE_IOPS_TIER if vendor == "azure" else ""
     return DbStoragePlan(
-        vendor="azure",
-        storage_gib=storage_gib,
-        storage_type="PremiumV2_LRS",
-        storage_edition="ManagedDiskV2",
-        iops=TARGET_IOPS,
-        throughput_mb_s=TARGET_THROUGHPUT_MB_S,
-        iops_tier=AZURE_IOPS_TIER,
+        vendor=vendor,
+        storage_gib=p.size_gib,
+        storage_type=p.disk_type,
+        storage_edition=edition,
+        iops=p.iops,
+        throughput_mb_s=p.throughput_mb_s,
+        iops_tier=iops_tier,
+        effective_write_iops=p.effective_write_iops,
+        effective_write_mbps=p.effective_write_mbps,
     )
 
 
 def _gcp_plan(storage_gib: int) -> DbStoragePlan:
-    # PD-SSD IOPS/throughput scale with size on both GCE and Cloud SQL — same
-    # storage_gib is what makes multi-VM and DBaaS comparable.
     return DbStoragePlan(
         vendor="gcp",
         storage_gib=storage_gib,
@@ -81,44 +137,43 @@ def _gcp_plan(storage_gib: int) -> DbStoragePlan:
         iops=None,
         throughput_mb_s=None,
         iops_tier="",
+        effective_write_iops=None,
+        effective_write_mbps=None,
     )
 
 
-def _aws_plan(storage_gib: int) -> DbStoragePlan:
-    # Stub for later: gp3 with the same IOPS/throughput target as Azure.
+def _azure_plan(storage_gib: int, vcpus: int = 0) -> DbStoragePlan:
+    from disk_profiles import MIN_WRITE_IOPS, MIN_WRITE_MBPS, WRITE_IOPS_PER_VCPU, WRITE_MBPS_PER_VCPU
+    iops = max(MIN_WRITE_IOPS, int(vcpus * WRITE_IOPS_PER_VCPU)) if vcpus > 0 else 5000
+    mbps = max(MIN_WRITE_MBPS, int(vcpus * WRITE_MBPS_PER_VCPU)) if vcpus > 0 else 200
+    return DbStoragePlan(
+        vendor="azure",
+        storage_gib=storage_gib,
+        storage_type="PremiumV2_LRS",
+        storage_edition="ManagedDiskV2",
+        iops=iops,
+        throughput_mb_s=mbps,
+        iops_tier=AZURE_IOPS_TIER,
+        effective_write_iops=iops,
+        effective_write_mbps=mbps,
+    )
+
+
+def _aws_plan(storage_gib: int, vcpus: int = 0) -> DbStoragePlan:
+    from disk_profiles import MIN_WRITE_IOPS, MIN_WRITE_MBPS, WRITE_IOPS_PER_VCPU, WRITE_MBPS_PER_VCPU
+    iops = max(MIN_WRITE_IOPS, int(vcpus * WRITE_IOPS_PER_VCPU)) if vcpus > 0 else 5000
+    mbps = max(MIN_WRITE_MBPS, int(vcpus * WRITE_MBPS_PER_VCPU)) if vcpus > 0 else 200
     return DbStoragePlan(
         vendor="aws",
         storage_gib=storage_gib,
         storage_type="gp3",
         storage_edition="gp3",
-        iops=TARGET_IOPS,
-        throughput_mb_s=TARGET_THROUGHPUT_MB_S,
+        iops=iops,
+        throughput_mb_s=mbps,
         iops_tier="",
+        effective_write_iops=iops,
+        effective_write_mbps=mbps,
     )
-
-
-def db_storage_plan(vendor: str, mem_gib: float) -> DbStoragePlan:
-    """Return the shared storage plan for ``vendor`` at ``mem_gib`` RAM."""
-    storage_gib = storage_gib_for_mem(mem_gib)
-    vendor = (vendor or "").lower()
-    if vendor == "azure":
-        plan = _azure_plan(storage_gib)
-    elif vendor == "gcp":
-        plan = _gcp_plan(storage_gib)
-    elif vendor == "aws":
-        plan = _aws_plan(storage_gib)
-    else:
-        # Unknown vendor: size only; leave type to provider default.
-        plan = DbStoragePlan(
-            vendor=vendor,
-            storage_gib=storage_gib,
-            storage_type="",
-            storage_edition="",
-            iops=None,
-            throughput_mb_s=None,
-            iops_tier="",
-        )
-    return _apply_env_overrides(plan)
 
 
 def _apply_env_overrides(plan: DbStoragePlan) -> DbStoragePlan:
@@ -141,12 +196,13 @@ def _apply_env_overrides(plan: DbStoragePlan) -> DbStoragePlan:
         iops=iops,
         throughput_mb_s=throughput,
         iops_tier=plan.iops_tier,
+        effective_write_iops=iops if iops else plan.effective_write_iops,
+        effective_write_mbps=throughput if throughput else plan.effective_write_mbps,
     )
 
 
 def dbaas_storage_fields(plan: DbStoragePlan) -> dict[str, Any]:
     """Fields merged into ``dbaas_tiers.provision_spec``."""
-    # GCP Cloud SQL expects PD_SSD; multi-VM GCE expects pd-ssd.
     storage_type = plan.storage_type
     if plan.vendor == "gcp":
         storage_type = "PD_SSD"
