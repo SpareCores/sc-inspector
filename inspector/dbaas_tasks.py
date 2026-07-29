@@ -21,6 +21,7 @@ DBAAS_ROLLOUT = {
     ("azure", "Standard_E16ds_v5/postgres/18/standalone"),
     ("gcp", "db-perf-optimized-N-8/postgres/18/standalone"),
     ("gcp", "db-perf-optimized-N-16/postgres/18/standalone"),
+    ("gcp", "db-perf-optimized-N-128/postgres/18/standalone"),
     ("gcp", "db-memory-optimized-N-8/postgres/18/standalone"),
 }
 

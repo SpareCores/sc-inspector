@@ -89,6 +89,20 @@ STATIC_MANAGED_DB_TARGETS: tuple[ManagedDbTarget, ...] = (
         edition="PerformanceOptimized",
         sync_commit_session_settable=True,
     ),
+    # Closest Cloud SQL peer to GCE n2-standard-128 (128c/512 GiB): same N2
+    # family and vCPU count; Enterprise Plus N-series is 8 GiB/vCPU → 864 GiB.
+    ManagedDbTarget(
+        vendor_id="gcp",
+        engine="postgres",
+        native_id="db-perf-optimized-N-128",
+        sku_id="db-perf-optimized-N-128:POSTGRES_18",
+        engine_version="18",
+        ha_mode="standalone",
+        cpu_count=128,
+        memory_gib=864,
+        edition="PerformanceOptimized",
+        sync_commit_session_settable=True,
+    ),
     ManagedDbTarget(
         vendor_id="gcp",
         engine="postgres",
@@ -112,12 +126,14 @@ STATIC_TARGET_REGIONS: dict[tuple[str, str], list[str]] = {
     ],
     ("gcp", "db-perf-optimized-N-8/postgres/18/standalone"): list(_GCP_POC_REGIONS),
     ("gcp", "db-perf-optimized-N-16/postgres/18/standalone"): list(_GCP_POC_REGIONS),
+    ("gcp", "db-perf-optimized-N-128/postgres/18/standalone"): list(_GCP_POC_REGIONS),
     ("gcp", "db-memory-optimized-N-8/postgres/18/standalone"): list(_GCP_POC_REGIONS),
 }
 
 STATIC_TARGET_ZONES: dict[tuple[str, str], list[str]] = {
     ("gcp", "db-perf-optimized-N-8/postgres/18/standalone"): list(_GCP_POC_ZONES),
     ("gcp", "db-perf-optimized-N-16/postgres/18/standalone"): list(_GCP_POC_ZONES),
+    ("gcp", "db-perf-optimized-N-128/postgres/18/standalone"): list(_GCP_POC_ZONES),
     ("gcp", "db-memory-optimized-N-8/postgres/18/standalone"): list(_GCP_POC_ZONES),
 }
 
