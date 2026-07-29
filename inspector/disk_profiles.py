@@ -256,13 +256,14 @@ def get_profile(vendor: str, disk_type: str) -> DiskProfile:
 # vCPU-scaled provisioning
 # ---------------------------------------------------------------------------
 
-# Target I/O budget per vCPU. These values ensure that for a write-heavy
-# workload (TPC-B ≈ 3 KB WAL per txn), disk is not the bottleneck before CPU.
-# Calibrated from n2-standard-128 TPC-B: 110K TPS needed ~330 MB/s write;
-# at 128 vCPUs that's ~2.6 MB/s/vCPU. We target 3 MB/s/vCPU for headroom.
-WRITE_MBPS_PER_VCPU = 3.0
-# IOPS budget: TPC-B at peak does ~1000 IOPS/vCPU (random 8K writes).
-WRITE_IOPS_PER_VCPU = 50.0
+# Target I/O budget per vCPU. Enough that async TPC-B is not trivially
+# I/O-starved on large SKUs, without overprovisioning: on n2-standard-128,
+# 800 GiB (3 MB/s/vCPU) delivered ~600 MB/s writes but the same ~105–110K TPS
+# peak as 151 GiB — the ceiling was WALInsert/ProcArray/transactionid, not
+# disk. Halved budget (~192 MB/s at 128 vCPUs) still beats the old schema-only
+# floor and aligns with the prior Azure/AWS ~200 MB/s target.
+WRITE_MBPS_PER_VCPU = 1.5
+WRITE_IOPS_PER_VCPU = 25.0
 # Minimum throughput floor (never provision below this even for 1 vCPU).
 MIN_WRITE_MBPS = 50
 MIN_WRITE_IOPS = 1000
