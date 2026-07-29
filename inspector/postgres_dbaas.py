@@ -113,6 +113,10 @@ def _workload_admin_connect(*, dbname: str | None = None):
     )
 
 
+def _dbaas_vendor() -> str:
+    return (os.environ.get("SC_PROVISION_VENDOR_ID") or "").strip().lower()
+
+
 def _ensure_workload_admin_role() -> None:
     """Create SC_DB_USER on GCP when bootstrap connects as postgres."""
     if _dbaas_vendor() != "gcp" or BOOTSTRAP_USER == PG_USER:
