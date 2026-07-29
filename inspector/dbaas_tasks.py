@@ -18,11 +18,11 @@ from lib import DB_DOCKER_OPTS, DbaasDbTask
 #   B) same cores, different RAM — N-8 (64G) vs memory-optimized-N-8 (256G)
 #   C) cross-topology peers — N-8 ↔ n2/c2d-highmem-8; N-16 ↔ n2-highmem-16
 DBAAS_ROLLOUT = {
-    ("azure", "Standard_E16ds_v5/postgres/18/standalone"),
-    ("gcp", "db-perf-optimized-N-8/postgres/18/standalone"),
-    ("gcp", "db-perf-optimized-N-16/postgres/18/standalone"),
+    # ("azure", "Standard_E16ds_v5/postgres/18/standalone"),
+    # ("gcp", "db-perf-optimized-N-8/postgres/18/standalone"),
+    # ("gcp", "db-perf-optimized-N-16/postgres/18/standalone"),
     ("gcp", "db-perf-optimized-N-128/postgres/18/standalone"),
-    ("gcp", "db-memory-optimized-N-8/postgres/18/standalone"),
+    # ("gcp", "db-memory-optimized-N-8/postgres/18/standalone"),
 }
 
 _PGBENCH_RO = dict(
