@@ -1,10 +1,10 @@
 """DBaaS Postgres benchmark task definitions (mirror of multi-VM in tasks.py).
 
-Concurrency: geometric anchors {1, V/4, V/2, V} + upward search while TPM
-improves ≥5%. Warmup once, then short settle; 5 min measure windows.
+Read-only: cached CPU-heavy ``ro_cpu_*`` script; concurrency ``{1, V/2, V, 2·V}``.
+TPC-B: geometric anchors + upward search while TPM improves ≥5%.
 
-Workloads (pgbench only for now):
-  * RO (-S), fixed ~1 GiB — durable
+Workloads (pgbench):
+  * RO (heavy cached SQL) — durable
   * TPC-B (tpcb-like), V-selected size ≤ cache budget — async
 """
 

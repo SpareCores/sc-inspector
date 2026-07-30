@@ -143,8 +143,8 @@ virtualization = DockerTask(
 )
 
 # ---------------------------------------------------------------------------
-# Multi-VM Postgres — pgbench RO (-S), fixed ~1 GiB (scale 65)
-# Piggybacks on other tasks via start_with_instance (does not start VMs alone).
+# Multi-VM Postgres — cached CPU-heavy RO (ro_cpu_* script), durable
+# Concurrency: {1, V/2, V, 2·V}. Piggybacks via start_with_instance.
 # ---------------------------------------------------------------------------
 
 _PGBENCH_MULTI_RO = dict(

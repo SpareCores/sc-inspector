@@ -368,9 +368,18 @@ def cdn_env_for_benchmark() -> dict[str, str]:
 
 
 def dataset_spec_for_pgbench(*, scalefactor: int) -> DatasetSpec:
-    # Schema from ``pgbench -i`` is identical for -S and tpcb-like; one dump key.
+    # Schema from ``pgbench -i`` is identical for tpcb-like; one dump key.
     return DatasetSpec(
         tool="pgbench",
         workload="init",
         filename=pgbench_filename(workload="init", scalefactor=scalefactor),
+    )
+
+
+def dataset_spec_for_pgbench_ro_cpu(*, version: str = "v1") -> DatasetSpec:
+    """Fixed ``ro_cpu_*`` cached CPU-heavy RO schema (not pgbench -i)."""
+    return DatasetSpec(
+        tool="pgbench",
+        workload="ro_cpu",
+        filename=f"pgbench-ro-cpu-{version}.sql.zst",
     )

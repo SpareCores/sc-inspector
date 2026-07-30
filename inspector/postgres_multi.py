@@ -22,8 +22,10 @@ from benchmark_tiers import (
     DB_WARMUP_SECONDS,
     IMPROVE_PCT,
     PGBENCH_GIB_PER_SCALE,
-    PGBENCH_RO_SCALE,
+    PGBENCH_RO_CPU_SCALE,
+    PGBENCH_RO_CPU_SCHEMA_GIB,
     concurrency_ladder,
+    concurrency_profile_ro,
     concurrency_search_cap,
     max_connections_for_vcpus,
     pgbench_tpcb_max_clients,
@@ -310,7 +312,23 @@ def _task_kind(task) -> str:
     raise ValueError(f"unsupported DB benchmark task: {getattr(task, 'name', task)!r}")
 
 
-def _profile_env(db_vcpus: int) -> dict[str, str]:
+def _profile_env(db_vcpus: int, *, kind: str) -> dict[str, str]:
+    if kind == "pgbench_ro":
+        anchors = concurrency_profile_ro(db_vcpus)
+        return {
+            "SC_PROFILE": "1",
+            "SC_PROFILE_VUS": ",".join(str(v) for v in anchors),
+            # Fixed profile only — no geometric ladder / adaptive search.
+            "SC_PROFILE_SEARCH": "0",
+            "SC_PROFILE_MAX_CLIENTS": str(anchors[-1]),
+            "SC_PROFILE_HARD_MAX_CLIENTS": str(anchors[-1]),
+            "SC_WARMUP_ONCE": "1",
+            "SC_WARMUP_SECONDS": str(DB_WARMUP_SECONDS),
+            "SC_SETTLE_SECONDS": str(DB_SETTLE_SECONDS),
+            "SC_RUN_SECONDS": str(DB_RUN_SECONDS),
+            "SC_RUN_VUS": str(anchors[-1]),
+            "SC_CPU_SCALE": str(PGBENCH_RO_CPU_SCALE),
+        }
     anchors = concurrency_ladder(db_vcpus)
     return {
         "SC_PROFILE": "1",
@@ -318,7 +336,6 @@ def _profile_env(db_vcpus: int) -> dict[str, str]:
         "SC_PROFILE_SEARCH": "1",
         "SC_PROFILE_IMPROVE_PCT": str(IMPROVE_PCT),
         "SC_PROFILE_MAX_CLIENTS": str(concurrency_search_cap(db_vcpus)),
-        # RO adaptive extension can use the full shared ladder.
         "SC_PROFILE_HARD_MAX_CLIENTS": str(CONCURRENCY_LADDER_MAX),
         "SC_WARMUP_ONCE": "1",
         "SC_WARMUP_SECONDS": str(DB_WARMUP_SECONDS),
@@ -350,14 +367,12 @@ def _benchmark_env(
         "SC_DURABILITY": durability,
         "SC_TOPOLOGY": "multi_vm",
         "SC_PG_IMAGE": PG_IMAGE,
-        **_profile_env(db_vcpus),
+        **_profile_env(db_vcpus, kind=kind),
     }
     if kind == "pgbench_ro":
-        scale = PGBENCH_RO_SCALE
         env.update(
             {
                 "SC_WORKLOAD": "pgbench_ro",
-                "SC_SCALEFACTOR": str(scale),
                 "SC_DB_NAME": PG_DB,
                 "SC_PGBENCH_DB": "pgbench",
             }
@@ -402,25 +417,34 @@ def _multi_vm_repro_extra(
     pgtune_share_url: str = "",
 ) -> dict[str, Any]:
     """Top-level stdout fields useful for reproducing a multi-VM run."""
-    profile_vus = concurrency_ladder(db_vcpus)
     kind = _task_kind(task)
+    profile_vus = (
+        concurrency_profile_ro(db_vcpus)
+        if kind == "pgbench_ro"
+        else concurrency_ladder(db_vcpus)
+    )
     extra: dict[str, Any] = {
         "db_vcpus": db_vcpus,
         "client_vcpus": client_vcpus,
         "db_mem_gib": mem_gib,
         "profile_vus": profile_vus,
-        "profile_search": True,
-        "profile_max_clients": concurrency_search_cap(db_vcpus),
-        "profile_hard_max_clients": CONCURRENCY_LADDER_MAX,
+        "profile_search": kind != "pgbench_ro",
+        "profile_max_clients": (
+            profile_vus[-1]
+            if kind == "pgbench_ro"
+            else concurrency_search_cap(db_vcpus)
+        ),
+        "profile_hard_max_clients": (
+            profile_vus[-1] if kind == "pgbench_ro" else CONCURRENCY_LADDER_MAX
+        ),
         "pg_image": PG_IMAGE,
         "benchmark_image": task.image,
         "durability": getattr(task, "durability", "durable"),
         "workload_kind": kind,
     }
     if kind == "pgbench_ro":
-        scale = PGBENCH_RO_SCALE
-        extra["scalefactor"] = scale
-        extra["schema_gib"] = scale * PGBENCH_GIB_PER_SCALE
+        extra["cpu_scale"] = PGBENCH_RO_CPU_SCALE
+        extra["schema_gib"] = PGBENCH_RO_CPU_SCHEMA_GIB
     else:
         scale = pgbench_tpcb_scale(mem_gib, db_vcpus)
         extra["scalefactor"] = scale
@@ -466,8 +490,8 @@ def run_multi_vm_task(
     durability = getattr(task, "durability", "durable")
     kind = _task_kind(task)
     db_host = _local_private_ip()
-    # Server must allow every client the driver may open: RO adaptive tail
-    # uses CONCURRENCY_LADDER_MAX; TPC-B uses the memory-derived scale cap.
+    # Server must allow every client the driver may open: RO peaks at 2·V;
+    # TPC-B adaptive search uses CONCURRENCY_LADDER_MAX.
     min_max_connections = max_connections_for_vcpus(vcpus)
     if kind == "pgbench_tpcb":
         min_max_connections = max(
