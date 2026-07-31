@@ -142,6 +142,28 @@ virtualization = DockerTask(
     timeout=timedelta(minutes=5),
 )
 
+# GCP Intel (n2) + AMD (t2d) standard families only — see README-db.md.
+POSTGRES_MULTI_ROLLOUT = {
+    ("gcp", "n2-standard-2"),
+    ("gcp", "n2-standard-4"),
+    ("gcp", "n2-standard-8"),
+    ("gcp", "n2-standard-16"),
+    ("gcp", "n2-standard-32"),
+    ("gcp", "n2-standard-48"),
+    ("gcp", "n2-standard-64"),
+    ("gcp", "n2-standard-80"),
+    ("gcp", "n2-standard-96"),
+    ("gcp", "n2-standard-128"),
+    ("gcp", "t2d-standard-1"),
+    ("gcp", "t2d-standard-2"),
+    ("gcp", "t2d-standard-4"),
+    ("gcp", "t2d-standard-8"),
+    ("gcp", "t2d-standard-16"),
+    ("gcp", "t2d-standard-32"),
+    ("gcp", "t2d-standard-48"),
+    ("gcp", "t2d-standard-60"),
+}
+
 # ---------------------------------------------------------------------------
 # Multi-VM Postgres — cached CPU-heavy RO (ro_cpu_* script), durable
 # Concurrency: {1, V/2, V, 2·V}. Piggybacks via start_with_instance.
@@ -150,6 +172,7 @@ virtualization = DockerTask(
 _PGBENCH_MULTI_RO = dict(
     parallel=False,
     start_with_instance=True,
+    servers_only=POSTGRES_MULTI_ROLLOUT,
     benchmark_family="pgbench_postgres_multi",
     workload_proxy="read_heavy",
     image="ghcr.io/sparecores/benchmark-pgbench-postgres:main",
@@ -166,13 +189,14 @@ pgbench_postgres_multi_ro_durable = MultiVmDbTask(
 # ---------------------------------------------------------------------------
 # Multi-VM Postgres — pgbench TPC-B (tpcb-like), async
 # Size: smallest SCHEMA_SIZE_GIB rung covering search_cap(V), ≤¼ RAM.
-# Disabled for now (run14): RTT-sensitive; peak search undershoots interstitial
+# Disabled for now: RTT-sensitive; peak search undershoots interstitial
 # rungs below V. Re-enable after peak algorithm + placement fixes.
 # ---------------------------------------------------------------------------
 
 # _PGBENCH_MULTI_TPCB = dict(
 #     parallel=False,
 #     start_with_instance=True,
+#     servers_only=POSTGRES_MULTI_ROLLOUT,
 #     benchmark_family="pgbench_postgres_multi_tpcb",
 #     workload_proxy="write_heavy",
 #     image="ghcr.io/sparecores/benchmark-pgbench-postgres:main",
