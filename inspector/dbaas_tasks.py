@@ -27,7 +27,6 @@ DBAAS_ROLLOUT = {
 
 _PGBENCH_RO = dict(
     parallel=False,
-    dbaas_only=DBAAS_ROLLOUT,
     benchmark_family="pgbench_postgres_dbaas",
     workload_proxy="read_heavy",
     image="ghcr.io/sparecores/benchmark-pgbench-postgres:main",
@@ -41,7 +40,7 @@ pgbench_postgres_dbaas_ro_durable = DbaasDbTask(
     durability="durable",
 )
 
-# Disabled for now (run14): same issues as multi-VM TPC-B. Re-enable with RO.
+# Disabled for now: same issues as multi-VM TPC-B. Re-enable with RO.
 # _PGBENCH_TPCB = dict(
 #     parallel=False,
 #     dbaas_only=DBAAS_ROLLOUT,
