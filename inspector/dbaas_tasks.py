@@ -1,11 +1,11 @@
 """DBaaS Postgres benchmark task definitions (mirror of multi-VM in tasks.py).
 
 Read-only: cached CPU-heavy ``ro_cpu_*`` script; concurrency ``{1, V/2, V, 2·V}``.
-TPC-B: geometric anchors + upward search while TPM improves ≥5%.
+TPC-B (disabled for now): geometric anchors + upward search while TPM improves ≥5%.
 
 Workloads (pgbench):
   * RO (heavy cached SQL) — durable
-  * TPC-B (tpcb-like), V-selected size ≤ cache budget — async
+  * TPC-B (tpcb-like), V-selected size ≤ cache budget — async  [commented out]
 """
 
 from datetime import timedelta
@@ -41,18 +41,19 @@ pgbench_postgres_dbaas_ro_durable = DbaasDbTask(
     durability="durable",
 )
 
-_PGBENCH_TPCB = dict(
-    parallel=False,
-    dbaas_only=DBAAS_ROLLOUT,
-    benchmark_family="pgbench_postgres_dbaas_tpcb",
-    workload_proxy="write_heavy",
-    image="ghcr.io/sparecores/benchmark-pgbench-postgres:main",
-    timeout=timedelta(minutes=180),
-    docker_opts=DB_DOCKER_OPTS,
-)
-
-pgbench_postgres_dbaas_tpcb_async = DbaasDbTask(
-    **_PGBENCH_TPCB,
-    priority=1.03,
-    durability="async",
-)
+# Disabled for now (run14): same issues as multi-VM TPC-B. Re-enable with RO.
+# _PGBENCH_TPCB = dict(
+#     parallel=False,
+#     dbaas_only=DBAAS_ROLLOUT,
+#     benchmark_family="pgbench_postgres_dbaas_tpcb",
+#     workload_proxy="write_heavy",
+#     image="ghcr.io/sparecores/benchmark-pgbench-postgres:main",
+#     timeout=timedelta(minutes=180),
+#     docker_opts=DB_DOCKER_OPTS,
+# )
+#
+# pgbench_postgres_dbaas_tpcb_async = DbaasDbTask(
+#     **_PGBENCH_TPCB,
+#     priority=1.03,
+#     durability="async",
+# )

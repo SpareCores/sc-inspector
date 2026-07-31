@@ -166,23 +166,25 @@ pgbench_postgres_multi_ro_durable = MultiVmDbTask(
 # ---------------------------------------------------------------------------
 # Multi-VM Postgres — pgbench TPC-B (tpcb-like), async
 # Size: smallest SCHEMA_SIZE_GIB rung covering search_cap(V), ≤¼ RAM.
+# Disabled for now (run14): RTT-sensitive; peak search undershoots interstitial
+# rungs below V. Re-enable after peak algorithm + placement fixes.
 # ---------------------------------------------------------------------------
 
-_PGBENCH_MULTI_TPCB = dict(
-    parallel=False,
-    start_with_instance=True,
-    benchmark_family="pgbench_postgres_multi_tpcb",
-    workload_proxy="write_heavy",
-    image="ghcr.io/sparecores/benchmark-pgbench-postgres:main",
-    timeout=timedelta(minutes=180),
-    docker_opts=DB_DOCKER_OPTS,
-)
-
-pgbench_postgres_multi_tpcb_async = MultiVmDbTask(
-    **_PGBENCH_MULTI_TPCB,
-    priority=1.03,
-    durability="async",
-)
+# _PGBENCH_MULTI_TPCB = dict(
+#     parallel=False,
+#     start_with_instance=True,
+#     benchmark_family="pgbench_postgres_multi_tpcb",
+#     workload_proxy="write_heavy",
+#     image="ghcr.io/sparecores/benchmark-pgbench-postgres:main",
+#     timeout=timedelta(minutes=180),
+#     docker_opts=DB_DOCKER_OPTS,
+# )
+#
+# pgbench_postgres_multi_tpcb_async = MultiVmDbTask(
+#     **_PGBENCH_MULTI_TPCB,
+#     priority=1.03,
+#     durability="async",
+# )
 
 # We use this benchmark to determine the "SCore" of a given instance. This should represent the relative
 # performance of it, which can be used to compare the "speed" of measured machines.
