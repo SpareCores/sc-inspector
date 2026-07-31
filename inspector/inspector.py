@@ -234,29 +234,40 @@ def start(ctx, exclude, start_only, vendor):
 
 @cli.command("start-dbaas")
 @click.pass_context
-@click.option("--vendor", type=str, default="azure", help="Only start DBaaS targets for the specified vendor")
+@click.option("--vendor", type=str, default="gcp", help="Only start DBaaS targets for the specified vendor")
 @click.option(
     "--instance-key",
     type=str,
     default=None,
-    help="Only start this managed DB instance key (e.g. Standard_E16ds_v5/postgres/18/standalone)",
+    help="Only start this managed DB instance key (e.g. db-perf-optimized-N-8/postgres/18/standalone)",
 )
-def start_dbaas(ctx, vendor, instance_key):
-    """Start managed Postgres benchmark stacks (DBaaS PoC)."""
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Max DBaaS stacks to start this round (default: DBAAS_START_LIMIT or 4)",
+)
+def start_dbaas(ctx, vendor, instance_key, limit):
+    """Start managed Postgres benchmark stacks, advancing through the catalog over rounds."""
     from dbaas_catalog import available_managed_dbs
     from dbaas_selector import dbaas_data_dir
     from dbaas_start import start_dbaas_inspect
     import concurrent.futures
     import threading
-    import traceback
+
+    if limit is None:
+        limit = int(os.environ.get("DBAAS_START_LIMIT", "4"))
+    if limit < 1:
+        raise click.ClickException("--limit must be >= 1")
 
     threading.current_thread().name = "main"
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(8, limit))
     lock = threading.Lock()
     futures = {}
-    for (vnd, key), (target, regions, zones, zone_to_region) in available_managed_dbs(
-        vendor=vendor
-    ).items():
+    count = 0
+    for (vnd, key), (target, regions, zones, zone_to_region) in lib.sort_managed_dbs_for_start(
+        available_managed_dbs(vendor=vendor)
+    ):
         if instance_key and key != instance_key:
             continue
         data_dir = dbaas_data_dir(ctx.parent.params["repo_path"], vnd, key)
@@ -264,6 +275,7 @@ def start_dbaas(ctx, vendor, instance_key):
         if not tasks:
             logging.info("No DBaaS tasks for %s/%s", vnd, key)
             continue
+        logging.info("Starting DBaaS stack %s/%s (%d/%d this round)", vnd, key, count + 1, limit)
         futures[
             executor.submit(
                 start_dbaas_inspect,
@@ -278,6 +290,11 @@ def start_dbaas(ctx, vendor, instance_key):
                 zone_to_region,
             )
         ] = (vnd, key)
+        count += 1
+        if instance_key or count >= limit:
+            break
+    if instance_key and count == 0:
+        logging.warning("No startable DBaaS tasks for --instance-key %s", instance_key)
     error_occurred = False
     for f in concurrent.futures.as_completed(futures):
         vnd, key = futures[f]

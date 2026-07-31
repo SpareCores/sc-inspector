@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import TypeAlias
 
 ManagedDbCatalog: TypeAlias = dict[
     tuple[str, str],
     tuple["ManagedDbTarget", list[str], list[str], dict[str, str | None]],
 ]
+
+_STATIC_CATALOG_PATH = Path(__file__).with_name("dbaas_catalog_static.json")
+
+# Default deployable-region subset (PoC). Set DBAAS_GCP_REGIONS=all to use every
+# region listed for a GCP target in the static JSON; or a comma-separated list.
+_GCP_POC_REGIONS = ("us-central1", "us-east1", "europe-west1")
 
 
 @dataclass(frozen=True)
@@ -32,110 +41,30 @@ class ManagedDbTarget:
         return f"{self.native_id}/postgres/{self.engine_version}/{self.ha_mode}"
 
 
-_GCP_POC_REGIONS = [
-    # PoC subset of regions from sc-scratch/attila/managed_dbs/gcp.json (tier POSTGRES_18).
-    "us-central1",
-    "us-east1",
-    "europe-west1",
-]
+def _gcp_region_allowlist() -> set[str] | None:
+    raw = os.environ.get("DBAAS_GCP_REGIONS", "").strip()
+    if not raw:
+        return set(_GCP_POC_REGIONS)
+    if raw.lower() == "all":
+        return None
+    return {r.strip() for r in raw.split(",") if r.strip()}
 
-_GCP_POC_ZONES = [
-    "us-central1-a",
-    "us-central1-b",
-    "us-central1-c",
-    "us-central1-f",
-    "us-east1-b",
-    "us-east1-c",
-    "us-east1-d",
-    "europe-west1-b",
-    "europe-west1-c",
-    "europe-west1-d",
-]
 
-STATIC_MANAGED_DB_TARGETS: tuple[ManagedDbTarget, ...] = (
-    ManagedDbTarget(
-        vendor_id="azure",
-        engine="postgres",
-        native_id="Standard_E16ds_v5",
-        sku_id="Standard_E16ds_v5:MemoryOptimized:18",
-        engine_version="18",
-        ha_mode="standalone",
-        cpu_count=16,
-        memory_gib=128,
-        edition="MemoryOptimized",
-        sync_commit_session_settable=True,
-    ),
-    ManagedDbTarget(
-        vendor_id="gcp",
-        engine="postgres",
-        native_id="db-perf-optimized-N-8",
-        sku_id="db-perf-optimized-N-8:POSTGRES_18",
-        engine_version="18",
-        ha_mode="standalone",
-        cpu_count=8,
-        memory_gib=64,
-        edition="PerformanceOptimized",
-        sync_commit_session_settable=True,
-    ),
-    ManagedDbTarget(
-        vendor_id="gcp",
-        engine="postgres",
-        native_id="db-perf-optimized-N-16",
-        sku_id="db-perf-optimized-N-16:POSTGRES_18",
-        engine_version="18",
-        ha_mode="standalone",
-        cpu_count=16,
-        memory_gib=128,
-        edition="PerformanceOptimized",
-        sync_commit_session_settable=True,
-    ),
-    # Closest Cloud SQL peer to GCE n2-standard-128 (128c/512 GiB): same N2
-    # family and vCPU count; Enterprise Plus N-series is 8 GiB/vCPU → 864 GiB.
-    ManagedDbTarget(
-        vendor_id="gcp",
-        engine="postgres",
-        native_id="db-perf-optimized-N-128",
-        sku_id="db-perf-optimized-N-128:POSTGRES_18",
-        engine_version="18",
-        ha_mode="standalone",
-        cpu_count=128,
-        memory_gib=864,
-        edition="PerformanceOptimized",
-        sync_commit_session_settable=True,
-    ),
-    ManagedDbTarget(
-        vendor_id="gcp",
-        engine="postgres",
-        native_id="db-memory-optimized-N-8",
-        sku_id="db-memory-optimized-N-8:POSTGRES_18",
-        engine_version="18",
-        ha_mode="standalone",
-        cpu_count=8,
-        memory_gib=256,
-        edition="MemoryOptimized",
-        sync_commit_session_settable=True,
-    ),
-)
+@lru_cache(maxsize=1)
+def _load_static_catalog_doc() -> dict:
+    return json.loads(_STATIC_CATALOG_PATH.read_text())
 
-STATIC_TARGET_REGIONS: dict[tuple[str, str], list[str]] = {
-    ("azure", "Standard_E16ds_v5/postgres/18/standalone"): [
-        "westeurope",
-        "northeurope",
-        "centralus",
-        "westus2",
-    ],
-    ("gcp", "db-perf-optimized-N-8/postgres/18/standalone"): list(_GCP_POC_REGIONS),
-    ("gcp", "db-perf-optimized-N-16/postgres/18/standalone"): list(_GCP_POC_REGIONS),
-    ("gcp", "db-perf-optimized-N-128/postgres/18/standalone"): list(_GCP_POC_REGIONS),
-    ("gcp", "db-memory-optimized-N-8/postgres/18/standalone"): list(_GCP_POC_REGIONS),
-}
 
-STATIC_TARGET_ZONES: dict[tuple[str, str], list[str]] = {
-    ("gcp", "db-perf-optimized-N-8/postgres/18/standalone"): list(_GCP_POC_ZONES),
-    ("gcp", "db-perf-optimized-N-16/postgres/18/standalone"): list(_GCP_POC_ZONES),
-    ("gcp", "db-perf-optimized-N-128/postgres/18/standalone"): list(_GCP_POC_ZONES),
-    ("gcp", "db-memory-optimized-N-8/postgres/18/standalone"): list(_GCP_POC_ZONES),
-}
+def _zones_for_regions(
+    vendor_id: str,
+    regions: list[str],
+    zones_by_region: dict[str, dict[str, list[str]]],
+) -> list[str]:
+    vendor_zones = zones_by_region.get(vendor_id) or {}
+    out: list[str] = []
+    for region in regions:
+        out.extend(vendor_zones.get(region) or [])
+    return out
 
 
 def _available_managed_dbs_static(
@@ -144,17 +73,33 @@ def _available_managed_dbs_static(
     *,
     engine: str = "postgres",
 ) -> ManagedDbCatalog:
+    doc = _load_static_catalog_doc()
+    zones_by_region = doc.get("zones_by_region") or {}
+    gcp_allow = _gcp_region_allowlist()
     out: ManagedDbCatalog = {}
-    for target in STATIC_MANAGED_DB_TARGETS:
-        if engine != target.engine:
+    for row in doc.get("targets") or []:
+        if engine != row.get("engine"):
             continue
-        if vendor and target.vendor_id != vendor:
+        if vendor and row.get("vendor_id") != vendor:
             continue
-        key = (target.vendor_id, target.instance_key)
-        regions = list(STATIC_TARGET_REGIONS.get(key, []))
+        target = ManagedDbTarget(
+            vendor_id=row["vendor_id"],
+            engine=row["engine"],
+            native_id=row["native_id"],
+            sku_id=row["sku_id"],
+            engine_version=str(row["engine_version"]),
+            ha_mode=row.get("ha_mode") or "standalone",
+            cpu_count=float(row["cpu_count"]),
+            memory_gib=float(row["memory_gib"]),
+            edition=row.get("edition"),
+            sync_commit_session_settable=row.get("sync_commit_session_settable"),
+        )
+        regions = list(row.get("regions") or [])
+        if target.vendor_id == "gcp" and gcp_allow is not None:
+            regions = [r for r in regions if r in gcp_allow]
         if region:
             regions = [r for r in regions if r == region]
-        zones = list(STATIC_TARGET_ZONES.get(key, []))
+        zones = _zones_for_regions(target.vendor_id, regions, zones_by_region)
         if region and zones:
             zones = [z for z in zones if z.rsplit("-", 1)[0] == region]
         zone_to_region = {z: z.rsplit("-", 1)[0] for z in zones}
@@ -162,7 +107,12 @@ def _available_managed_dbs_static(
             continue
         if not regions and zones:
             regions = sorted({zone_to_region[z] for z in zones})
-        out[key] = (target, regions, zones, zone_to_region)
+        out[(target.vendor_id, target.instance_key)] = (
+            target,
+            regions,
+            zones,
+            zone_to_region,
+        )
     return out
 
 

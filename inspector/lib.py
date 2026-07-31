@@ -1567,6 +1567,14 @@ def sort_servers_for_start(available_servers: dict) -> list[tuple[tuple[str, str
     )
 
 
+def sort_managed_dbs_for_start(available_managed_dbs: dict) -> list[tuple[tuple[str, str], list]]:
+    """Return managed DB targets in deterministic hash order for start-dbaas."""
+    return sorted(
+        available_managed_dbs.items(),
+        key=lambda item: instance_start_order_key(item[0][0], item[0][1]),
+    )
+
+
 def sort_available_managed_dbs(available_managed_dbs: dict, data_dir, reverse=True, max_start=None):
     if max_start:
         available_managed_dbs = {
