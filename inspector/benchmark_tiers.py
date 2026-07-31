@@ -23,6 +23,8 @@ DISK_SCHEMA_RATIO = 2.0
 BUILD_VU_CAP = 64
 CLIENT_MIN_VCPUS = 4
 CLIENT_ABSOLUTE_MAX_VCPUS = 2048
+# Heavy RO: client is mostly idle waiting on the server (N-128 DBaaS @ c=256/j=32
+# used ≪4 of 64 vCPUs). 20 clients/vCPU is still a conservative fan-in budget.
 CLIENTS_PER_CLIENT_VCPU = 20
 
 SCHEMA_RAM_FRAC = 0.25
@@ -150,23 +152,26 @@ def pgbench_tpcb_max_clients(mem_gib: float, vcpus: int) -> int:
 def companion_design_clients(db_vcpus: int) -> int:
     """Concurrency the companion must drive without becoming the bottleneck.
 
-    RO peaks at ``2·V``; TPC-B may search up to ``concurrency_search_cap(V)``.
+    Sized for active workloads: heavy RO peaks at ``2·V``. TPC-B is disabled;
+    if re-enabled, also cover ``concurrency_search_cap(V)``.
     """
-    ro_peak = concurrency_profile_ro(db_vcpus)[-1]
-    tpcb_peak = concurrency_search_cap(db_vcpus)
-    return max(ro_peak, tpcb_peak)
+    return concurrency_profile_ro(db_vcpus)[-1]
 
 
 def companion_client_vcpus(build_vus: int, db_vcpus: int) -> int:
-    """Minimum companion vCPUs so remote pgbench is not client-bound."""
+    """Minimum companion vCPUs so remote pgbench is not client-bound.
+
+    Heavy RO is server/RTT-bound on the client side — do not mirror ``≈V/2``
+    of the DB SKU. Size from max clients ÷ ``CLIENTS_PER_CLIENT_VCPU``, floored
+    at ``CLIENT_MIN_VCPUS`` (and never above the DB vCPU count).
+    """
+    _ = build_vus  # reserved if build-heavy / TPC-B workloads return
     db_vcpus = max(1, int(db_vcpus))
     cap = min(CLIENT_ABSOLUTE_MAX_VCPUS, db_vcpus)
     min_vcpus = min(CLIENT_MIN_VCPUS, db_vcpus)
-    db_floor = max(min_vcpus, (db_vcpus + 1) // 2)
-    build_need = (int(build_vus) + 3) // 4
     design_c = companion_design_clients(db_vcpus)
     drive_need = (design_c + CLIENTS_PER_CLIENT_VCPU - 1) // CLIENTS_PER_CLIENT_VCPU
-    return min(cap, max(db_floor, build_need, drive_need))
+    return min(cap, max(min_vcpus, drive_need))
 
 
 def client_req(db_srv) -> ClientRequirements:
