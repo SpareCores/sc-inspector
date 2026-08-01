@@ -60,7 +60,21 @@ jobs:
               VERSION=$(echo "$MSG" | sed -n 's/.* version=\([^ ]*\).*/\1/p')
               IMAGE_TAG=$(echo "$MSG" | sed -n 's/.* image_tag=\([^ ]*\).*/\1/p')
             else
-              VERSION=''
+              # Explicitly resolve the latest published sparecores-runner version
+              # instead of leaving VERSION empty. Otherwise the Dockerfile's
+              # `uv pip install -r requirements.txt` step (unpinned
+              # `sparecores-runner>=X` floor) has the exact same cache key (same
+              # Dockerfile instructions + same requirements.txt bytes + same
+              # "-main" cache scope) on every regular push, so BuildKit's registry
+              # cache reuses whatever version was resolved by the *previous*
+              # regular push -- silently regressing already-released sc-runner
+              # fixes back onto :main on the very next unrelated commit, until
+              # the next sc-runner-release dispatch happens to rebuild it fresh.
+              # (Confirmed live: the 2026-08-01 07:49 "gcp_fix" push reinstalled
+              # sparecores-runner 0.0.65, undoing the 0.0.67 release built ~51min
+              # earlier.) Pinning an explicit version here keys the cache/layer
+              # to that version, so it is only ever reused when still current.
+              VERSION=$(curl -fsSL https://pypi.org/pypi/sparecores-runner/json | jq -r .info.version)
               IMAGE_TAG=''
             fi
           else
