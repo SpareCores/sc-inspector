@@ -47,34 +47,41 @@ jobs:
       checkout_ref: ${{ steps.resolve.outputs.checkout_ref }}
     steps:
       - id: resolve
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF_VALUE: ${{ github.ref }}
+          HEAD_COMMIT_MSG: ${{ github.event.head_commit.message }}
+          INPUT_SC_RUNNER_VERSION: ${{ inputs.sc_runner_version }}
+          INPUT_SC_RUNNER_IMAGE_TAG: ${{ inputs.sc_runner_image_tag }}
+          DISPATCH_VERSION: ${{ github.event.client_payload.version }}
+          DISPATCH_IMAGE_TAG: ${{ github.event.client_payload.image_tag }}
         run: |
-          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            VERSION='${{ github.event.client_payload.version }}'
-            IMAGE_TAG='${{ github.event.client_payload.image_tag }}'
-          elif [ -n '${{ inputs.sc_runner_version }}' ] || [ -n '${{ inputs.sc_runner_image_tag }}' ]; then
-            VERSION='${{ inputs.sc_runner_version }}'
-            IMAGE_TAG='${{ inputs.sc_runner_image_tag }}'
-          elif [ "${{ github.event_name }}" = "push" ]; then
-            MSG='${{ github.event.head_commit.message }}'
-            if echo "$MSG" | grep -q '^sc-runner-release '; then
-              VERSION=$(echo "$MSG" | sed -n 's/.* version=\([^ ]*\).*/\1/p')
-              IMAGE_TAG=$(echo "$MSG" | sed -n 's/.* image_tag=\([^ ]*\).*/\1/p')
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "repository_dispatch" ]; then
+            VERSION="${DISPATCH_VERSION:-}"
+            IMAGE_TAG="${DISPATCH_IMAGE_TAG:-}"
+          elif [ -n "${INPUT_SC_RUNNER_VERSION:-}" ] || [ -n "${INPUT_SC_RUNNER_IMAGE_TAG:-}" ]; then
+            VERSION="${INPUT_SC_RUNNER_VERSION:-}"
+            IMAGE_TAG="${INPUT_SC_RUNNER_IMAGE_TAG:-}"
+          elif [ "$EVENT_NAME" = "push" ]; then
+            # Pass the commit message via env (above), never via shell quoting of
+            # ${{ github.event.head_commit.message }} — apostrophes/parens in the
+            # message (e.g. "Dockerfile's") break MSG='...' and abort resolve.
+            MSG="${HEAD_COMMIT_MSG:-}"
+            if printf '%s\n' "$MSG" | head -n1 | grep -q '^sc-runner-release '; then
+              VERSION=$(printf '%s\n' "$MSG" | sed -n 's/.* version=\([^ ]*\).*/\1/p' | head -n1)
+              IMAGE_TAG=$(printf '%s\n' "$MSG" | sed -n 's/.* image_tag=\([^ ]*\).*/\1/p' | head -n1)
             else
-              # Explicitly resolve the latest published sparecores-runner version
-              # instead of leaving VERSION empty. Otherwise the Dockerfile's
-              # `uv pip install -r requirements.txt` step (unpinned
-              # `sparecores-runner>=X` floor) has the exact same cache key (same
-              # Dockerfile instructions + same requirements.txt bytes + same
-              # "-main" cache scope) on every regular push, so BuildKit's registry
-              # cache reuses whatever version was resolved by the *previous*
-              # regular push -- silently regressing already-released sc-runner
-              # fixes back onto :main on the very next unrelated commit, until
-              # the next sc-runner-release dispatch happens to rebuild it fresh.
-              # (Confirmed live: the 2026-08-01 07:49 "gcp_fix" push reinstalled
-              # sparecores-runner 0.0.65, undoing the 0.0.67 release built ~51min
-              # earlier.) Pinning an explicit version here keys the cache/layer
-              # to that version, so it is only ever reused when still current.
-              VERSION=$(curl -fsSL https://pypi.org/pypi/sparecores-runner/json | jq -r .info.version)
+              # Pin the latest published sparecores-runner explicitly. Leaving
+              # VERSION empty makes the Dockerfile `uv pip install -r
+              # requirements.txt` layer share the same cache key across every
+              # regular push (same instructions + same requirements.txt +
+              # "-main" cache scope), so BuildKit reuses whatever version the
+              # previous regular push resolved — silently regressing already
+              # released sc-runner fixes onto :main (confirmed: 2026-08-01
+              # "gcp_fix" reinstalled 0.0.65, undoing 0.0.67 ~51min earlier).
+              VERSION=$(curl -fsSL https://pypi.org/pypi/sparecores-runner/json \
+                | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])')
               IMAGE_TAG=''
             fi
           else
@@ -90,7 +97,7 @@ jobs:
           if [ -n "$VERSION" ]; then
             CHECKOUT_REF="main"
           else
-            CHECKOUT_REF="${GITHUB_REF}"
+            CHECKOUT_REF="${GITHUB_REF_VALUE}"
           fi
           echo "sc_runner_version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "sc_runner_image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
