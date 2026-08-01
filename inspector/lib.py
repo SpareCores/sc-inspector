@@ -2214,7 +2214,9 @@ def _try_start_multi_vm_inspect(
     disk_sources = planned_multi or multi_tasks
     client_req = merge_client_requirements([t.client_requirements(srv_data) for t in disk_sources])
     mem_gib = float(srv_data.memory_amount) / 1024.0
-    storage_plan = db_storage_plan(vendor, mem_gib, vcpus=int(srv_data.vcpus))
+    storage_plan = db_storage_plan(
+        vendor, mem_gib, vcpus=int(srv_data.vcpus), machine_type=server
+    )
     db_disk = storage_plan.storage_gib
     db_disk_opts = storage_plan.multi_vm_disk_opts()
     authkey = secrets.token_bytes(32)

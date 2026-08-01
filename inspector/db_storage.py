@@ -69,16 +69,38 @@ def storage_gib_for_mem(mem_gib: float) -> int:
     return max(MIN_STORAGE_GIB, int(math.ceil(need / DISK_USABLE_FRAC)))
 
 
-def db_storage_plan(vendor: str, mem_gib: float, vcpus: int = 0) -> DbStoragePlan:
+def db_storage_plan(
+    vendor: str,
+    mem_gib: float,
+    vcpus: int = 0,
+    machine_type: str | None = None,
+) -> DbStoragePlan:
     """Return the shared storage plan for ``vendor`` at ``mem_gib`` / ``vcpus``.
 
     When ``vcpus`` > 0, uses ``disk_profiles.provision_for_vcpus()`` to ensure
     sufficient I/O headroom.  The final size is the max of the schema-derived
     minimum and the I/O-scaled provision.
+
+    ``machine_type`` (GCE name or Cloud SQL tier) selects Hyperdisk when the
+    series rejects Persistent Disk (C4/N4/…).
     """
     schema_min_gib = storage_gib_for_mem(mem_gib)
     vendor_lower = (vendor or "").lower()
     disk_type = DEFAULT_DISK_TYPES.get(vendor_lower, "")
+    if vendor_lower == "gcp" and machine_type:
+        try:
+            from sc_runner.gcp_disks import (
+                GCE_HYPERDISK_BALANCED,
+                cloud_sql_requires_hyperdisk,
+                gcp_requires_hyperdisk,
+            )
+        except ImportError:
+            pass
+        else:
+            if gcp_requires_hyperdisk(machine_type) or cloud_sql_requires_hyperdisk(
+                machine_type
+            ):
+                disk_type = GCE_HYPERDISK_BALANCED
 
     if vcpus > 0 and disk_type:
         provision = provision_for_vcpus(
@@ -86,7 +108,7 @@ def db_storage_plan(vendor: str, mem_gib: float, vcpus: int = 0) -> DbStoragePla
         )
         plan = _plan_from_provision(provision, vendor_lower)
     elif vendor_lower == "gcp":
-        plan = _gcp_plan(schema_min_gib)
+        plan = _gcp_plan(schema_min_gib, disk_type=disk_type or "pd-ssd")
     elif vendor_lower == "azure":
         plan = _azure_plan(schema_min_gib, vcpus)
     elif vendor_lower == "aws":
@@ -110,6 +132,7 @@ def _plan_from_provision(p: DiskProvision, vendor: str) -> DbStoragePlan:
     """Convert a DiskProvision to a DbStoragePlan."""
     edition_map = {
         ("gcp", "pd-ssd"): "PD_SSD",
+        ("gcp", "hyperdisk-balanced"): "HYPERDISK_BALANCED",
         ("azure", "PremiumV2_LRS"): "ManagedDiskV2",
         ("aws", "gp3"): "gp3",
     }
@@ -128,12 +151,15 @@ def _plan_from_provision(p: DiskProvision, vendor: str) -> DbStoragePlan:
     )
 
 
-def _gcp_plan(storage_gib: int) -> DbStoragePlan:
+def _gcp_plan(storage_gib: int, disk_type: str = "pd-ssd") -> DbStoragePlan:
+    edition = (
+        "HYPERDISK_BALANCED" if disk_type == "hyperdisk-balanced" else "PD_SSD"
+    )
     return DbStoragePlan(
         vendor="gcp",
         storage_gib=storage_gib,
-        storage_type="pd-ssd",
-        storage_edition="PD_SSD",
+        storage_type=disk_type,
+        storage_edition=edition,
         iops=None,
         throughput_mb_s=None,
         iops_tier="",
@@ -201,11 +227,18 @@ def _apply_env_overrides(plan: DbStoragePlan) -> DbStoragePlan:
     )
 
 
-def dbaas_storage_fields(plan: DbStoragePlan) -> dict[str, Any]:
+def dbaas_storage_fields(plan: DbStoragePlan, tier: str | None = None) -> dict[str, Any]:
     """Fields merged into ``dbaas_tiers.provision_spec``."""
     storage_type = plan.storage_type
     if plan.vendor == "gcp":
-        storage_type = "PD_SSD"
+        storage_type = plan.storage_edition or "PD_SSD"
+        if tier:
+            try:
+                from sc_runner.gcp_disks import cloud_sql_disk_type
+            except ImportError:
+                pass
+            else:
+                storage_type = cloud_sql_disk_type(tier, storage_type)
     return {
         "storage_gib": plan.storage_gib,
         "storage_type": storage_type,
