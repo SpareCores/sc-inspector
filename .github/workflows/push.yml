@@ -64,9 +64,11 @@ jobs:
             VERSION="${INPUT_SC_RUNNER_VERSION:-}"
             IMAGE_TAG="${INPUT_SC_RUNNER_IMAGE_TAG:-}"
           elif [ "$EVENT_NAME" = "push" ]; then
-            # Pass the commit message via env (above), never via shell quoting of
-            # ${{ github.event.head_commit.message }} — apostrophes/parens in the
-            # message (e.g. "Dockerfile's") break MSG='...' and abort resolve.
+            # Pass the commit message via the HEAD_COMMIT_MSG env var set above,
+            # never by interpolating it directly into this shell script: GitHub
+            # Actions expands expressions everywhere in a run: block, even
+            # inside comments, and the raw commit message can contain
+            # apostrophes/parens (e.g. "Dockerfile's") that break shell syntax.
             MSG="${HEAD_COMMIT_MSG:-}"
             if printf '%s\n' "$MSG" | head -n1 | grep -q '^sc-runner-release '; then
               VERSION=$(printf '%s\n' "$MSG" | sed -n 's/.* version=\([^ ]*\).*/\1/p' | head -n1)
