@@ -2318,7 +2318,11 @@ def _try_start_multi_vm_inspect(
         )
         extra = {}
         if vendor == "azure":
-            image_sku = "server-arm64" if "arm" in srv_data.cpu_architecture else "server"
+            image_sku = (
+                "server-arm64"
+                if "arm" in (srv_data.cpu_architecture or "").lower()
+                else "server"
+            )
             extra["image_sku"] = image_sku
         try:
             retry_locked(
@@ -2573,7 +2577,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         # explicitly set SSH key from envvar
         resource_opts = dict(public_key=os.environ.get("SSH_PUBLIC_KEY"), instance=server, disk_size=VOLUME_SIZE)
         image_sku = "server"
-        if "arm" in srv_data.cpu_architecture:
+        if "arm" in (srv_data.cpu_architecture or "").lower():
             image_sku = "server-arm64"
         done = False
         for region in candidate_regions(vendor, server, regions):
@@ -2629,10 +2633,12 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         resource_opts = dict(instance=server, disk_size=VOLUME_SIZE)
         # select the first zone from the list, work on a copy as we modify it
         bootdisk_init_opts = copy.deepcopy(default(getattr(sc_runner.resources, vendor).DEFAULTS, "bootdisk_init_opts"))
-        if "arm" in srv_data.cpu_architecture:
-            bootdisk_init_opts |= dict(image="ubuntu-2404-lts-arm64")
-        else:
-            bootdisk_init_opts |= dict(image="ubuntu-2404-lts-amd64")
+        series = server.split("-", 1)[0].lower()
+        # image/architecture are left unset here: sc_runner's resources_gcp()
+        # always calls apply_gcp_boot_disk_defaults() before creating the
+        # instance, which fills them in from the same Server.cpu_architecture
+        # catalog field (now backed by GCP's real MachineType.architecture API
+        # field) — duplicating that lookup here would be redundant.
         # -416 machines won't boot with ubuntu-2404 (or any other ubuntu images), so use Debian for them
         if server.endswith("-416"):
             if "arm" in srv_data.cpu_architecture:
@@ -2641,20 +2647,31 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 bootdisk_init_opts |= dict(image="debian-12")
 
         # e2 needs to be spot; we only have spot quota for GPU instances.
-        # GPU machine types (G2/G4/A*) always have accelerators even when the
-        # catalog gpu_count is missing/0 — and accelerators cannot live-migrate.
+        # srv_data.gpu_count is reliably populated by the crawler for every GPU
+        # family (A2/A3/A4/A4X/G2/G4), unlike cpu_architecture above, so no
+        # hardcoded series list is needed here — accelerators cannot live-migrate.
         # https://cloud.google.com/compute/docs/gpus/gpu-host-maintenance
         # https://cloud.google.com/compute/docs/instances/setting-vm-host-options
-        series = server.split("-", 1)[0].lower()
-        gpu_series = {"a2", "a3", "a4", "a4x", "g2", "g4"}
-        has_gpu = (srv_data.gpu_count or 0) > 0 or series in gpu_series
+        has_gpu = (srv_data.gpu_count or 0) > 0
         is_preemptible = server.startswith("e2") or has_gpu
-        # Spot/preemptible, GPUs/TPUs, H4D (RDMA), and bare metal require TERMINATE.
+        # Spot/preemptible, GPUs/TPUs, H4D (RDMA), bare metal, and Z3 with
+        # >18 TiB Titanium SSD require TERMINATE (smaller Z3 still use MIGRATE).
+        # Unlike GPU/architecture above, the crawler has no field for this (no
+        # "supported host maintenance policies" column), so it stays a static rule.
+        # https://cloud.google.com/compute/docs/storage-optimized-machines
+        z3_terminate = series == "z3" and (
+            server.endswith("-metal")
+            or server.endswith("-176-standardlssd")
+            or server.endswith("-88-highlssd")
+            or server.endswith("-176")
+            or "192" in server
+        )
         requires_terminate = (
             is_preemptible
             or has_gpu
             or series == "h4d"
             or server.endswith("-metal")
+            or z3_terminate
         )
         resource_opts |= dict(bootdisk_init_opts=bootdisk_init_opts,
                               scheduling_opts=dict(
