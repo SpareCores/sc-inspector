@@ -2640,14 +2640,30 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             else:
                 bootdisk_init_opts |= dict(image="debian-12")
 
-        # e2 needs to be spot, also, we have only spot quotas for selected GPU instances
-        is_preemptible = server.startswith("e2") or srv_data.gpu_count > 0
+        # e2 needs to be spot; we only have spot quota for GPU instances.
+        # GPU machine types (G2/G4/A*) always have accelerators even when the
+        # catalog gpu_count is missing/0 — and accelerators cannot live-migrate.
+        # https://cloud.google.com/compute/docs/gpus/gpu-host-maintenance
+        # https://cloud.google.com/compute/docs/instances/setting-vm-host-options
+        series = server.split("-", 1)[0].lower()
+        gpu_series = {"a2", "a3", "a4", "a4x", "g2", "g4"}
+        has_gpu = (srv_data.gpu_count or 0) > 0 or series in gpu_series
+        is_preemptible = server.startswith("e2") or has_gpu
+        # Spot/preemptible, GPUs/TPUs, H4D (RDMA), and bare metal require TERMINATE.
+        requires_terminate = (
+            is_preemptible
+            or has_gpu
+            or series == "h4d"
+            or server.endswith("-metal")
+        )
         resource_opts |= dict(bootdisk_init_opts=bootdisk_init_opts,
                               scheduling_opts=dict(
                                   preemptible=is_preemptible,
                                   automatic_restart=False if is_preemptible else True,
-                                  # preemptible/spot VMs require TERMINATE; standard VMs (e.g. z3-highmem) require MIGRATE
-                                  on_host_maintenance="TERMINATE" if is_preemptible else "MIGRATE"),
+                                  on_host_maintenance=(
+                                      "TERMINATE" if requires_terminate else "MIGRATE"
+                                  ),
+                              ),
                               )
         # enable nested virtualization
         for zone in candidate_zones(vendor, server, zones):
