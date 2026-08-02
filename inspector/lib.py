@@ -110,6 +110,11 @@ RETRYABLE_START_ERROR_MARKERS = (
     "OperationNotAllowed",
     "exceeding approved",
     "QuotaExceeded",
+    # GCP: Quota 'CPUS' / 'N2_CPUS' / 'NETWORKS' / … exceeded
+    "Quota '",
+    # UpCloud: CPU core quota of N exceeded … (type=SERVER_CORE_LIMIT_REACHED)
+    "SERVER_CORE_LIMIT_REACHED",
+    "CPU core quota",
 )
 # provision machines with storage (GiB)
 VOLUME_SIZE = 128
