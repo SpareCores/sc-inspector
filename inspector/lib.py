@@ -2027,6 +2027,12 @@ def is_retryable_pulumi_error(exc: BaseException, error_msgs: list[str] | None =
     return any(marker in text for marker in RETRYABLE_START_ERROR_MARKERS)
 
 
+def is_gcp_host_maintenance_policy_error(error_text: str) -> bool:
+    """True if GCP rejected the instance for an invalid onHostMaintenance value."""
+    lowered = error_text.lower()
+    return "onhostmaintenance" in lowered or "on_host_maintenance" in lowered
+
+
 def is_pulumi_error_summary(message: str) -> bool:
     stripped = message.strip()
     if PULUMI_ERROR_SUMMARY.search(stripped):
@@ -2633,7 +2639,6 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         resource_opts = dict(instance=server, disk_size=VOLUME_SIZE)
         # select the first zone from the list, work on a copy as we modify it
         bootdisk_init_opts = copy.deepcopy(default(getattr(sc_runner.resources, vendor).DEFAULTS, "bootdisk_init_opts"))
-        series = server.split("-", 1)[0].lower()
         # image/architecture are left unset here: sc_runner's resources_gcp()
         # always calls apply_gcp_boot_disk_defaults() before creating the
         # instance, which fills them in from the same Server.cpu_architecture
@@ -2654,25 +2659,6 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         # https://cloud.google.com/compute/docs/instances/setting-vm-host-options
         has_gpu = (srv_data.gpu_count or 0) > 0
         is_preemptible = server.startswith("e2") or has_gpu
-        # Spot/preemptible, GPUs/TPUs, H4D (RDMA), bare metal, and Z3 with
-        # >18 TiB Titanium SSD require TERMINATE (smaller Z3 still use MIGRATE).
-        # Unlike GPU/architecture above, the crawler has no field for this (no
-        # "supported host maintenance policies" column), so it stays a static rule.
-        # https://cloud.google.com/compute/docs/storage-optimized-machines
-        z3_terminate = series == "z3" and (
-            server.endswith("-metal")
-            or server.endswith("-176-standardlssd")
-            or server.endswith("-88-highlssd")
-            or server.endswith("-176")
-            or "192" in server
-        )
-        requires_terminate = (
-            is_preemptible
-            or has_gpu
-            or series == "h4d"
-            or server.endswith("-metal")
-            or z3_terminate
-        )
         # a3-highgpu-{1,2,4}g (and other <8-GPU A3 sizes) reject the legacy
         # preemptible=true flag alone: without an explicit provisioning_model,
         # GCP silently keeps it STANDARD, which then conflicts with the
@@ -2680,16 +2666,23 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         # "must have onHostMaintenance be [TERMINATE]. But was MIGRATE" error
         # (that's GCP's own internal recompute, not what we actually sent).
         # https://cloud.google.com/compute/docs/accelerator-optimized-machines
-        resource_opts |= dict(bootdisk_init_opts=bootdisk_init_opts,
-                              scheduling_opts=dict(
-                                  preemptible=is_preemptible,
-                                  automatic_restart=False if is_preemptible else True,
-                                  on_host_maintenance=(
-                                      "TERMINATE" if requires_terminate else "MIGRATE"
-                                  ),
-                                  provisioning_model="SPOT" if is_preemptible else "STANDARD",
-                              ),
-                              )
+        # MachineType has no supported-onHostMaintenance field. Default to the
+        # common policy (MIGRATE); on a policy reject, fall back to TERMINATE
+        # (H4D, bare metal, large Z3, …). Spot/preemptible only allows TERMINATE.
+        if is_preemptible:
+            maintenance_attempts = ("TERMINATE",)
+        else:
+            maintenance_attempts = ("MIGRATE", "TERMINATE")
+        scheduling_opts = dict(
+            preemptible=is_preemptible,
+            automatic_restart=False if is_preemptible else True,
+            on_host_maintenance=maintenance_attempts[0],
+            provisioning_model="SPOT" if is_preemptible else "STANDARD",
+        )
+        resource_opts |= dict(
+            bootdisk_init_opts=bootdisk_init_opts,
+            scheduling_opts=scheduling_opts,
+        )
         # enable nested virtualization
         for zone in candidate_zones(vendor, server, zones):
             logging.info(f"Trying {zone}")
@@ -2705,22 +2698,49 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             # before starting, destroy everything to make sure the user-data will run (this is the first boot)
             runner.destroy(vendor, pulumi_opts, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
 
-            pulumi_output = []
-            stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger, instance_timing, server)
-            try:
-                retry_locked(runner.create, vendor, pulumi_opts,
-                             resource_opts | dict(instance_opts=instance_opts),
-                             stack_opts=stack_opts, instance_timing=instance_timing,
-                             error_msgs=error_msgs)
-                # empty it if create succeeded, just in case
+            for attempt, maintenance in enumerate(maintenance_attempts):
+                scheduling_opts["on_host_maintenance"] = maintenance
+                logging.info(
+                    f"GCP create attempt {attempt + 1} in {zone} with on_host_maintenance={maintenance}"
+                )
                 error_msgs = []
-                instance_started = True
+                pulumi_output = []
+                stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger, instance_timing, server)
+                try:
+                    retry_locked(runner.create, vendor, pulumi_opts,
+                                 resource_opts | dict(instance_opts=instance_opts),
+                                 stack_opts=stack_opts, instance_timing=instance_timing,
+                                 error_msgs=error_msgs)
+                    # empty it if create succeeded, just in case
+                    error_msgs = []
+                    instance_started = True
+                    break
+                except Exception as e:
+                    error_text = pulumi_error_text(e, error_msgs) + "\n" + "\n".join(pulumi_output)
+                    can_fallback = (
+                        attempt + 1 < len(maintenance_attempts)
+                        and is_gcp_host_maintenance_policy_error(error_text)
+                    )
+                    if can_fallback:
+                        nxt = maintenance_attempts[attempt + 1]
+                        logging.exception(
+                            f"on_host_maintenance={maintenance} rejected for {server}, "
+                            f"retrying with {nxt}"
+                        )
+                        runner.destroy(
+                            vendor,
+                            pulumi_opts,
+                            resource_opts,
+                            stack_opts=dict(on_output=pulumi_on_output(instance_logger)),
+                        )
+                        continue
+                    # on failure, try the next zone
+                    logging.exception("Couldn't start instance")
+                    if not error_msgs:
+                        error_msgs.append(str(e))
+                    break
+            if instance_started:
                 break
-            except Exception as e:
-                # on failure, try the next one
-                logging.exception("Couldn't start instance")
-                if not error_msgs:
-                    error_msgs.append(str(e))
 
     if instance_started and instance_timing.complete() and any(task.always_run for task in tasks):
         with lock:
