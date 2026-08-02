@@ -143,13 +143,24 @@ def cli(repo_path):
 @click.option("--exclude", type=(str, str), default=EXCLUDE_INSTANCES, multiple=True, help="Exclude $vendor $instance")
 @click.option("--start-only", type=(str, str), multiple=True, help="Start only $vendor $instance")
 @click.option("--vendor", type=str, default=None, help="Only start instances for the specified vendor")
-def start(ctx, exclude, start_only, vendor):
+@click.option(
+    "--limit",
+    type=int,
+    default=None,
+    help="Max hosts to start this round (default: START_LIMIT env or 8)",
+)
+def start(ctx, exclude, start_only, vendor, limit):
     from sc_runner.resources import supported_vendors
     import concurrent.futures
     import threading
     import traceback
 
     threading.current_thread().name = "main"
+
+    if limit is None:
+        limit = int(os.environ.get("START_LIMIT", "8"))
+    if limit < 1:
+        raise click.ClickException("--limit must be >= 1")
 
     futures = {}
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1024)
@@ -186,11 +197,17 @@ def start(ctx, exclude, start_only, vendor):
         if not tasks:
             logging.info(f"No tasks for {vnd}/{server}")
             continue
+        logging.info(
+            "Starting host %s/%s (%d/%d this round)",
+            vnd,
+            server,
+            count + 1,
+            limit,
+        )
         f = executor.submit(lib.start_inspect, executor, lock, data_dir, vnd, server, tasks, srv_data, regions, zones, zone_to_region)
         futures[f] = (vnd, server)
         count += 1
-        limit = 8 if vnd in {"alicloud", "aws", "upcloud", "vultr", "azure", "gcp"} else 1
-        if count == limit:
+        if start_only or count >= limit:
             break
     for f in concurrent.futures.as_completed(futures):
         vendor, server = futures[f]
