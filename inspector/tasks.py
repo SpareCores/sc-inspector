@@ -376,21 +376,21 @@ llm = DockerTask(
 # Unified vLLM: probe GPU → Hub CPU → AVX2 CPU images, then GuideLLM benchmark on first probe success.
 # Output under data/.../vllm/ (no fallback after benchmark starts).
 
-vllm = VllmDockerTask(
-    parallel=False,
-    timeout=timedelta(hours=3),
-    minimum_memory=4,
-    priority=14,
-    images=[
-        "ghcr.io/sparecores/benchmark-vllm-gpu:main",
-        "ghcr.io/sparecores/benchmark-vllm-cpu:main",
-        "ghcr.io/sparecores/benchmark-vllm-cpu-avx2:main",
-    ],
-    docker_opts=VLLM_DOCKER_OPTS | tracker_docker_opts("vllm"),
-    command=None,
-    version_command="--version",
-    start_with_instance=True,
-)
+# vllm = VllmDockerTask(
+#     parallel=False,
+#     timeout=timedelta(hours=3),
+#     minimum_memory=4,
+#     priority=14,
+#     images=[
+#         "ghcr.io/sparecores/benchmark-vllm-gpu:main",
+#         "ghcr.io/sparecores/benchmark-vllm-cpu:main",
+#         "ghcr.io/sparecores/benchmark-vllm-cpu-avx2:main",
+#     ],
+#     docker_opts=VLLM_DOCKER_OPTS | tracker_docker_opts("vllm"),
+#     command=None,
+#     version_command="--version",
+#     start_with_instance=True,
+# )
 
 # An extended version of the multicore StressNg task: running
 # stress-ng for an increasing number of seconds per minute, then
