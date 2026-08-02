@@ -2673,6 +2673,13 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             or server.endswith("-metal")
             or z3_terminate
         )
+        # a3-highgpu-{1,2,4}g (and other <8-GPU A3 sizes) reject the legacy
+        # preemptible=true flag alone: without an explicit provisioning_model,
+        # GCP silently keeps it STANDARD, which then conflicts with the
+        # GPU-mandated onHostMaintenance=TERMINATE and fails with a confusing
+        # "must have onHostMaintenance be [TERMINATE]. But was MIGRATE" error
+        # (that's GCP's own internal recompute, not what we actually sent).
+        # https://cloud.google.com/compute/docs/accelerator-optimized-machines
         resource_opts |= dict(bootdisk_init_opts=bootdisk_init_opts,
                               scheduling_opts=dict(
                                   preemptible=is_preemptible,
@@ -2680,6 +2687,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                                   on_host_maintenance=(
                                       "TERMINATE" if requires_terminate else "MIGRATE"
                                   ),
+                                  provisioning_model="SPOT" if is_preemptible else "STANDARD",
                               ),
                               )
         # enable nested virtualization
