@@ -688,25 +688,6 @@ def cleanup_s3_stack(vendor: str, records: list, *, data_dir: str | None = None)
         s3_runs.delete_run_record(key)
 
 
-@cli.command("cleanup-sweep")
-@click.pass_context
-@click.option("--threads", type=int, default=64, show_default=True,
-              help="Number of threads to run Pulumi concurrently. Each thread consumes around 60 MiB of RAM.")
-@click.option("--force/--no-force", type=bool, default=False, help="Do a cleanup even if there's no meta for the server")
-@click.option("--all-regions/--no-all-regions", type=bool, default=False,
-              help="Clean up in all regions, not just in those which list the server as available")
-@click.option(
-    "--lookback-mins",
-    type=int,
-    default=None,
-    help="Fixed lookback in minutes (daily safety net). Default: task-timeout-based window.",
-)
-@click.option(
-    "--data-only/--no-data-only",
-    default=False,
-    help="Only consider servers with a data directory in the repo (skips the full catalog).",
-)
-@click.option("--vendor", type=str, default=None, help="Only clean up resources for the specified vendor")
 def _run_meta_cleanup_for_vendor(
     repo_path: str,
     vendor: str | None,
