@@ -427,6 +427,20 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
         destroy = f"Forced cleanup of {vendor}/{server}"
 
     if destroy:
+        # Catalog/plan regions can lag behind where start actually created stacks
+        # (failed retries, ACTIVE-price churn). Always union locations discovered
+        # from the Pulumi S3 backend so orphans in other regions/zones are hit.
+        import pulumi_backend
+
+        backend_regions, backend_zones = pulumi_backend.locations_for_instance(vendor, server)
+        regions = list(dict.fromkeys([*(regions or []), *backend_regions]))
+        zones = list(dict.fromkeys([*(zones or []), *backend_zones]))
+        if not regions and not zones:
+            logging.warning(
+                "%s/%s due for destroy but no catalog or Pulumi backend locations to target",
+                vendor,
+                server,
+            )
         resource_opts = {}
         destroy_errors = []
         destroy_attempted = []
@@ -693,56 +707,130 @@ def cleanup_s3_stack(vendor: str, records: list, *, data_dir: str | None = None)
     help="Only consider servers with a data directory in the repo (skips the full catalog).",
 )
 @click.option("--vendor", type=str, default=None, help="Only clean up resources for the specified vendor")
-def cleanup_sweep(ctx, threads, force, all_regions, lookback_mins, data_only, vendor):
-    """Catalog/meta-driven cleanup sweep (daily safety net)."""
+def _run_meta_cleanup_for_vendor(
+    repo_path: str,
+    vendor: str | None,
+    *,
+    threads: int,
+    lookback_mins: int | None = None,
+    data_only: bool = True,
+    force: bool = False,
+    all_regions: bool = False,
+) -> None:
+    """Meta-driven destroy using catalog + Pulumi-backend locations (shared by cleanup jobs)."""
     from sc_runner.resources import supported_vendors
     import concurrent.futures
+    import pulumi_backend
 
-    repo_data = os.path.join(ctx.parent.params["repo_path"], "data")
+    repo_data = os.path.join(repo_path, "data")
     candidates = available_servers(vendor=vendor)
-    candidates = {
-        k: v
-        for k, v in candidates.items()
-        if lib.should_scan_for_cleanup(
-            repo_data, k[0], k[1], lookback_mins=lookback_mins, data_only=data_only
+    # Include instances that still have Pulumi stacks even if they dropped out of
+    # the ACTIVE price catalog (otherwise orphans in retired regions are ignored).
+    for vnd in ([vendor] if vendor else sorted(supported_vendors)):
+        if vnd not in supported_vendors:
+            continue
+        for instance in pulumi_backend.instances_with_stacks(vnd):
+            key = (vnd, instance)
+            if key in candidates:
+                continue
+            if force or lib.should_scan_for_cleanup(
+                repo_data, vnd, instance, lookback_mins=lookback_mins, data_only=data_only
+            ):
+                candidates[key] = [None, [], [], {}]
+                logging.info(
+                    "Adding %s/%s to meta cleanup from Pulumi backend stacks",
+                    vnd,
+                    instance,
+                )
+    if not force:
+        candidates = {
+            k: v
+            for k, v in candidates.items()
+            if k[0] in supported_vendors
+            and lib.should_scan_for_cleanup(
+                repo_data, k[0], k[1], lookback_mins=lookback_mins, data_only=data_only
+            )
+        }
+    else:
+        candidates = {k: v for k, v in candidates.items() if k[0] in supported_vendors}
+    if not candidates:
+        logging.info(
+            "Meta cleanup: no servers to scan%s",
+            f" for {vendor}" if vendor else "",
         )
-    }
+        return
+
     futures = []
     servers = lib.sort_available_servers(candidates, data_dir=repo_data)
     with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
-        for (vendor, server), (_, regions, zones, _zone_to_region) in servers:
+        for (vnd, server), (_, regions, zones, _zone_to_region) in servers:
             if all_regions:
-                regions = get_regions(vendor)
-            elif vendor == "vultr":
+                regions = get_regions(vnd)
+            elif vnd == "vultr":
                 regions = lib.vultr_cleanup_regions(server, list(regions))
-            if vendor not in supported_vendors:
-                # sc-runner can't yet handle this vendor
-                continue
-            data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
-            # process the cleanup in a thread as getting Pulumi state is very slow
-            if vendor in {"gcp"}:
-                # we use zones with these vendors
+            # Always merge locations from Pulumi checkpoints so stacks left in
+            # regions no longer in the catalog are still destroyed.
+            backend_regions, backend_zones = pulumi_backend.locations_for_instance(vnd, server)
+            regions = list(dict.fromkeys([*list(regions or []), *backend_regions]))
+            zones = list(dict.fromkeys([*list(zones or []), *backend_zones]))
+            data_dir = os.path.join(repo_path, "data", vnd, server)
+            if vnd in {"gcp"}:
                 futures.append(
-                    [vendor, server, executor.submit(cleanup_task, vendor, server, data_dir, zones=zones, force=force)]
+                    (vnd, server, executor.submit(
+                        cleanup_task, vnd, server, data_dir, zones=zones, force=force
+                    ))
                 )
             else:
-                # others use regions
                 futures.append(
-                    [vendor, server, executor.submit(cleanup_task, vendor, server, data_dir, regions=regions, force=force)]
+                    (vnd, server, executor.submit(
+                        cleanup_task, vnd, server, data_dir, regions=regions, force=force
+                    ))
                 )
-
-        error_occurred = False
-        for vendor, server, f in futures:
+        failures = False
+        for vnd, server, future in futures:
             try:
-                f.result()
+                future.result()
             except Exception:
-                logging.exception(f"Error in processing {vendor}/{server}")
-                error_occurred = True
+                logging.exception("Meta cleanup failed for %s/%s", vnd, server)
+                failures = True
+        if failures:
+            raise Exception("Errors occurred during meta cleanup")
 
-        if error_occurred:
-            raise Exception("Errors occurred during cleanup")
+
+@cli.command("cleanup-sweep")
+@click.pass_context
+@click.option("--threads", type=int, default=64, show_default=True,
+              help="Number of threads to run Pulumi concurrently. Each thread consumes around 60 MiB of RAM.")
+@click.option("--force/--no-force", type=bool, default=False, help="Do a cleanup even if there's no meta for the server")
+@click.option("--all-regions/--no-all-regions", type=bool, default=False,
+              help="Clean up in all regions, not just in those which list the server as available")
+@click.option(
+    "--lookback-mins",
+    type=int,
+    default=None,
+    help="Fixed lookback in minutes (daily safety net). Default: task-timeout-based window.",
+)
+@click.option(
+    "--data-only/--no-data-only",
+    default=False,
+    help="Only consider servers with a data directory in the repo (skips the full catalog).",
+)
+@click.option("--vendor", type=str, default=None, help="Only clean up resources for the specified vendor")
+def cleanup_sweep(ctx, threads, force, all_regions, lookback_mins, data_only, vendor):
+    """Catalog/meta-driven cleanup sweep (daily safety net)."""
+    from sc_runner.resources import supported_vendors
 
     repo_path = ctx.parent.params["repo_path"]
+    _run_meta_cleanup_for_vendor(
+        repo_path,
+        vendor,
+        threads=threads,
+        lookback_mins=lookback_mins,
+        data_only=data_only,
+        force=force,
+        all_regions=all_regions,
+    )
+
     repo_dbaas = os.path.join(repo_path, "dbaas")
     dbaas_catalog = _dbaas_catalog_for_cleanup(
         vendor,
@@ -778,6 +866,7 @@ def cleanup(ctx, threads, vendor):
     repo.get_repo()
     repo.pull()
     data_dir = os.path.join(ctx.parent.params["repo_path"], "data")
+    repo_path = ctx.parent.params["repo_path"]
 
     records = s3_runs.list_completed_runs(vendor=vendor)
     # DBaaS finished markers are owned by cleanup-dbaas / cleanup-sweep; this
@@ -788,8 +877,6 @@ def cleanup(ctx, threads, vendor):
         len(records),
         f" for {vendor}" if vendor else "",
     )
-    if not records:
-        return
 
     stacks: dict[tuple, list] = defaultdict(list)
     for record in records:
@@ -824,6 +911,20 @@ def cleanup(ctx, threads, vendor):
         len(futures),
         len(records),
         f" ({vendor})" if vendor else "",
+    )
+
+    # Safety net for hosts that never wrote an S3 terminated marker (hung boot,
+    # inspect crash, etc.): use git metas + Pulumi backend stack locations.
+    logging.info(
+        "Running meta/Pulumi-backend cleanup pass%s",
+        f" for {vendor}" if vendor else "",
+    )
+    _run_meta_cleanup_for_vendor(
+        repo_path,
+        vendor,
+        threads=threads,
+        lookback_mins=None,
+        data_only=True,
     )
 
 
