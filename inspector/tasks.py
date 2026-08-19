@@ -379,7 +379,7 @@ llm = DockerTask(
 vllm = VllmDockerTask(
     parallel=False,
     timeout=timedelta(hours=3),
-    minimum_memory=4,
+    minimum_memory=2,
     priority=14,
     images=[
         "ghcr.io/sparecores/benchmark-vllm-gpu:main",
@@ -390,6 +390,18 @@ vllm = VllmDockerTask(
     command=None,
     version_command="--version",
     start_with_instance=True,
+)
+
+ffmpeg = DockerTask(
+    parallel=False,
+    priority=15,
+    image="ghcr.io/sparecores/benchmark-ffmpeg:main",
+    docker_opts=DOCKER_OPTS | tracker_docker_opts("ffmpeg"),
+    version_command="--version",
+    command=None,
+    timeout=timedelta(hours=2),
+    start_with_instance=True,
+    minimum_memory=1,
 )
 
 # An extended version of the multicore StressNg task: running
