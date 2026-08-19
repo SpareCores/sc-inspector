@@ -1730,9 +1730,7 @@ def build_inspector_user_data(
         client_disk_gib=client_disk_gib,
         include_run_upload=include_run_upload,
     )
-    user_data = user_data_pack.render_packed_user_data(USER_DATA, replacements, vendor=vendor)
-    b64_user_data = base64.b64encode(user_data.encode("utf-8")).decode("ascii")
-    return user_data, b64_user_data
+    return user_data_pack.publish_user_data_script(vendor, server, USER_DATA, replacements)
 
 
 def build_server_user_data_replacements(
@@ -1779,9 +1777,9 @@ def build_server_user_data_replacements(
         db_disk_iops=db_disk_iops,
         db_disk_throughput=db_disk_throughput,
     )
-    # Unpacked template: sc-runner injects CLIENT_PRIVATE_IP after the client NIC exists.
+    bootstrap, _ = user_data_pack.publish_user_data_script(vendor, server, USER_DATA, replacements)
     return {
-        "USER_DATA_TEMPLATE": user_data_pack.apply_replacements(USER_DATA, replacements),
+        "USER_DATA_TEMPLATE": bootstrap,
     }
 
 

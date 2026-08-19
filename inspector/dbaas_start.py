@@ -31,6 +31,7 @@ from sc_runner import runner
 from sc_runner.resources.managed_db import DbaasStackSpec, ManagedDbSpec
 
 import repo
+import user_data as user_data_pack
 
 
 def _dbaas_user_data_replacements(
@@ -89,9 +90,15 @@ def _dbaas_user_data_replacements(
             "SC_PROVISION_NETWORK_MODE": "private_vpc" if vendor == "gcp" else "private_vnet",
             "SC_PROVISION_STACK_SLUG": stack_slug(target),
             "SC_PROVISION_SYNC_COMMIT_SETTABLE": "",
-            "USER_DATA_TEMPLATE": USER_DATA,
         }
     )
+    bootstrap, _ = user_data_pack.publish_user_data_script(
+        vendor,
+        client.api_reference,
+        USER_DATA,
+        repl,
+    )
+    repl["USER_DATA_TEMPLATE"] = bootstrap
     return repl
 
 

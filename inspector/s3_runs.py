@@ -17,6 +17,11 @@ import requests
 # STS credentials cap URL lifetime at session duration (we request 12h in start.yml).
 PRESIGN_EXPIRES_SECONDS = 12 * 60 * 60
 
+# Full user_data scripts staged for cloud-init download (GET presign is short; object TTL is 1 day).
+USER_DATA_SCRIPT_PREFIX = "user_data"
+USER_DATA_SCRIPT_GET_EXPIRES_SECONDS = 60 * 60
+USER_DATA_SCRIPT_TTL_DAYS = 1
+
 
 INSPECTOR_RUNS_CATEGORY = "inspect"
 CDN_DATASET_MAX_BYTES = 256 * 1024 * 1024 * 1024  # 256 GiB compressed dumps
@@ -55,6 +60,46 @@ def run_key(vendor: str, instance: str, run_id: str, *, when: datetime | None = 
     return (
         f"runs/{INSPECTOR_RUNS_CATEGORY}/{_sanitize_segment(vendor)}/{_sanitize_segment(instance)}/"
         f"{_date_path(when)}/{_sanitize_segment(run_id)}.json"
+    )
+
+
+def user_data_script_key(vendor: str, instance: str, run_id: str | None = None) -> str:
+    run_id = run_id or os.environ.get("GITHUB_RUN_ID", "local")
+    return (
+        f"{USER_DATA_SCRIPT_PREFIX}/{_sanitize_segment(vendor)}/{_sanitize_segment(instance)}/"
+        f"{_sanitize_segment(run_id)}/user_data.sh"
+    )
+
+
+def upload_user_data_script(
+    vendor: str,
+    instance: str,
+    script: str,
+    *,
+    run_id: str | None = None,
+) -> str:
+    """Store the full bootstrap script under user_data/{vendor}/{instance}/{run_id}/.
+
+    Objects are tagged inspector-user-data=1d; the bucket should lifecycle-expire
+    the user_data/ prefix after one day.
+    """
+    key = user_data_script_key(vendor, instance, run_id=run_id)
+    _s3_client().put_object(
+        Bucket=bucket_name(),
+        Key=key,
+        Body=script.encode("utf-8"),
+        ContentType="text/x-shellscript; charset=utf-8",
+        Tagging="inspector-user-data=1d",
+    )
+    logging.info("Uploaded user_data script s3://%s/%s", bucket_name(), key)
+    return key
+
+
+def presigned_user_data_script_get_url(key: str) -> str:
+    return _s3_client().generate_presigned_url(
+        "get_object",
+        Params={"Bucket": bucket_name(), "Key": key},
+        ExpiresIn=USER_DATA_SCRIPT_GET_EXPIRES_SECONDS,
     )
 
 
