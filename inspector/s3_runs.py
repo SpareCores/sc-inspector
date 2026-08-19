@@ -80,8 +80,7 @@ def upload_user_data_script(
 ) -> str:
     """Store the full bootstrap script under user_data/{vendor}/{instance}/{run_id}/.
 
-    Objects are tagged inspector-user-data=1d; the bucket should lifecycle-expire
-    the user_data/ prefix after one day.
+    Bucket lifecycle expires the user_data/ prefix after one day (sc-infra).
     """
     key = user_data_script_key(vendor, instance, run_id=run_id)
     _s3_client().put_object(
@@ -89,7 +88,6 @@ def upload_user_data_script(
         Key=key,
         Body=script.encode("utf-8"),
         ContentType="text/x-shellscript; charset=utf-8",
-        Tagging="inspector-user-data=1d",
     )
     logging.info("Uploaded user_data script s3://%s/%s", bucket_name(), key)
     return key
