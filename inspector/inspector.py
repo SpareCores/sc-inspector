@@ -171,9 +171,6 @@ def start(ctx, exclude, start_only, vendor, limit):
     for (vnd, server), (srv_data, regions, zones, zone_to_region) in lib.sort_servers_for_start(
         available_servers(vendor=vendor)
     ):
-        if vnd == "aws" and not (server.startswith("m9g") or server == "c4.xlarge"):
-            logging.info(f"Excluding {vnd}/{server}")
-            continue
         if vnd not in supported_vendors:
             # sc-runner can't yet handle this vendor
             continue
