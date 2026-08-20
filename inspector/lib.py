@@ -183,6 +183,8 @@ class DockerTask(Task):
 VLLM_PROBE_COMMAND = ["--probe-only"]
 # Wall-clock cap per image probe (must exceed harness /health wait; see SERVER_START_TIMEOUT_PROBE_*).
 VLLM_PROBE_TIMEOUT = timedelta(minutes=18)
+# Current ghcr.io/sparecores/benchmark-vllm-gpu ships Ampere+ CUDA kernels only.
+VLLM_MIN_GPU_COMPUTE_CAP: tuple[int, int] = (8, 0)
 
 
 class VllmDockerTask(DockerTask):
@@ -266,6 +268,62 @@ class DbaasDbTask(DockerTask):
         return raw != "false"
 
 
+def _parse_compute_cap(raw: str) -> tuple[int, int] | None:
+    text = raw.strip()
+    if not text:
+        return None
+    try:
+        major_s, minor_s = text.split(".", 1)
+        return int(major_s), int(minor_s)
+    except ValueError:
+        return None
+
+
+def _gpu_compute_capabilities() -> list[tuple[int, int]] | None:
+    """Host GPU compute capabilities, or None when unknown.
+
+    Prefers ``GPU_COMPUTE_CAP`` from user_data (inspector container has no GPU),
+    then a local ``nvidia-smi`` if present.
+    """
+    raw = os.environ.get("GPU_COMPUTE_CAP", "").strip()
+    if raw:
+        caps: list[tuple[int, int]] = []
+        for part in raw.replace(";", ",").split(","):
+            parsed = _parse_compute_cap(part)
+            if parsed is not None:
+                caps.append(parsed)
+        if caps:
+            return caps
+        logging.warning("Invalid GPU_COMPUTE_CAP=%r, ignoring", raw)
+
+    try:
+        out = subprocess.check_output(
+            [
+                "nvidia-smi",
+                "--query-gpu=compute_cap",
+                "--format=csv,noheader",
+            ],
+            text=True,
+            timeout=30,
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    caps = []
+    for line in out.splitlines():
+        parsed = _parse_compute_cap(line)
+        if parsed is not None:
+            caps.append(parsed)
+    return caps or None
+
+
+def _vllm_gpu_image_supported(caps: list[tuple[int, int]] | None) -> bool:
+    """Skip GPU image only when we know every GPU is below the minimum arch."""
+    if not caps:
+        return True
+    return min(caps) >= VLLM_MIN_GPU_COMPUTE_CAP
+
+
 def _vllm_image_label(image: str) -> str:
     """Short label for logs (image name without registry/tag)."""
     name = image.rsplit("/", 1)[-1]
@@ -288,10 +346,26 @@ def _vllm_image_attempts(
     task: VllmDockerTask, gpu_count: float
 ) -> list[tuple[str, str, bool]]:
     attempts: list[tuple[str, str, bool]] = []
+    gpu_caps: list[tuple[int, int]] | None = None
+    gpu_caps_checked = False
     for image in task.images:
         use_gpu = _vllm_image_use_gpu(image)
         if use_gpu and gpu_count <= 0:
             continue
+        if use_gpu:
+            if not gpu_caps_checked:
+                gpu_caps = _gpu_compute_capabilities()
+                gpu_caps_checked = True
+            if not _vllm_gpu_image_supported(gpu_caps):
+                logging.info(
+                    "Skipping %s: GPU compute capability %s < %s.%s "
+                    "(Ampere+/sm_80 required)",
+                    _vllm_image_label(image),
+                    min(gpu_caps) if gpu_caps else "unknown",
+                    VLLM_MIN_GPU_COMPUTE_CAP[0],
+                    VLLM_MIN_GPU_COMPUTE_CAP[1],
+                )
+                continue
         if _vllm_image_amd64_only(image) and _host_is_arm64():
             continue
         attempts.append((_vllm_image_label(image), image, use_gpu))
