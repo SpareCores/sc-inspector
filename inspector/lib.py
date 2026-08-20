@@ -103,7 +103,7 @@ PULUMI_BORING_ERRORS = {
     re.compile(r"^\s*error:\s*update failed\s*$", re.IGNORECASE),
 }
 _PROVIDER_JSON_ERROR = re.compile(r'\{"error":"([^"]+)"')
-# Transient capacity/quota errors: retry up to 3 times in retry_locked and on later start runs.
+# Transient capacity/quota errors: retry on a later start run (possibly another region).
 RETRYABLE_START_ERROR_MARKERS = (
     "InsufficientInstanceCapacity",
     "PublicIPCountLimitReached",
@@ -115,6 +115,13 @@ RETRYABLE_START_ERROR_MARKERS = (
     # UpCloud: CPU core quota of N exceeded … (type=SERVER_CORE_LIMIT_REACHED)
     "SERVER_CORE_LIMIT_REACHED",
     "CPU core quota",
+)
+# Same-location Pulumi retries (retry_locked): only errors that may clear in seconds.
+# Capacity shortages should fail over to the next region/zone immediately.
+RETRYABLE_PULUMI_ERROR_MARKERS = tuple(
+    m
+    for m in RETRYABLE_START_ERROR_MARKERS
+    if m != "InsufficientInstanceCapacity"
 )
 # provision machines with storage (GiB)
 VOLUME_SIZE = 128
@@ -2027,7 +2034,7 @@ def pulumi_error_text(exc: BaseException, error_msgs: list[str] | None = None) -
 
 def is_retryable_pulumi_error(exc: BaseException, error_msgs: list[str] | None = None) -> bool:
     text = pulumi_error_text(exc, error_msgs)
-    return any(marker in text for marker in RETRYABLE_START_ERROR_MARKERS)
+    return any(marker in text for marker in RETRYABLE_PULUMI_ERROR_MARKERS)
 
 
 def is_gcp_host_maintenance_policy_error(error_text: str) -> bool:
