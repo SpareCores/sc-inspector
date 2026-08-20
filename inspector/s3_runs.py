@@ -17,9 +17,11 @@ import requests
 # STS credentials cap URL lifetime at session duration (we request 12h in start.yml).
 PRESIGN_EXPIRES_SECONDS = 12 * 60 * 60
 
-# Full user_data scripts staged for cloud-init download (GET presign is short; object TTL is 1 day).
+# Full user_data scripts staged for cloud-init download. GET must stay valid across
+# long Pulumi create/retries (GPU capacity waits can exceed 1h); cap at the same
+# 12h STS session used for log PUTs. Object TTL remains 1 day via bucket lifecycle.
 USER_DATA_SCRIPT_PREFIX = "user_data"
-USER_DATA_SCRIPT_GET_EXPIRES_SECONDS = 60 * 60
+USER_DATA_SCRIPT_GET_EXPIRES_SECONDS = PRESIGN_EXPIRES_SECONDS
 USER_DATA_SCRIPT_TTL_DAYS = 1
 
 
