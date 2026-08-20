@@ -18,7 +18,6 @@ from lib import (
     USER_DATA,
     InstanceCreationTiming,
     boot_meta_for_task,
-    candidate_regions,
     inspector_user_data_replacements,
     pulumi_stack_opts,
     record_instance_start_failure,
@@ -67,7 +66,9 @@ def _dbaas_user_data_replacements(
             "SC_DB_USER": provision.get("admin_login", "scadmin"),
             "SC_DB_PASSWORD": "{SC_DB_PASSWORD}",
             "SC_DB_NAME": provision.get("database_name", "bench"),
-            "SC_DB_BOOTSTRAP_USER": "postgres" if vendor == "gcp" else provision.get("admin_login", "scadmin"),
+            "SC_DB_BOOTSTRAP_USER": (
+                "postgres" if vendor == "gcp" else provision.get("admin_login", "scadmin")
+            ),
             "SC_DB_BOOTSTRAP_DATABASE": "postgres",
             "DB_WAIT_TIMEOUT_SEC": os.environ.get("DB_WAIT_TIMEOUT_SEC", "3600"),
             "MEM_GIB": str(target.memory_gib),
@@ -87,7 +88,9 @@ def _dbaas_user_data_replacements(
             "SC_PROVISION_CLIENT_INSTANCE": client.api_reference,
             "SC_PROVISION_REGION": region,
             "SC_PROVISION_ZONE": zone or "",
-            "SC_PROVISION_NETWORK_MODE": "private_vpc" if vendor == "gcp" else "private_vnet",
+            "SC_PROVISION_NETWORK_MODE": (
+                "private_vpc" if vendor in ("gcp", "aws") else "private_vnet"
+            ),
             "SC_PROVISION_STACK_SLUG": stack_slug(target),
             "SC_PROVISION_SYNC_COMMIT_SETTABLE": "",
         }
@@ -133,14 +136,24 @@ def _dbaas_location_candidates(
     zones: list[str],
     zone_to_region: dict[str, str | None] | None,
 ):
-    from lib import candidate_regions, candidate_zones
+    from sc_runner import data as sc_data
+
+    prices = sc_data.database_region_prices(vendor, target.native_id)
 
     if vendor == "gcp" and zones:
-        return [
-            ("zone", z)
-            for z in candidate_zones(vendor, target.native_id, zones, zone_to_region)
-        ]
-    return [("region", r) for r in candidate_regions(vendor, target.native_id, regions)]
+        def _zone_key(zone: str) -> tuple[float, str]:
+            reg = (zone_to_region or {}).get(zone) or "-".join(zone.split("-")[:-1])
+            return (prices.get(reg, float("inf")), zone)
+
+        ordered_zones = sorted(zones, key=_zone_key)
+        logging.info(
+            "DBaaS zone order for %s/%s: %s", vendor, target.native_id, ordered_zones
+        )
+        return [("zone", z) for z in ordered_zones]
+
+    ordered = sc_data.sort_by_price(list(regions), prices)
+    logging.info("DBaaS region order for %s/%s: %s", vendor, target.native_id, ordered)
+    return [("region", r) for r in ordered]
 
 
 def _destroy_dbaas_stack(
@@ -211,6 +224,10 @@ def _try_provision_dbaas_stack(
         storage_type=provision["storage_type"],
         storage_edition=provision["storage_edition"],
         storage_iops_tier=provision["iops_tier"],
+        storage_iops=provision.get("disk_iops"),
+        storage_throughput_mb_s=provision.get("disk_throughput_mb_s"),
+        admin_login=provision.get("admin_login", "scadmin"),
+        database_name=provision.get("database_name", "bench"),
     )
     stack_spec = DbaasStackSpec(
         managed_db=md_spec,

@@ -248,7 +248,7 @@ def start(ctx, exclude, start_only, vendor, limit):
 
 @cli.command("start-dbaas")
 @click.pass_context
-@click.option("--vendor", type=str, default="gcp", help="Only start DBaaS targets for the specified vendor")
+@click.option("--vendor", type=str, default=None, help="Only start DBaaS targets for the specified vendor")
 @click.option(
     "--instance-key",
     type=str,

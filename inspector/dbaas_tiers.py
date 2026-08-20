@@ -17,6 +17,8 @@ def _provision_spec_azure(target: ManagedDbTarget, storage: dict[str, Any], sche
         "sku_name": sku_name,
         "sku_tier": edition,
         "schema_gib": schema_gib,
+        "admin_login": "scadmin",
+        "database_name": "bench",
     }
 
 
@@ -26,6 +28,19 @@ def _provision_spec_gcp(target: ManagedDbTarget, storage: dict[str, Any], schema
         "sku_name": target.native_id,
         "sku_tier": target.edition or "Enterprise",
         "schema_gib": schema_gib,
+        "admin_login": "scadmin",
+        "database_name": "bench",
+    }
+
+
+def _provision_spec_aws(target: ManagedDbTarget, storage: dict[str, Any], schema_gib: float) -> dict[str, Any]:
+    return {
+        **storage,
+        "sku_name": target.native_id,
+        "sku_tier": target.edition or "",
+        "schema_gib": schema_gib,
+        "admin_login": "scadmin",
+        "database_name": "bench",
     }
 
 
@@ -42,4 +57,6 @@ def provision_spec(target: ManagedDbTarget) -> dict[str, Any]:
     storage = dbaas_storage_fields(plan, tier=target.native_id)
     if target.vendor_id == "gcp":
         return _provision_spec_gcp(target, storage, schema_gib)
+    if target.vendor_id == "aws":
+        return _provision_spec_aws(target, storage, schema_gib)
     return _provision_spec_azure(target, storage, schema_gib)
