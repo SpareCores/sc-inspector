@@ -18,7 +18,10 @@ from companion_protocol import BenchmarkResult, Ping, Pong, RunBenchmark, Shutdo
 from lib import DB_DOCKER_OPTS
 from resource_tracker import RESOURCE_TRACKER_OUTPUT_FILENAME, uses_resource_tracker
 
-CONNECT_ACCEPT_DEADLINE_SEC = int(os.environ.get("MP_ACCEPT_DEADLINE_SEC", "600"))
+# Client EC2 is created before the DB host and often finishes user_data much
+# sooner (especially vs GPU images). Keep listening long enough for the peer to
+# finish provisioning + inspect startup; 10m was too short for g6-class boots.
+CONNECT_ACCEPT_DEADLINE_SEC = int(os.environ.get("MP_ACCEPT_DEADLINE_SEC", "7200"))
 NICE_ENTRYPOINT = ["nice", "-n", "-20"]
 DEFAULT_BENCHMARK_COMMAND = [
     "/usr/local/bin/resource-tracker",
@@ -208,10 +211,24 @@ def run_companion(vendor: str, instance: str, listen_port: int | None = None) ->
     port = listen_port or _mp_port()
     authkey = _authkey()
     deadline = time.monotonic() + CONNECT_ACCEPT_DEADLINE_SEC
-    logging.info("Companion listening on 0.0.0.0:%s for %s/%s", port, vendor, instance)
+    logging.info(
+        "Companion listening on 0.0.0.0:%s for %s/%s (accept deadline %ss)",
+        port,
+        vendor,
+        instance,
+        CONNECT_ACCEPT_DEADLINE_SEC,
+    )
+    last_wait_log = 0.0
     with Listener(("0.0.0.0", port), authkey=authkey) as listener:
         listener._listener._socket.settimeout(1.0)
         while time.monotonic() < deadline:
+            now = time.monotonic()
+            if now - last_wait_log >= 60:
+                logging.info(
+                    "Still waiting for DB host connection (%ss left)",
+                    max(0, int(deadline - now)),
+                )
+                last_wait_log = now
             try:
                 conn = listener.accept()
             except socket.timeout:

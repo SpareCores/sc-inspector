@@ -38,8 +38,11 @@ from pg_repro import merge_postgres_into_stdout, safe_collect_postgres_repro
 from pgtune_leopard import generate_for_host
 from resource_tracker import RESOURCE_TRACKER_OUTPUT_FILENAME
 
-CONNECT_DEADLINE_SEC = int(os.environ.get("MP_CONNECT_DEADLINE_SEC", "600"))
+# Must cover slow companion boots, but stay well below task timeouts so a dead
+# client fails the multi-VM task instead of looking like an indefinite hang.
+CONNECT_DEADLINE_SEC = int(os.environ.get("MP_CONNECT_DEADLINE_SEC", "1800"))
 CONNECT_RETRY_SEC = 5
+CONNECT_ATTEMPT_TIMEOUT_SEC = float(os.environ.get("MP_CONNECT_ATTEMPT_TIMEOUT_SEC", "5"))
 PG_IMAGE = "ghcr.io/sparecores/benchmark-postgres-server:main"
 PG_USER = "postgres"
 PG_PASSWORD = "postgres"
@@ -63,9 +66,22 @@ class CompanionSession:
         authkey = base64.b64decode(os.environ["MP_AUTHKEY_B64"])
         deadline = time.monotonic() + CONNECT_DEADLINE_SEC
         last_err = None
+        logging.info(
+            "Connecting to companion at %s:%s (deadline %ss)",
+            host,
+            port,
+            CONNECT_DEADLINE_SEC,
+        )
         while time.monotonic() < deadline:
             try:
-                conn = Client((host, port), authkey=authkey)
+                # Fail each attempt quickly when the peer is down/powered off;
+                # bare Client() can block on TCP for minutes and look hung.
+                prev_timeout = socket.getdefaulttimeout()
+                socket.setdefaulttimeout(CONNECT_ATTEMPT_TIMEOUT_SEC)
+                try:
+                    conn = Client((host, port), authkey=authkey)
+                finally:
+                    socket.setdefaulttimeout(prev_timeout)
                 conn.send(Ping())
                 if isinstance(conn.recv(), Pong):
                     self._conn = conn
@@ -75,7 +91,7 @@ class CompanionSession:
             except Exception as exc:
                 last_err = exc
                 time.sleep(CONNECT_RETRY_SEC)
-        raise TimeoutError(f"companion connect timeout: {last_err}")
+        raise TimeoutError(f"companion connect timeout after {CONNECT_DEADLINE_SEC}s: {last_err}")
 
     def shutdown(self, reason: str = "") -> None:
         if self._conn is None:
