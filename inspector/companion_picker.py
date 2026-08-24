@@ -10,7 +10,11 @@ from typing import Any
 from benchmark_tiers import ClientRequirements
 from sc_crawler.table_fields import CpuArchitecture
 
-STRESSNG_BEST1_BENCHMARK_ID = "stressngfull:best1"
+# Catalog benchmark_id (sc_crawler's "stress_ng:best1", not our local task name
+# "stressngfull") — a prior mismatch here silently zeroed every score lookup,
+# so ranking always degenerated to pure price and could pick oversized-but-
+# cheap outliers (e.g. inf1.6xlarge) as companions.
+STRESSNG_BEST1_BENCHMARK_ID = "stress_ng:best1"
 
 # Benchmark client images are amd64-only; companions must run x86_64 VMs.
 _X86_CPU_ARCHITECTURES = (CpuArchitecture.X86_64,)
@@ -105,7 +109,8 @@ def _server_api_refs_in_location(vendor: str, location: str) -> set[str]:
         }
 
 
-def _stressng_best1_scores(vendor: str, server_ids: list[int]) -> dict[int, float]:
+def _stressng_best1_scores(vendor: str, server_ids: list[str]) -> dict[str, float]:
+    """server_id is a string (equal to the instance's own api_reference), not an int."""
     from sc_crawler.tables import BenchmarkScore
     from sqlmodel import Session, select
 
@@ -119,7 +124,7 @@ def _stressng_best1_scores(vendor: str, server_ids: list[int]) -> dict[int, floa
             .where(BenchmarkScore.benchmark_id == STRESSNG_BEST1_BENCHMARK_ID)
             .where(BenchmarkScore.server_id.in_(server_ids))
         ).all()
-    return {int(server_id): float(score) for server_id, score in rows}
+    return {server_id: float(score) for server_id, score in rows}
 
 
 def _eligible_servers_with_prices(
@@ -161,7 +166,7 @@ def _eligible_servers_with_prices(
             .where(loc_filter)
         ).all()
 
-    best: dict[int, tuple[Any, float]] = {}
+    best: dict[str, tuple[Any, float]] = {}
     for server_id, api_ref, vcpus, memory_amount, gpu_count, cpu_arch, price in rows:
         if _is_accelerator_instance(vendor, api_ref):
             continue
