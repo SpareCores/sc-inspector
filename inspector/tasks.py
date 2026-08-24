@@ -159,7 +159,7 @@ virtualization = DockerTask(
 # genuinely need a separate client.
 # ---------------------------------------------------------------------------
 
-pgbench_postgres_multi_ro_durable = DockerTask(
+pgbench_postgres_ro_durable = DockerTask(
     parallel=False,
     start_with_instance=True,
     priority=1.02,
