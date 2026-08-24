@@ -23,6 +23,10 @@ DISK_SCHEMA_RATIO = 2.0
 BUILD_VU_CAP = 64
 CLIENT_MIN_VCPUS = 4
 CLIENT_ABSOLUTE_MAX_VCPUS = 2048
+# Companion picker search ceiling: min_vcpus * this. Heavy RO leaves the
+# client mostly idle (see ClientRequirements docstring), so there's no need
+# to search past a modest multiple of the computed floor.
+CLIENT_MAX_VCPUS_MULTIPLIER = 2
 # Heavy RO: client is mostly idle waiting on the server (N-128 DBaaS @ c=256/j=32
 # used ≪4 of 64 vCPUs). 20 clients/vCPU is still a conservative fan-in budget.
 CLIENTS_PER_CLIENT_VCPU = 20
@@ -79,10 +83,19 @@ PGBENCH_RO_MAX_JOBS = 32
 
 @dataclass(frozen=True)
 class ClientRequirements:
-    """Absolute mins for companion VM."""
+    """Sizing bounds for the companion VM.
+
+    max_vcpus keeps the picker from wandering into oversized/exotic SKUs: the
+    heavy-RO workload leaves the client mostly idle (a 64-vCPU client used
+    <4 vCPUs driving a 128-vCPU-class DB host), so ranking by raw single-core
+    stress-ng score with no ceiling can land on the single fastest chip in the
+    whole catalog — e.g. a 48-vCPU bare-metal box — for a 4-vCPU primary.
+    None means unbounded (kept for callers that don't set it explicitly).
+    """
 
     min_vcpus: int
     min_memory_gib: float = 2.0
+    max_vcpus: int | None = None
 
 
 def target_schema_gib(mem_gib: float) -> float:
@@ -176,16 +189,20 @@ def companion_client_vcpus(build_vus: int, db_vcpus: int) -> int:
 
 def client_req(db_srv) -> ClientRequirements:
     build_vus = min(int(db_srv.vcpus), BUILD_VU_CAP)
+    min_vcpus = companion_client_vcpus(build_vus, db_srv.vcpus)
     return ClientRequirements(
-        min_vcpus=companion_client_vcpus(build_vus, db_srv.vcpus),
+        min_vcpus=min_vcpus,
         min_memory_gib=2.0,
+        max_vcpus=min(CLIENT_ABSOLUTE_MAX_VCPUS, min_vcpus * CLIENT_MAX_VCPUS_MULTIPLIER),
     )
 
 
 def merge_client_requirements(reqs: list[ClientRequirements]) -> ClientRequirements:
     if not reqs:
-        return ClientRequirements(min_vcpus=2, min_memory_gib=2.0)
+        return ClientRequirements(min_vcpus=2, min_memory_gib=2.0, max_vcpus=2 * CLIENT_MAX_VCPUS_MULTIPLIER)
+    max_vcpus_values = [r.max_vcpus for r in reqs if r.max_vcpus is not None]
     return ClientRequirements(
         min_vcpus=max(r.min_vcpus for r in reqs),
         min_memory_gib=max(r.min_memory_gib for r in reqs),
+        max_vcpus=max(max_vcpus_values) if len(max_vcpus_values) == len(reqs) else None,
     )

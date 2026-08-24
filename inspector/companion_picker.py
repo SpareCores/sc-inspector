@@ -129,7 +129,7 @@ def _eligible_servers_with_prices(
     mem_mib = req.min_memory_gib * 1024
     engine = _catalog_engine()
     with Session(engine) as session:
-        rows = session.exec(
+        stmt = (
             select(
                 Server.server_id,
                 Server.api_reference,
@@ -149,7 +149,10 @@ def _eligible_servers_with_prices(
             .where(Server.vcpus >= req.min_vcpus)
             .where(Server.memory_amount >= mem_mib)
             .where(loc_filter)
-        ).all()
+        )
+        if req.max_vcpus is not None:
+            stmt = stmt.where(Server.vcpus <= req.max_vcpus)
+        rows = session.exec(stmt).all()
 
     best: dict[str, tuple[Any, float]] = {}
     for server_id, api_ref, vcpus, memory_amount, gpu_count, cpu_arch, price in rows:
