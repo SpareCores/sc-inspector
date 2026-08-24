@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import secrets
 from typing import Any
 
 import boto3
@@ -66,10 +67,16 @@ def run_key(vendor: str, instance: str, run_id: str, *, when: datetime | None = 
 
 
 def user_data_script_key(vendor: str, instance: str, run_id: str | None = None) -> str:
+    """Unique per call: many concurrent stacks in one workflow run can share a
+    vendor/instance pair (e.g. the same companion instance type picked by
+    several multi-VM primaries at once), and {vendor}/{instance}/{run_id} alone
+    would let their uploads race-overwrite each other, handing one stack's
+    boot script (and MP_AUTHKEY_B64) to another's instance.
+    """
     run_id = run_id or os.environ.get("GITHUB_RUN_ID", "local")
     return (
         f"{USER_DATA_SCRIPT_PREFIX}/{_sanitize_segment(vendor)}/{_sanitize_segment(instance)}/"
-        f"{_sanitize_segment(run_id)}/user_data.sh"
+        f"{_sanitize_segment(run_id)}-{secrets.token_hex(4)}/user_data.sh"
     )
 
 

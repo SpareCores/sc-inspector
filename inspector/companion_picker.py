@@ -15,6 +15,19 @@ STRESSNG_BEST1_BENCHMARK_ID = "stressngfull:best1"
 # Benchmark client images are amd64-only; companions must run x86_64 VMs.
 _X86_CPU_ARCHITECTURES = (CpuArchitecture.X86_64,)
 
+# AWS accelerator-only families (Inferentia, Trainium, FPGA, Habana Gaudi, video
+# transcode) report gpu_count=0 in the catalog, so the GPU filter alone lets them
+# through as "plain CPU" companions — wrong (they're specialized, expensive
+# accelerator hardware, not generic pgbench client machines).
+_ACCELERATOR_FAMILY_PREFIXES = {
+    "aws": ("inf1", "inf2", "trn1", "trn2", "f1", "f2", "dl1", "dl2q", "vt1"),
+}
+
+
+def _is_accelerator_instance(vendor: str, api_reference: str) -> bool:
+    prefixes = _ACCELERATOR_FAMILY_PREFIXES.get(vendor, ())
+    return api_reference.split(".")[0] in prefixes
+
 
 @cache
 def _catalog_engine():
@@ -87,7 +100,9 @@ def _server_api_refs_in_location(vendor: str, location: str) -> set[str]:
             .where(loc_filter)
             .distinct()
         )
-        return set(session.exec(stmt).all())
+        return {
+            ref for ref in session.exec(stmt).all() if not _is_accelerator_instance(vendor, ref)
+        }
 
 
 def _stressng_best1_scores(vendor: str, server_ids: list[int]) -> dict[int, float]:
@@ -148,6 +163,8 @@ def _eligible_servers_with_prices(
 
     best: dict[int, tuple[Any, float]] = {}
     for server_id, api_ref, vcpus, memory_amount, gpu_count, cpu_arch, price in rows:
+        if _is_accelerator_instance(vendor, api_ref):
+            continue
         price_f = float(price)
         if server_id not in best or price_f < best[server_id][1]:
             stub = SimpleNamespace(
