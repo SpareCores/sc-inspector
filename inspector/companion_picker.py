@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from benchmark_tiers import ClientRequirements
-from sc_crawler.table_fields import CpuArchitecture
+from sc_crawler.table_fields import CpuAllocation, CpuArchitecture
 
 # Catalog benchmark_id (sc_crawler's "stress_ng:best1", not our local task name
 # "stressngfull") — a prior mismatch here silently zeroed every score lookup,
@@ -18,6 +18,11 @@ STRESSNG_BEST1_BENCHMARK_ID = "stress_ng:best1"
 
 # Benchmark client images are amd64-only; companions must run x86_64 VMs.
 _X86_CPU_ARCHITECTURES = (CpuArchitecture.X86_64,)
+
+# Shared/burstable vCPUs (credit-throttled, or time-sliced with other tenants)
+# give inconsistent throughput driving pgbench — companions need steady,
+# known performance, so only dedicated CPUs are eligible.
+_DEDICATED_CPU_ALLOCATIONS = (CpuAllocation.DEDICATED,)
 
 
 @cache
@@ -146,6 +151,7 @@ def _eligible_servers_with_prices(
             .where(Server.status == "ACTIVE")
             .where(Server.gpu_count == 0)
             .where(Server.cpu_architecture.in_(_X86_CPU_ARCHITECTURES))
+            .where(Server.cpu_allocation.in_(_DEDICATED_CPU_ALLOCATIONS))
             .where(Server.vcpus >= req.min_vcpus)
             .where(Server.memory_amount >= mem_mib)
             .where(loc_filter)
