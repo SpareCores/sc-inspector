@@ -354,7 +354,7 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
     Some vendors support creating resources in regions, without explicitly specifying the zone, some don't,
     so we support both of them. We'll go through all regions or zones whatever is specified.
     """
-    from datetime import datetime, timedelta
+    from datetime import datetime
     from sc_runner import runner
     import threading
 
@@ -366,12 +366,6 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
     threading.current_thread().name = f"{vendor}/{server}"
 
     # see if we have to destroy the resources in the Pulumi stack
-    destroy = ""
-    start_times = []
-    end_times = []
-    already_ended = []
-    sum_timeout = timedelta()
-    max_unfinished_timeout = timedelta()
     now = datetime.now()
     applicable_tasks = [
         task for task in tasks
@@ -381,47 +375,24 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
     task_metas = [(task, lib.load_task_meta(task, data_dir=data_dir)) for task in applicable_tasks]
     last_activity = max((meta.end for _, meta in task_metas if meta.end), default=None)
     for task, meta in task_metas:
-        if not meta.start:
-            continue
-        if meta.end:
-            end_times.append(meta.end)
-            already_ended.append(True)
+        if not meta.start or meta.end:
             continue
         stale = now > meta.start + task.timeout + lib.DESTROY_AFTER
         abandoned = lib.is_abandoned_boot_meta(meta, last_activity)
         if stale or abandoned:
-            already_ended.append(True)
             logging.info(
                 f"{vendor}/{server} Treating {task.name} as finished (abandoned={abandoned}, stale={stale})"
             )
-            continue
-        start_times.append(meta.start)
-        already_ended.append(False)
-        logging.info(f"{vendor}/{server} Adding task {task.name} timeout: {task.timeout}")
-        sum_timeout += task.timeout
-        max_unfinished_timeout = max(max_unfinished_timeout, task.timeout)
+        else:
+            logging.info(f"{vendor}/{server} Adding task {task.name} timeout: {task.timeout}")
 
-    if start_times and now >= (wait_time := max(start_times) + max_unfinished_timeout + lib.DESTROY_AFTER):
-        # safety net: after the longest unfinished task timeout has passed, terminate the machine
-        destroy = f"Destroying {vendor}/{server}, last_start: {max(start_times)}, last timeout: {wait_time}"
-    if start_times and now >= (wait_time := max(start_times) + sum_timeout + lib.DESTROY_AFTER):
-        # We can only estimate the time by which all tasks should have been completed, as the start date is added
-        # to the git repository before the machine starts up, the machine startup can take a long time, and the
-        # tasks do not necessarily run sequentially.
-        # So here, we are using the sum_timeout, which is the sum of all timeouts for unfinished jobs.
-        destroy = f"Destroying {vendor}/{server}, last_start: {max(start_times)}, wait time: {wait_time}"
-
-    # if all tasks have already finished, we can destroy the stack
-    if already_ended and all(already_ended):
-        destroy = f"Destroying {vendor}/{server}, all tasks have finished"
-
-    if not destroy and not start_times and end_times and now >= max(end_times) + lib.DESTROY_AFTER:
-        destroy = f"Destroying {vendor}/{server}, last end: {max(end_times)}"
-
-    if not destroy and not start_times and force:
-        # forced cleanup, even if there are metas for the server (might be due to a forced retry from git, by deleting
-        # the files)
+    reason = lib.cleanup_destroy_reason(task_metas, now, force=force)
+    if reason == "forced cleanup":
         destroy = f"Forced cleanup of {vendor}/{server}"
+    elif reason:
+        destroy = f"Destroying {vendor}/{server}, {reason}"
+    else:
+        destroy = ""
 
     if destroy:
         # Catalog/plan regions can lag behind where start actually created stacks

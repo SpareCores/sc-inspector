@@ -145,6 +145,9 @@ class Meta(BaseModel):
     stderr_bytes: int | None = None
     outputs: list[str] = []
     start_retries: int = 0
+    # AWS only: True when the instance was requested as Spot; used to self-heal
+    # unexpected Spot terminations by retrying on-demand after cleanup timeouts.
+    spot: bool | None = None
 
 
 class Task(BaseModel):
@@ -586,6 +589,14 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
         return True
     if meta.exit_code == -1 and is_retryable_start_error(meta.error_msg):
         logging.info(f"Retrying task {task.name} due to retryable start error, meta: {meta}")
+        return True
+    if (
+        is_unfinished_spot_meta(meta)
+        and force_ondemand_after_spot_timeout(srv.vendor_id, srv.api_reference, data_dir)
+    ):
+        logging.info(
+            f"Retrying task {task.name} on-demand after Spot run passed cleanup timeout, meta: {meta}"
+        )
         return True
     if not meta.start:
         logging.info(f"Task {task.name} should run, no start field")
@@ -1393,6 +1404,112 @@ def is_abandoned_boot_meta(meta: Meta, last_activity: datetime | None) -> bool:
         and meta.version is None
         and meta.kernel_version is None
     )
+
+
+def cleanup_destroy_reason(
+    task_metas: list[tuple[Task, Meta]],
+    now: datetime | None = None,
+    *,
+    force: bool = False,
+) -> str | None:
+    """Return a destroy reason if cleanup should tear down the instance, else None.
+
+    Shared by ``cleanup_task`` and Spot self-heal (retry unfinished Spot runs
+    on-demand once the machine would have been removed by cleanup).
+    """
+    now = now or datetime.now()
+    start_times: list[datetime] = []
+    end_times: list[datetime] = []
+    already_ended: list[bool] = []
+    sum_timeout = timedelta()
+    max_unfinished_timeout = timedelta()
+    last_activity = max((meta.end for _, meta in task_metas if meta.end), default=None)
+    for task, meta in task_metas:
+        if not meta.start:
+            continue
+        if meta.end:
+            end_times.append(meta.end)
+            already_ended.append(True)
+            continue
+        stale = now > meta.start + task.timeout + DESTROY_AFTER
+        abandoned = is_abandoned_boot_meta(meta, last_activity)
+        if stale or abandoned:
+            already_ended.append(True)
+            continue
+        start_times.append(meta.start)
+        already_ended.append(False)
+        sum_timeout += task.timeout
+        max_unfinished_timeout = max(max_unfinished_timeout, task.timeout)
+
+    if start_times and now >= (wait_time := max(start_times) + max_unfinished_timeout + DESTROY_AFTER):
+        return f"last_start: {max(start_times)}, last timeout: {wait_time}"
+    if start_times and now >= (wait_time := max(start_times) + sum_timeout + DESTROY_AFTER):
+        return f"last_start: {max(start_times)}, wait time: {wait_time}"
+    if already_ended and all(already_ended):
+        return "all tasks have finished"
+    if not start_times and end_times and now >= max(end_times) + DESTROY_AFTER:
+        return f"last end: {max(end_times)}"
+    if not start_times and force:
+        return "forced cleanup"
+    return None
+
+
+def instance_task_metas(
+    vendor: str,
+    server: str,
+    data_dir: str | os.PathLike,
+    tasks: list[Task] | None = None,
+) -> list[tuple[Task, Meta]]:
+    """Applicable (task, meta) pairs for cleanup / Spot heal decisions."""
+    if tasks is None:
+        tasks = [
+            task
+            for task in get_tasks(vendor)
+            if not (task.servers_only and (vendor, server) not in task.servers_only)
+            and not (task.servers_exclude and (vendor, server) in task.servers_exclude)
+        ]
+    return [(task, load_task_meta(task, data_dir=data_dir)) for task in tasks]
+
+
+def is_unfinished_spot_meta(meta: Meta) -> bool:
+    return bool(meta.spot is True and meta.start and meta.end is None)
+
+
+def force_ondemand_after_spot_timeout(
+    vendor: str,
+    server: str,
+    data_dir: str | os.PathLike,
+    tasks: list[Task] | None = None,
+    now: datetime | None = None,
+) -> bool:
+    """True when an unfinished Spot run is past cleanup destroy time (self-heal with on-demand)."""
+    if vendor != "aws":
+        return False
+    task_metas = instance_task_metas(vendor, server, data_dir, tasks)
+    if not any(is_unfinished_spot_meta(meta) for _, meta in task_metas):
+        return False
+    return cleanup_destroy_reason(task_metas, now) is not None
+
+
+AWS_ONDEMAND = False
+AWS_SPOT = True
+
+
+def aws_instance_market_modes(*, force_ondemand: bool = False) -> list[bool]:
+    """Spot-first, then on-demand after the full regional ladder fails; heal uses on-demand only."""
+    if force_ondemand:
+        return [AWS_ONDEMAND]
+    return [AWS_SPOT, AWS_ONDEMAND]
+
+
+def update_task_metas_spot(data_dir: str | os.PathLike, tasks: list[Task], spot: bool) -> None:
+    """Update spot flag on existing boot metas (e.g. Spot ladder exhausted → on-demand)."""
+    for task in tasks:
+        meta = load_task_meta(task, data_dir=data_dir)
+        if meta.spot == spot:
+            continue
+        meta.spot = spot
+        write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
 
 
 def finalize_task_metas(
@@ -2279,6 +2396,7 @@ def _try_start_multi_vm_inspect(
     instance_logger,
     instance_timing,
     error_msgs,
+    aws_market_modes: list[bool] | None = None,
 ) -> bool:
     """Provision a multi-VM stack when tasks need a companion client."""
     import secrets
@@ -2323,113 +2441,134 @@ def _try_start_multi_vm_inspect(
             ]
         return [("region", r) for r in candidate_regions(vendor, server, regions)]
 
-    for kind, location in location_candidates():
-        if kind == "zone":
-            client = pick_client_instance(vendor, location, client_req)
-            region = (zone_to_region or {}).get(location, "")
-            zone = location
-        else:
-            client = pick_client_instance(vendor, location, client_req)
-            region = location
-            zone = None
-        if client is None:
-            logging.info(f"No companion client for {vendor}/{location}")
-            continue
+    market_modes = aws_market_modes if vendor == "aws" else [None]
+    if vendor == "aws" and market_modes is None:
+        market_modes = aws_instance_market_modes()
 
-        logging.info(
-            f"Multi-VM: {vendor}/{server} + client {client.api_reference} in {location}"
-        )
-        _, client_ud_b64 = build_inspector_user_data(
-            vendor,
-            client.api_reference,
-            client,
-            region,
-            zone,
-            timeout_mins,
-            ssh_deploy_key_b64,
-            repo_url_ssh,
-            role="client",
-            mp_authkey_b64=authkey_b64,
-            mp_port=mp_port,
-            include_run_upload=False,
-        )
-        server_replacements = build_server_user_data_replacements(
-            vendor,
-            server,
-            srv_data,
-            region,
-            zone,
-            timeout_mins,
-            ssh_deploy_key_b64,
-            repo_url_ssh,
-            mp_authkey_b64=authkey_b64,
-            mp_port=mp_port,
-            client_instance=client.api_reference,
-            client_cpu_arch=client.cpu_architecture or "",
-            client_vcpus=int(client.vcpus or 0),
-            provisioned_disk_gib=db_disk,
-            client_disk_gib=30,
-            db_disk_type=str(db_disk_opts.get("disk_type") or ""),
-            db_disk_iops=str(db_disk_opts.get("disk_iops") or ""),
-            db_disk_throughput=str(db_disk_opts.get("disk_throughput") or ""),
-        )
-        spec = MultiVmStackSpec.two_vm(
-            primary_instance=server,
-            client_instance=client.api_reference,
-            primary_disk_gib=db_disk,
-            client_disk_gib=30,
-            primary_disk_type=db_disk_opts.get("disk_type"),
-            primary_disk_iops=db_disk_opts.get("disk_iops"),
-            primary_disk_throughput=db_disk_opts.get("disk_throughput"),
-            client_user_data_b64=client_ud_b64,
-            primary_user_data_template=server_replacements["USER_DATA_TEMPLATE"],
-            extra_exports={"mp_port": mp_port},
-        )
-        resource_opts = dict(
-            public_key=os.environ.get("SSH_PUBLIC_KEY", ""),
-            instance=server,
-            disk_size=db_disk,
-            multi_vm=spec,
-        )
-        if vendor == "azure":
-            resource_opts["region"] = region
-        elif vendor == "gcp":
-            resource_opts["zone"] = zone
-        elif vendor == "alicloud":
-            resource_opts["region"] = region
-            resource_opts["availability_zone"] = zone
-        else:
-            resource_opts["region"] = region
-
-        runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
-        pulumi_output = []
-        stack_opts = pulumi_stack_opts(
-            error_msgs, pulumi_output, instance_logger, instance_timing, server
-        )
-        extra = {}
-        if vendor == "azure":
-            image_sku = (
-                "server-arm64"
-                if "arm" in (srv_data.cpu_architecture or "").lower()
-                else "server"
+    for mode_idx, use_spot in enumerate(market_modes):
+        if vendor == "aws" and mode_idx > 0:
+            logging.info(
+                f"{vendor}/{server}: multi-VM Spot exhausted all regions; falling back to on-demand"
             )
-            extra["image_sku"] = image_sku
-        try:
-            retry_locked(
-                runner.create,
+            with lock:
+                repo.pull()
+                update_task_metas_spot(data_dir, tasks, spot=False)
+                repo.push_path(data_dir, f"Falling back to on-demand from {repo.gha_url()}")
+            error_msgs.clear()
+        if vendor == "aws":
+            logging.info(
+                f"{vendor}/{server}: multi-VM trying market={'spot' if use_spot else 'on-demand'}"
+            )
+
+        for kind, location in location_candidates():
+            if kind == "zone":
+                client = pick_client_instance(vendor, location, client_req)
+                region = (zone_to_region or {}).get(location, "")
+                zone = location
+            else:
+                client = pick_client_instance(vendor, location, client_req)
+                region = location
+                zone = None
+            if client is None:
+                logging.info(f"No companion client for {vendor}/{location}")
+                continue
+
+            logging.info(
+                f"Multi-VM: {vendor}/{server} + client {client.api_reference} in {location}"
+            )
+            _, client_ud_b64 = build_inspector_user_data(
                 vendor,
-                {},
-                resource_opts | extra,
-                stack_opts=stack_opts,
-                instance_timing=instance_timing,
-                error_msgs=error_msgs,
+                client.api_reference,
+                client,
+                region,
+                zone,
+                timeout_mins,
+                ssh_deploy_key_b64,
+                repo_url_ssh,
+                role="client",
+                mp_authkey_b64=authkey_b64,
+                mp_port=mp_port,
+                include_run_upload=False,
             )
-            return True
-        except Exception as exc:
-            logging.exception("Multi-VM create failed for %s", location)
-            if not error_msgs:
-                error_msgs.append(str(exc))
-            executor.submit(delayed_destroy, vendor, server, copy.deepcopy(resource_opts))
+            server_replacements = build_server_user_data_replacements(
+                vendor,
+                server,
+                srv_data,
+                region,
+                zone,
+                timeout_mins,
+                ssh_deploy_key_b64,
+                repo_url_ssh,
+                mp_authkey_b64=authkey_b64,
+                mp_port=mp_port,
+                client_instance=client.api_reference,
+                client_cpu_arch=client.cpu_architecture or "",
+                client_vcpus=int(client.vcpus or 0),
+                provisioned_disk_gib=db_disk,
+                client_disk_gib=30,
+                db_disk_type=str(db_disk_opts.get("disk_type") or ""),
+                db_disk_iops=str(db_disk_opts.get("disk_iops") or ""),
+                db_disk_throughput=str(db_disk_opts.get("disk_throughput") or ""),
+            )
+            spec = MultiVmStackSpec.two_vm(
+                primary_instance=server,
+                client_instance=client.api_reference,
+                primary_disk_gib=db_disk,
+                client_disk_gib=30,
+                primary_disk_type=db_disk_opts.get("disk_type"),
+                primary_disk_iops=db_disk_opts.get("disk_iops"),
+                primary_disk_throughput=db_disk_opts.get("disk_throughput"),
+                client_user_data_b64=client_ud_b64,
+                primary_user_data_template=server_replacements["USER_DATA_TEMPLATE"],
+                extra_exports={"mp_port": mp_port},
+            )
+            resource_opts = dict(
+                public_key=os.environ.get("SSH_PUBLIC_KEY", ""),
+                instance=server,
+                disk_size=db_disk,
+                multi_vm=spec,
+            )
+            if vendor == "aws" and use_spot is not None:
+                resource_opts["spot"] = bool(use_spot)
+            if vendor == "azure":
+                resource_opts["region"] = region
+            elif vendor == "gcp":
+                resource_opts["zone"] = zone
+            elif vendor == "alicloud":
+                resource_opts["region"] = region
+                resource_opts["availability_zone"] = zone
+            else:
+                resource_opts["region"] = region
+
+            runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
+            pulumi_output = []
+            stack_opts = pulumi_stack_opts(
+                error_msgs, pulumi_output, instance_logger, instance_timing, server
+            )
+            extra = {}
+            if vendor == "azure":
+                image_sku = (
+                    "server-arm64"
+                    if "arm" in (srv_data.cpu_architecture or "").lower()
+                    else "server"
+                )
+                extra["image_sku"] = image_sku
+            try:
+                retry_locked(
+                    runner.create,
+                    vendor,
+                    {},
+                    resource_opts | extra,
+                    stack_opts=stack_opts,
+                    instance_timing=instance_timing,
+                    error_msgs=error_msgs,
+                )
+                return True
+            except Exception as exc:
+                logging.exception("Multi-VM create failed for %s", location)
+                if not error_msgs:
+                    error_msgs.append(str(exc))
+                executor.submit(delayed_destroy, vendor, server, copy.deepcopy(resource_opts))
     return False
 
 
@@ -2447,10 +2586,20 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
     instance_started = False
     instance_timing = InstanceCreationTiming()
     sum_timeout = timedelta()
+    force_ondemand = force_ondemand_after_spot_timeout(vendor, server, data_dir, tasks)
+    aws_market_modes = aws_instance_market_modes(force_ondemand=force_ondemand) if vendor == "aws" else None
+    if force_ondemand:
+        logging.info(f"{vendor}/{server}: Spot self-heal → on-demand only")
+    initial_spot = (
+        bool(aws_market_modes[0]) if vendor == "aws" and aws_market_modes else None
+    )
     with lock:
         repo.pull()
         for task in tasks:
-            meta = boot_meta_for_task(task, data_dir)
+            fields = {}
+            if vendor == "aws":
+                fields["spot"] = initial_spot
+            meta = boot_meta_for_task(task, data_dir, **fields)
             write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
             sum_timeout += task.timeout
         repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
@@ -2481,6 +2630,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             instance_logger,
             instance_timing,
             error_msgs,
+            aws_market_modes=aws_market_modes,
         )
         if instance_started and instance_timing.complete() and any(task.always_run for task in tasks):
             with lock:
@@ -2573,31 +2723,51 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             key_name="spare-cores",
             instance_initiated_shutdown_behavior="terminate",
         )
-        for region in candidate_regions(vendor, server, regions):
-            logging.info(f"Trying {region}")
-            resource_opts["region"] = region
-            user_data, b64_user_data = build_inspector_user_data(
-                vendor, server, srv_data, region, None, timeout_mins, ssh_deploy_key_b64, repo_url_ssh
+        for mode_idx, use_spot in enumerate(aws_market_modes or aws_instance_market_modes()):
+            if mode_idx > 0:
+                logging.info(
+                    f"{vendor}/{server}: Spot exhausted all regions; falling back to on-demand"
+                )
+                with lock:
+                    repo.pull()
+                    update_task_metas_spot(data_dir, tasks, spot=False)
+                    repo.push_path(data_dir, f"Falling back to on-demand from {repo.gha_url()}")
+                error_msgs.clear()
+            logging.info(
+                f"{vendor}/{server}: trying market={'spot' if use_spot else 'on-demand'}"
             )
+            for region in candidate_regions(vendor, server, regions):
+                logging.info(f"Trying {region}")
+                resource_opts["region"] = region
+                user_data, b64_user_data = build_inspector_user_data(
+                    vendor, server, srv_data, region, None, timeout_mins, ssh_deploy_key_b64, repo_url_ssh
+                )
 
-            # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, pulumi_opts, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
-            pulumi_output = []
-            stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger, instance_timing, server)
-            try:
-                retry_locked(runner.create, vendor, pulumi_opts,
-                             resource_opts | dict(instance_opts=instance_opts, user_data=b64_user_data),
-                             stack_opts=stack_opts, instance_timing=instance_timing,
-                             error_msgs=error_msgs)
-                # empty it if create succeeded, just in case
-                error_msgs = []
-                instance_started = True
+                # before starting, destroy everything to make sure the user-data will run (this is the first boot)
+                runner.destroy(vendor, pulumi_opts, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
+                pulumi_output = []
+                stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger, instance_timing, server)
+                create_opts = resource_opts | dict(
+                    instance_opts=instance_opts,
+                    user_data=b64_user_data,
+                    spot=bool(use_spot),
+                )
+                try:
+                    retry_locked(runner.create, vendor, pulumi_opts,
+                                 create_opts,
+                                 stack_opts=stack_opts, instance_timing=instance_timing,
+                                 error_msgs=error_msgs)
+                    # empty it if create succeeded, just in case
+                    error_msgs = []
+                    instance_started = True
+                    break
+                except Exception as e:
+                    # on failure, try the next one
+                    logging.exception("Couldn't start instance")
+                    if not error_msgs:
+                        error_msgs.append(str(e))
+            if instance_started:
                 break
-            except Exception as e:
-                # on failure, try the next one
-                logging.exception("Couldn't start instance")
-                if not error_msgs:
-                    error_msgs.append(str(e))
 
     if vendor == "alicloud":
         # we use the key_name in instance_opts instead of creating a new key
