@@ -1495,9 +1495,14 @@ AWS_ONDEMAND = False
 AWS_SPOT = True
 
 
+def aws_try_spot() -> bool:
+    """Opt-in: on-demand is the default (env AWS_TRY_SPOT)."""
+    return os.environ.get("AWS_TRY_SPOT", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def aws_instance_market_modes(*, force_ondemand: bool = False) -> list[bool]:
-    """Spot-first, then on-demand after the full regional ladder fails; heal uses on-demand only."""
-    if force_ondemand:
+    """On-demand by default; spot-first (falling back to on-demand) only when opted in."""
+    if force_ondemand or not aws_try_spot():
         return [AWS_ONDEMAND]
     return [AWS_SPOT, AWS_ONDEMAND]
 
