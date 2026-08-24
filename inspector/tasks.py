@@ -4,7 +4,7 @@ from datetime import timedelta
 import parse
 import psutil
 import transform
-from lib import DOCKER_OPTS, DB_DOCKER_OPTS, DockerTask, MultiVmDbTask, Task, VllmDockerTask
+from lib import DOCKER_OPTS, DB_DOCKER_OPTS, DockerTask, Task, VllmDockerTask
 
 # vLLM CPU uses multiprocessing; default Docker /dev/shm (64 MiB) is too small.
 VLLM_DOCKER_OPTS = DOCKER_OPTS | {
@@ -142,134 +142,40 @@ virtualization = DockerTask(
     timeout=timedelta(minutes=5),
 )
 
-# GCP Intel (n2) + AMD (t2d) standard families only — see README-db.md.
-POSTGRES_MULTI_ROLLOUT = {
-    ("gcp", "n2-standard-2"),
-    ("gcp", "n2-standard-4"),
-    ("gcp", "n2-standard-8"),
-    ("gcp", "n2-standard-16"),
-    ("gcp", "n2-standard-32"),
-    ("gcp", "n2-standard-48"),
-    ("gcp", "n2-standard-64"),
-    ("gcp", "n2-standard-80"),
-    ("gcp", "n2-standard-96"),
-    ("gcp", "n2-standard-128"),
-    ("gcp", "t2d-standard-1"),
-    ("gcp", "t2d-standard-2"),
-    ("gcp", "t2d-standard-4"),
-    ("gcp", "t2d-standard-8"),
-    ("gcp", "t2d-standard-16"),
-    ("gcp", "t2d-standard-32"),
-    ("gcp", "t2d-standard-48"),
-    ("gcp", "t2d-standard-60"),
-}
-
-# TEMPORARY: AWS t3 (burstable), c8g/c9g (Arm compute-optimized), c8i (Intel),
-# c8a (AMD) families — mirrors AWS_MAIN_INSTANCE_FAMILIES_ONLY in inspector.py.
-# Remove once validated.
-AWS_PGBENCH_ROLLOUT = {
-    ("aws", "t3.2xlarge"),
-    ("aws", "t3.large"),
-    ("aws", "t3.medium"),
-    ("aws", "t3.micro"),
-    ("aws", "t3.nano"),
-    ("aws", "t3.small"),
-    ("aws", "t3.xlarge"),
-    ("aws", "c8g.12xlarge"),
-    ("aws", "c8g.16xlarge"),
-    ("aws", "c8g.24xlarge"),
-    ("aws", "c8g.2xlarge"),
-    ("aws", "c8g.48xlarge"),
-    ("aws", "c8g.4xlarge"),
-    ("aws", "c8g.8xlarge"),
-    ("aws", "c8g.large"),
-    ("aws", "c8g.medium"),
-    ("aws", "c8g.metal-24xl"),
-    ("aws", "c8g.metal-48xl"),
-    ("aws", "c8g.xlarge"),
-    ("aws", "c9g.12xlarge"),
-    ("aws", "c9g.16xlarge"),
-    ("aws", "c9g.24xlarge"),
-    ("aws", "c9g.2xlarge"),
-    ("aws", "c9g.48xlarge"),
-    ("aws", "c9g.4xlarge"),
-    ("aws", "c9g.8xlarge"),
-    ("aws", "c9g.large"),
-    ("aws", "c9g.medium"),
-    ("aws", "c9g.metal-48xl"),
-    ("aws", "c9g.xlarge"),
-    ("aws", "c8i.12xlarge"),
-    ("aws", "c8i.16xlarge"),
-    ("aws", "c8i.24xlarge"),
-    ("aws", "c8i.2xlarge"),
-    ("aws", "c8i.32xlarge"),
-    ("aws", "c8i.48xlarge"),
-    ("aws", "c8i.4xlarge"),
-    ("aws", "c8i.8xlarge"),
-    ("aws", "c8i.96xlarge"),
-    ("aws", "c8i.large"),
-    ("aws", "c8i.metal-48xl"),
-    ("aws", "c8i.metal-96xl"),
-    ("aws", "c8i.xlarge"),
-    ("aws", "c8a.12xlarge"),
-    ("aws", "c8a.16xlarge"),
-    ("aws", "c8a.24xlarge"),
-    ("aws", "c8a.2xlarge"),
-    ("aws", "c8a.48xlarge"),
-    ("aws", "c8a.4xlarge"),
-    ("aws", "c8a.8xlarge"),
-    ("aws", "c8a.large"),
-    ("aws", "c8a.medium"),
-    ("aws", "c8a.metal-24xl"),
-    ("aws", "c8a.metal-48xl"),
-    ("aws", "c8a.xlarge"),
-}
-
 # ---------------------------------------------------------------------------
-# Multi-VM Postgres — cached CPU-heavy RO (ro_cpu_* script), durable
+# Postgres — cached CPU-heavy RO (ro_cpu_* script), durable
 # Concurrency: {1, V/2, V, 2·V}. Piggybacks via start_with_instance.
+#
+# Single-VM: pgbench stresses the server only and barely touches its own
+# host's CPU (<1%, ~10 MB RSS observed driving an 8-vCPU server), so running
+# the client on a separate companion instance was pure waste. The image
+# starts its own local Postgres server when SC_DB_HOST is unset (see
+# benchmark.py in sc-images/benchmark-pgbench-postgres) instead of requiring
+# a companion VM. servers_only is dropped along with it — no family
+# allowlist is needed once every started instance can just run this locally.
+#
+# The multi-VM machinery itself (MultiVmDbTask, postgres_multi.py,
+# companion_picker.py) is untouched and still available for benchmarks that
+# genuinely need a separate client.
 # ---------------------------------------------------------------------------
 
-_PGBENCH_MULTI_RO = dict(
+pgbench_postgres_multi_ro_durable = DockerTask(
     parallel=False,
     start_with_instance=True,
-    servers_only=POSTGRES_MULTI_ROLLOUT | AWS_PGBENCH_ROLLOUT,
-    benchmark_family="pgbench_postgres_multi",
-    workload_proxy="read_heavy",
+    priority=1.02,
+    minimum_memory=2.0,
     image="ghcr.io/sparecores/benchmark-pgbench-postgres:main",
     timeout=timedelta(minutes=120),
-    docker_opts=DB_DOCKER_OPTS,
+    docker_opts=DB_DOCKER_OPTS
+    | tracker_docker_opts(
+        "pgbench_postgres",
+        SC_DURABILITY="durable",
+        SC_CDN_BASE_URL=os.environ.get("SC_CDN_BASE_URL"),
+        SC_CDN_DATASET_POST_B64=os.environ.get("SC_CDN_DATASET_POST_B64"),
+        SC_CDN_UPLOAD=os.environ.get("SC_CDN_UPLOAD"),
+    ),
+    command=None,
 )
-
-pgbench_postgres_multi_ro_durable = MultiVmDbTask(
-    **_PGBENCH_MULTI_RO,
-    priority=1.02,
-    durability="durable",
-)
-
-# ---------------------------------------------------------------------------
-# Multi-VM Postgres — pgbench TPC-B (tpcb-like), async
-# Size: smallest SCHEMA_SIZE_GIB rung covering search_cap(V), ≤¼ RAM.
-# Disabled for now: RTT-sensitive; peak search undershoots interstitial
-# rungs below V. Re-enable after peak algorithm + placement fixes.
-# ---------------------------------------------------------------------------
-
-# _PGBENCH_MULTI_TPCB = dict(
-#     parallel=False,
-#     start_with_instance=True,
-#     servers_only=POSTGRES_MULTI_ROLLOUT,
-#     benchmark_family="pgbench_postgres_multi_tpcb",
-#     workload_proxy="write_heavy",
-#     image="ghcr.io/sparecores/benchmark-pgbench-postgres:main",
-#     timeout=timedelta(minutes=180),
-#     docker_opts=DB_DOCKER_OPTS,
-# )
-#
-# pgbench_postgres_multi_tpcb_async = MultiVmDbTask(
-#     **_PGBENCH_MULTI_TPCB,
-#     priority=1.03,
-#     durability="async",
-# )
 
 # We use this benchmark to determine the "SCore" of a given instance. This should represent the relative
 # performance of it, which can be used to compare the "speed" of measured machines.
