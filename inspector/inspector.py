@@ -66,6 +66,12 @@ EXCLUDE_INSTANCES: list[tuple[str, str]] = [
     ("aws", "u7in-32tb.224xlarge"),
 ]
 
+# TEMPORARY: while validating AWS Spot self-heal + the pgbench multi-VM rollout,
+# only start these AWS instance families as the "main" (primary/single-VM)
+# instance. Does not restrict the multi-VM companion/client instance, which is
+# picked independently by companion_picker.py. Remove once validated.
+AWS_MAIN_INSTANCE_FAMILIES_ONLY = {"t3", "c8g", "c9g", "c8i", "c8a"}
+
 
 @cache
 def get_regions(vendor: str):
@@ -173,6 +179,9 @@ def start(ctx, exclude, start_only, vendor, limit):
     ):
         if vnd not in supported_vendors:
             # sc-runner can't yet handle this vendor
+            continue
+        if vnd == "aws" and server.split(".")[0] not in AWS_MAIN_INSTANCE_FAMILIES_ONLY:
+            logging.info(f"Excluding {vnd}/{server}: not in AWS_MAIN_INSTANCE_FAMILIES_ONLY")
             continue
         gpu_count = srv_data.gpu_count
         logging.info(f"Evaluating {vnd}/{server} with {gpu_count} GPUs")
