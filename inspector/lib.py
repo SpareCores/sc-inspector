@@ -1380,6 +1380,21 @@ def run_tasks(
                     continue
 
             logging.info(f"Starting {task.name}")
+            if not task.parallel:
+                # Persist the real start time before blocking on this task, and push it
+                # now rather than waiting for the taskgroup-end push below. Otherwise the
+                # committed meta.json keeps showing the boot-time placeholder start for as
+                # long as the task runs, which is indistinguishable from a genuinely
+                # abandoned boot placeholder to is_abandoned_boot_meta() once any earlier
+                # task in the same run has finished — cleanup would destroy the instance
+                # out from under a task that is still actively running.
+                meta.start = datetime.now()
+                meta.end = None
+                meta.exit_code = None
+                meta.error_msg = None
+                meta.task_hash = task_hash(task)
+                write_meta(meta, os.path.join(task_dir_root, task.name, META_NAME))
+                _push_data_dirs([task_dir_root], f"Starting {task.name} from {repo.gha_url()}")
             q.put(task)
             changed_dirs.append(task_dir_root)
             if not task.parallel:
