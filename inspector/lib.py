@@ -233,7 +233,6 @@ class MultiVmDbTask(DockerTask):
 class DbaasDbTask(DockerTask):
     """Postgres benchmarks against a vendor-managed database (priority band 1.x)."""
 
-    MULTI_VM_PRIORITY_BAND: ClassVar[int] = 1
     command: str | list | None = None
     topology: Literal["dbaas"] = "dbaas"
     benchmark_family: str = ""
