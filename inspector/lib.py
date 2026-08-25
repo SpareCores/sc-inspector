@@ -2734,10 +2734,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
     if vendor == "aws":
         # we use the key_name in instance_opts instead of creating a new key
         resource_opts = dict(public_key="", instance=server, disk_size=VOLUME_SIZE)
-        instance_opts |= dict(
-            key_name="spare-cores",
-            instance_initiated_shutdown_behavior="terminate",
-        )
+        instance_opts |= dict(key_name="spare-cores")
         for mode_idx, use_spot in enumerate(aws_market_modes or aws_instance_market_modes()):
             if mode_idx > 0:
                 logging.info(
@@ -2751,6 +2748,13 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             logging.info(
                 f"{vendor}/{server}: trying market={'spot' if use_spot else 'on-demand'}"
             )
+            # AWS rejects ModifyInstanceAttribute(InstanceInitiatedShutdownBehavior) for
+            # spot instances ("not supported for spot instances"); the provider issues
+            # that call whenever the field is set, regardless of value, so it must be
+            # left out entirely for spot rather than just matching AWS's own default.
+            mode_instance_opts = dict(instance_opts)
+            if not use_spot:
+                mode_instance_opts["instance_initiated_shutdown_behavior"] = "terminate"
             for region in candidate_regions(vendor, server, regions):
                 logging.info(f"Trying {region}")
                 resource_opts["region"] = region
@@ -2763,7 +2767,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 pulumi_output = []
                 stack_opts = pulumi_stack_opts(error_msgs, pulumi_output, instance_logger, instance_timing, server)
                 create_opts = resource_opts | dict(
-                    instance_opts=instance_opts,
+                    instance_opts=mode_instance_opts,
                     user_data=b64_user_data,
                     spot=bool(use_spot),
                 )
