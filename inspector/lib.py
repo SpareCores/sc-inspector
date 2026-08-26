@@ -116,6 +116,19 @@ RETRYABLE_START_ERROR_MARKERS = (
     "SERVER_CORE_LIMIT_REACHED",
     "CPU core quota",
 )
+# Region-level resource limits: unlike instance capacity, these block *every*
+# instance type in the region, not just the one being tried. No point trying
+# another candidate (e.g. a different DBaaS client SKU) in the same region -
+# move on to the next region/zone immediately instead.
+REGION_FATAL_ERROR_MARKERS = (
+    "VpcLimitExceeded",
+    "SubnetLimitExceeded",
+    "InternetGatewayLimitExceeded",
+    "NetworkAclLimitExceeded",
+    "RouteTableLimitExceeded",
+    "SecurityGroupLimitExceeded",
+    "AddressLimitExceeded",
+)
 # Same-location Pulumi retries (retry_locked): only errors that may clear in seconds.
 # Capacity shortages should fail over to the next region/zone immediately.
 RETRYABLE_PULUMI_ERROR_MARKERS = tuple(
@@ -2241,6 +2254,11 @@ def pulumi_error_text(exc: BaseException, error_msgs: list[str] | None = None) -
 def is_retryable_pulumi_error(exc: BaseException, error_msgs: list[str] | None = None) -> bool:
     text = pulumi_error_text(exc, error_msgs)
     return any(marker in text for marker in RETRYABLE_PULUMI_ERROR_MARKERS)
+
+
+def is_region_fatal_error(exc: BaseException, error_msgs: list[str] | None = None) -> bool:
+    text = pulumi_error_text(exc, error_msgs)
+    return any(marker in text for marker in REGION_FATAL_ERROR_MARKERS)
 
 
 def is_gcp_host_maintenance_policy_error(error_text: str) -> bool:

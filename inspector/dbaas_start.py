@@ -19,6 +19,7 @@ from lib import (
     InstanceCreationTiming,
     boot_meta_for_task,
     inspector_user_data_replacements,
+    is_region_fatal_error,
     pulumi_stack_opts,
     record_instance_start_failure,
     record_timing_api,
@@ -192,7 +193,9 @@ def _try_provision_dbaas_stack(
     instance_logger,
     instance_timing,
     error_msgs,
-) -> bool:
+) -> tuple[bool, bool]:
+    """Returns (success, region_fatal). region_fatal means don't bother
+    trying another client candidate in this same region/zone."""
     logging.info(
         "DBaaS: %s/%s + client %s in %s",
         vendor,
@@ -271,7 +274,7 @@ def _try_provision_dbaas_stack(
             instance_timing=instance_timing,
             error_msgs=error_msgs,
         )
-        return True
+        return True, False
     except Exception as exc:
         logging.exception(
             "DBaaS create failed for %s with client %s",
@@ -280,8 +283,9 @@ def _try_provision_dbaas_stack(
         )
         if not error_msgs:
             error_msgs.append(str(exc))
+        region_fatal = is_region_fatal_error(exc, error_msgs)
         _destroy_dbaas_stack(vendor, resource_opts, instance_logger, error_msgs)
-        return False
+        return False, region_fatal
 
 
 def try_start_dbaas_inspect(
@@ -350,7 +354,7 @@ def try_start_dbaas_inspect(
             continue
 
         for client in clients:
-            if _try_provision_dbaas_stack(
+            success, region_fatal = _try_provision_dbaas_stack(
                 vendor,
                 target,
                 client,
@@ -364,8 +368,17 @@ def try_start_dbaas_inspect(
                 instance_logger,
                 instance_timing,
                 error_msgs,
-            ):
+            )
+            if success:
                 return True
+            if region_fatal:
+                logging.info(
+                    "Region-level resource limit in %s/%s; skipping remaining "
+                    "client candidates, trying next region",
+                    vendor,
+                    location,
+                )
+                break
     return False
 
 
