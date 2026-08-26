@@ -6,9 +6,18 @@ import psutil
 import transform
 from lib import DOCKER_OPTS, DB_DOCKER_OPTS, DockerTask, Task, VllmDockerTask
 
+# get the amount of available memory
+mem_bytes = psutil.virtual_memory().available
+
 # vLLM CPU uses multiprocessing; default Docker /dev/shm (64 MiB) is too small.
+# mem_limit caps a runaway model-serving attempt to the kernel's (fast, clean) cgroup
+# OOM killer instead of letting it exhaust host RAM and take the whole instance down
+# via iowait thrashing (observed: sshd itself became unschedulable for 30+ minutes).
 VLLM_DOCKER_OPTS = DOCKER_OPTS | {
     "shm_size": 4 * 1024**3,
+    "mem_limit": int(mem_bytes * 0.85),
+    "memswap_limit": int(mem_bytes * 0.85),
+    "mem_swappiness": 0,
 }
 
 def tracker_docker_opts(job_name: str, **extra_env: str | None) -> dict:
@@ -35,9 +44,6 @@ GPU_EXCLUDE = {
     ("aws", "g3s.xlarge"),
     ("gcp", "a2-megagpu-16g"),
 }
-
-# get the amount of available memory
-mem_bytes = psutil.virtual_memory().available
 
 
 # Records timing/* checkpoints (user_data mount, machine boot, inspector); see sc-inspector-data README.
