@@ -7,7 +7,7 @@ from functools import cache, lru_cache
 from types import SimpleNamespace
 from typing import Any
 
-from benchmark_tiers import ClientRequirements
+from benchmark_tiers import ClientRequirements, DbaasClientRequirements
 from sc_crawler.table_fields import CpuAllocation, CpuArchitecture
 
 # Catalog benchmark_id (sc_crawler's "stress_ng:best1", not our local task name
@@ -201,6 +201,86 @@ def rank_client_instances(vendor: str, location: str, req: ClientRequirements) -
     server_ids = [s.server_id for s, _ in candidates]
     scores = _stressng_best1_scores(vendor, server_ids)
     return _rank_client_candidates(candidates, scores)
+
+
+def _eligible_dbaas_clients_with_prices(
+    vendor: str,
+    location: str,
+    req: DbaasClientRequirements,
+) -> list[tuple[Any, float]]:
+    """Small, cheap, non-burstable DBaaS client candidates in a location.
+
+    Separate from _eligible_servers_with_prices: bounded on *both* ends of
+    memory (not just a floor) and on price, since DBaaS client sizing is a
+    fixed small target, not derived from the DB being benchmarked.
+    """
+    from sc_crawler.tables import Server, ServerPrice
+    from sqlmodel import Session, select
+
+    region_ids, zone_ids = _location_ids(vendor, location)
+    loc_filter = _location_price_filter(region_ids, zone_ids)
+    if loc_filter is None:
+        return []
+
+    min_mem_mib = req.min_memory_gib * 1024
+    max_mem_mib = req.max_memory_gib * 1024
+    engine = _catalog_engine()
+    with Session(engine) as session:
+        stmt = (
+            select(
+                Server.server_id,
+                Server.api_reference,
+                Server.vcpus,
+                Server.memory_amount,
+                Server.gpu_count,
+                Server.cpu_architecture,
+                ServerPrice.price,
+            )
+            .join(ServerPrice, ServerPrice.server_id == Server.server_id)
+            .where(ServerPrice.vendor_id == vendor)
+            .where(ServerPrice.status == "ACTIVE")
+            .where(ServerPrice.allocation == "ONDEMAND")
+            .where(Server.status == "ACTIVE")
+            .where(Server.gpu_count == 0)
+            .where(Server.cpu_architecture.in_(_X86_CPU_ARCHITECTURES))
+            .where(Server.cpu_allocation.in_(_DEDICATED_CPU_ALLOCATIONS))
+            .where(Server.vcpus >= req.min_vcpus)
+            .where(Server.vcpus <= req.max_vcpus)
+            .where(Server.memory_amount >= min_mem_mib)
+            .where(Server.memory_amount <= max_mem_mib)
+            .where(ServerPrice.price <= req.max_hourly_price)
+            .where(loc_filter)
+        )
+        rows = session.exec(stmt).all()
+
+    best: dict[str, tuple[Any, float]] = {}
+    for server_id, api_ref, vcpus, memory_amount, gpu_count, cpu_arch, price in rows:
+        price_f = float(price)
+        if server_id not in best or price_f < best[server_id][1]:
+            stub = SimpleNamespace(
+                server_id=server_id,
+                api_reference=api_ref,
+                vcpus=vcpus,
+                memory_amount=memory_amount,
+                gpu_count=gpu_count or 0,
+                cpu_architecture=cpu_arch,
+            )
+            best[server_id] = (stub, price_f)
+    return list(best.values())
+
+
+def rank_dbaas_client_instances(
+    vendor: str, location: str, req: DbaasClientRequirements
+) -> list[Any]:
+    """Return catalog DBaaS client servers cheapest-first (not by score)."""
+    candidates = _eligible_dbaas_clients_with_prices(vendor, location, req)
+    return [
+        server
+        for server, _price in sorted(
+            candidates,
+            key=lambda item: (item[1], item[0].api_reference),
+        )
+    ]
 
 
 def pick_client_instance(vendor: str, location: str, req: ClientRequirements):

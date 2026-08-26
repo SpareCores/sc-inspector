@@ -98,6 +98,41 @@ class ClientRequirements:
     max_vcpus: int | None = None
 
 
+# DBaaS client sizing: unlike multi-VM (server on a companion VM we control),
+# the managed DB does all the heavy RO work server-side, so the client driving
+# pgbench against it barely does anything regardless of the DB's own size (see
+# ClientRequirements docstring above). No need to scale with the DB SKU at
+# all — a small, fixed, non-burstable instance is enough for any remote DB.
+DBAAS_CLIENT_MIN_VCPUS = 2
+DBAAS_CLIENT_MAX_VCPUS = 4
+DBAAS_CLIENT_MIN_MEMORY_GIB = 4.0
+DBAAS_CLIENT_MAX_MEMORY_GIB = 8.0
+# Keep the picker in "small general-purpose instance" territory. Without a
+# ceiling, a tiny-but-exotic SKU (e.g. an inference/accelerator instance that
+# happens to report 4 vCPUs / 8 GiB) could pass the size filter and get tried
+# before cheaper, ordinary options run out.
+DBAAS_CLIENT_MAX_HOURLY_PRICE = 0.30
+
+
+@dataclass(frozen=True)
+class DbaasClientRequirements:
+    """Fixed sizing bounds for the DBaaS pgbench client — deliberately not
+    ClientRequirements: independent of DB size, ranked by price (not
+    single-core score), and bounded above on both memory and price.
+    """
+
+    min_vcpus: int = DBAAS_CLIENT_MIN_VCPUS
+    max_vcpus: int = DBAAS_CLIENT_MAX_VCPUS
+    min_memory_gib: float = DBAAS_CLIENT_MIN_MEMORY_GIB
+    max_memory_gib: float = DBAAS_CLIENT_MAX_MEMORY_GIB
+    max_hourly_price: float = DBAAS_CLIENT_MAX_HOURLY_PRICE
+
+
+def dbaas_client_req() -> DbaasClientRequirements:
+    """DBaaS client requirements: fixed, not derived from the DB target."""
+    return DbaasClientRequirements()
+
+
 def target_schema_gib(mem_gib: float) -> float:
     """Largest discrete schema rung that fits in ~shared_buffers (¼ RAM)."""
     budget = max(float(mem_gib), 0.0) * SCHEMA_RAM_FRAC

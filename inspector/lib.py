@@ -241,9 +241,10 @@ class DbaasDbTask(DockerTask):
     dbaas_only: set[tuple[str, str]] = set()
 
     def client_requirements(self, target):
-        from benchmark_tiers import client_req
+        from benchmark_tiers import dbaas_client_req
 
-        return client_req(target)
+        del target  # fixed sizing, independent of the DB target
+        return dbaas_client_req()
 
     def disk_gib_required(self, target) -> float:
         from dbaas_tiers import provision_spec

@@ -9,8 +9,8 @@ import threading
 from datetime import timedelta
 
 from azure_dbaas_quota import check_dbaas_postgres_quota, filter_clients_by_vm_quota
-from benchmark_tiers import merge_client_requirements
-from companion_picker import rank_client_instances
+from benchmark_tiers import dbaas_client_req
+from companion_picker import rank_dbaas_client_instances
 from dbaas_catalog import ManagedDbTarget
 from dbaas_selector import stack_slug, target_sizing_stub
 from dbaas_tiers import provision_spec
@@ -308,11 +308,10 @@ def try_start_dbaas_inspect(
     if not dbaas_tasks:
         return False
 
-    stub = target_sizing_stub(target)
     provision = provision_spec(target)
-    client_req = merge_client_requirements(
-        [t.client_requirements(stub) for t in dbaas_tasks]
-    )
+    # Fixed, DB-size-independent sizing (see DbaasClientRequirements) — no need
+    # to merge per-task requirements the way multi-VM's companion sizing does.
+    client_req = dbaas_client_req()
     slug = stack_slug(target)
 
     for kind, location in _dbaas_location_candidates(
@@ -342,7 +341,7 @@ def try_start_dbaas_inspect(
             )
             continue
 
-        clients = rank_client_instances(vendor, region, client_req)
+        clients = rank_dbaas_client_instances(vendor, region, client_req)
         if not clients:
             logging.info("No DBaaS client for %s/%s", vendor, location)
             continue
