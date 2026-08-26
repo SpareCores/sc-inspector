@@ -208,11 +208,13 @@ def _eligible_dbaas_clients_with_prices(
     location: str,
     req: DbaasClientRequirements,
 ) -> list[tuple[Any, float]]:
-    """Small, cheap, non-burstable DBaaS client candidates in a location.
+    """Small, non-burstable DBaaS client candidates in a location, any price.
 
     Separate from _eligible_servers_with_prices: bounded on *both* ends of
-    memory (not just a floor) and on price, since DBaaS client sizing is a
-    fixed small target, not derived from the DB being benchmarked.
+    memory (not just a floor), since DBaaS client sizing is a fixed small
+    target, not derived from the DB being benchmarked. No price bound here —
+    rank_dbaas_client_instances applies a dynamic per-location cutoff over
+    this candidate set instead of a fixed ceiling.
     """
     from sc_crawler.tables import Server, ServerPrice
     from sqlmodel import Session, select
@@ -248,7 +250,6 @@ def _eligible_dbaas_clients_with_prices(
             .where(Server.vcpus <= req.max_vcpus)
             .where(Server.memory_amount >= min_mem_mib)
             .where(Server.memory_amount <= max_mem_mib)
-            .where(ServerPrice.price <= req.max_hourly_price)
             .where(loc_filter)
         )
         rows = session.exec(stmt).all()
@@ -269,11 +270,49 @@ def _eligible_dbaas_clients_with_prices(
     return list(best.values())
 
 
+# Below this many candidates, quartiles are too noisy to trust — e.g. with 3
+# points Q3 can coincide with the max, either excluding nothing or excluding
+# the only expensive-looking option on a technicality. Skip the outlier cut
+# entirely rather than fall back to a fixed number.
+_MIN_CANDIDATES_FOR_OUTLIER_FENCE = 4
+
+
+def _tukey_price_fence(prices: list[float]) -> float | None:
+    """Q3 + 1.5*IQR: excludes genuine price outliers, not a fixed top slice.
+
+    Adapts to how spread out a location's prices actually are — barely cuts
+    anything in a tightly-clustered pool, cuts precisely at the boundary when
+    a handful of exotic/specialized SKUs sit well above the rest.
+    """
+    import statistics
+
+    if len(prices) < _MIN_CANDIDATES_FOR_OUTLIER_FENCE:
+        return None
+    q1, _, q3 = statistics.quantiles(prices, n=4)
+    return q3 + 1.5 * (q3 - q1)
+
+
 def rank_dbaas_client_instances(
     vendor: str, location: str, req: DbaasClientRequirements
 ) -> list[Any]:
-    """Return catalog DBaaS client servers cheapest-first (not by score)."""
+    """Return catalog DBaaS client servers cheapest-first (not by score).
+
+    Excludes price outliers (see _tukey_price_fence) using this location's
+    own candidate pool, recomputed fresh each call — not a fixed ceiling.
+    """
     candidates = _eligible_dbaas_clients_with_prices(vendor, location, req)
+    fence = _tukey_price_fence([price for _server, price in candidates])
+    if fence is not None:
+        excluded = [c for c in candidates if c[1] > fence]
+        if excluded:
+            logging.info(
+                "DBaaS client price fence for %s/%s: %.4f/hr, excluding %s",
+                vendor,
+                location,
+                fence,
+                sorted(f"{s.api_reference}(${p:.3f})" for s, p in excluded),
+            )
+        candidates = [c for c in candidates if c[1] <= fence]
     return [
         server
         for server, _price in sorted(

@@ -107,25 +107,24 @@ DBAAS_CLIENT_MIN_VCPUS = 2
 DBAAS_CLIENT_MAX_VCPUS = 4
 DBAAS_CLIENT_MIN_MEMORY_GIB = 4.0
 DBAAS_CLIENT_MAX_MEMORY_GIB = 8.0
-# Keep the picker in "small general-purpose instance" territory. Without a
-# ceiling, a tiny-but-exotic SKU (e.g. an inference/accelerator instance that
-# happens to report 4 vCPUs / 8 GiB) could pass the size filter and get tried
-# before cheaper, ordinary options run out.
-DBAAS_CLIENT_MAX_HOURLY_PRICE = 0.30
+# Price ceiling isn't a fixed number here — companion_picker computes a Tukey
+# IQR fence (Q3 + 1.5*IQR) per vendor/region each round instead, so it only
+# excludes genuine outliers (e.g. a small-but-exotic accelerator SKU) rather
+# than an arbitrary top slice of an otherwise reasonable, tightly-priced pool.
 
 
 @dataclass(frozen=True)
 class DbaasClientRequirements:
     """Fixed sizing bounds for the DBaaS pgbench client — deliberately not
-    ClientRequirements: independent of DB size, ranked by price (not
-    single-core score), and bounded above on both memory and price.
+    ClientRequirements: independent of DB size, and ranked by price (not
+    single-core score). Bounded above on memory; the price ceiling is
+    computed dynamically per vendor/region (see companion_picker).
     """
 
     min_vcpus: int = DBAAS_CLIENT_MIN_VCPUS
     max_vcpus: int = DBAAS_CLIENT_MAX_VCPUS
     min_memory_gib: float = DBAAS_CLIENT_MIN_MEMORY_GIB
     max_memory_gib: float = DBAAS_CLIENT_MAX_MEMORY_GIB
-    max_hourly_price: float = DBAAS_CLIENT_MAX_HOURLY_PRICE
 
 
 def dbaas_client_req() -> DbaasClientRequirements:
