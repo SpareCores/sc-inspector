@@ -70,7 +70,10 @@ EXCLUDE_INSTANCES: list[tuple[str, str]] = [
 # only start these AWS instance families as the "main" (primary/single-VM)
 # instance. Does not restrict the multi-VM companion/client instance, which is
 # picked independently by companion_picker.py. Remove once validated.
-AWS_MAIN_INSTANCE_FAMILIES_ONLY = {"t3", "c8g", "c9g", "c8i", "c8a"}
+AWS_MAIN_INSTANCE_FAMILIES_ONLY = {
+    "t3", "c8g", "c9g", "c8i", "c8a",
+    "m9g", "m8g", "m7i", "m7g", "m6g", "m6i", "t4g",
+}
 
 
 @cache
