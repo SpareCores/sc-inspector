@@ -183,7 +183,11 @@ def start(ctx, exclude, start_only, vendor, limit):
         if vnd not in supported_vendors:
             # sc-runner can't yet handle this vendor
             continue
-        if vnd == "aws" and server.split(".")[0] not in AWS_MAIN_INSTANCE_FAMILIES_ONLY:
+        if (
+            vnd == "aws"
+            and server.split(".")[0] not in AWS_MAIN_INSTANCE_FAMILIES_ONLY
+            and not (start_only and (vnd, server) in start_only)
+        ):
             logging.info(f"Excluding {vnd}/{server}: not in AWS_MAIN_INSTANCE_FAMILIES_ONLY")
             continue
         gpu_count = srv_data.gpu_count
