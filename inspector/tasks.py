@@ -244,6 +244,7 @@ geekbench = DockerTask(
     ),
     # geekbench struggles and give truncated results with less than 2GB of memory
     minimum_memory=2.1,
+    maximum_cpus=32,
     transform_output=[transform.raw, transform.fetch_geekbench_results],
     command="nice -n -20 geekbench.sh",
     timeout=timedelta(hours=1),
@@ -332,6 +333,7 @@ passmark = DockerTask(
     image="ghcr.io/sparecores/benchmark-passmark:main",
     docker_opts=DOCKER_OPTS | tracker_docker_opts("passmark"),
     command=None,
+    maximum_cpus=32,
 )
 
 llm = DockerTask(

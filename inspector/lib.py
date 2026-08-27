@@ -179,6 +179,7 @@ class Task(BaseModel):
     name: str | None = None  # name of the task
     gpu: bool = False  # requires a machine with GPU(s)
     minimum_memory: float = 0  # minimum memory in GiBs for this test
+    maximum_cpus: int = 0  # maximum CPUs for this test; 0 means no limit
     precheck_command: str | list | None = None  # check if we should run this task
     precheck_regex: str | None = None  # regular expression to match the precheck command's stdout
     # Never start an instance for this task alone; may still be included when another task starts.
@@ -455,6 +456,8 @@ def _target_in_dbaas_only(dbaas_only, vendor, instance_key):
 def _task_matches_target_for_start(task: Task, target, data_dir: str | os.PathLike) -> bool:
     if target.memory_gib < task.minimum_memory:
         return False
+    if task.maximum_cpus and target.cpu_count > task.maximum_cpus:
+        return False
     if isinstance(task, DbaasDbTask):
         if task.dbaas_only and not _target_in_dbaas_only(
             task.dbaas_only, target.vendor_id, target.instance_key
@@ -474,6 +477,8 @@ def _task_matches_server_for_start(task: Task, srv, data_dir: str | os.PathLike)
     if task.gpu and not srv.gpu_count:
         return False
     if srv.memory_amount < task.minimum_memory * 1024:
+        return False
+    if task.maximum_cpus and srv.vcpus > task.maximum_cpus:
         return False
     if task.servers_only and not _server_in_servers_only(
         task.servers_only, srv.vendor_id, srv.api_reference, data_dir
@@ -577,6 +582,11 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
                 f"Skipping task {task.name} because it requires {task.minimum_memory} GiB RAM, "
                 f"but this machine has only {mem_gib:.03}"
             )
+        elif task.maximum_cpus and srv.vcpus > task.maximum_cpus:
+            logging.info(
+                f"Skipping task {task.name} because it allows at most {task.maximum_cpus} CPUs, "
+                f"but this machine has {srv.vcpus}"
+            )
         elif task.servers_only and not _server_in_servers_only(
             task.servers_only, srv.vendor_id, srv.api_reference, data_dir
         ):
@@ -629,12 +639,20 @@ def _task_resource_checks(
     instance: str,
     gpu_count: float,
     mem_bytes: int,
+    cpu_count: int | float | None = None,
 ) -> bool:
     if mem_bytes < task.minimum_memory * 1024 ** 3:
         mem_gib = mem_bytes / 1024 ** 3
         logging.info(
             f"Skipping task {task.name} because it requires {task.minimum_memory} GiB RAM, "
             f"but this machine has only {mem_gib:.03}"
+        )
+        return False
+    host_cpus = cpu_count if cpu_count is not None else (os.cpu_count() or 1)
+    if task.maximum_cpus and host_cpus > task.maximum_cpus:
+        logging.info(
+            f"Skipping task {task.name} because it allows at most {task.maximum_cpus} CPUs, "
+            f"but this machine has {host_cpus}"
         )
         return False
     if task.gpu and not gpu_count:
@@ -708,8 +726,21 @@ def task_data_dir(
     return client_data_dir
 
 
-def should_run(task: Task, data_dir: str | os.PathLike, vendor: str, instance: str, gpu_count: float) -> bool:
-    """Return True if we should run a task."""
+def should_run(
+    task: Task,
+    data_dir: str | os.PathLike,
+    vendor: str,
+    instance: str,
+    gpu_count: float,
+    *,
+    cpu_count: int | float | None = None,
+) -> bool:
+    """Return True if we should run a task.
+
+    On the spawned instance (inspect), omit ``cpu_count`` to use the live host.
+    From the start orchestrator (GHA), pass catalog vCPUs so checks do not use
+    the runner's ``os.cpu_count()``.
+    """
     if isinstance(task, DbaasDbTask) and os.environ.get("TOPOLOGY") != "dbaas":
         logging.info(f"Skipping task {task.name}: TOPOLOGY is not dbaas")
         return False
@@ -720,12 +751,16 @@ def should_run(task: Task, data_dir: str | os.PathLike, vendor: str, instance: s
 
     mem_bytes = psutil.virtual_memory().available
     if task.always_run:
-        if not _task_resource_checks(task, data_dir, vendor, instance, gpu_count, mem_bytes):
+        if not _task_resource_checks(
+            task, data_dir, vendor, instance, gpu_count, mem_bytes, cpu_count=cpu_count
+        ):
             return False
         logging.info(f"Running {task.name} (always_run)")
         return True
 
-    if not _task_resource_checks(task, data_dir, vendor, instance, gpu_count, mem_bytes):
+    if not _task_resource_checks(
+        task, data_dir, vendor, instance, gpu_count, mem_bytes, cpu_count=cpu_count
+    ):
         return False
 
     meta = load_task_meta(task, data_dir)
@@ -1172,7 +1207,12 @@ def tasks_to_start(vendor: str, data_dir: str | os.PathLike, srv) -> list[Task]:
             tasks.append(task)
             started.add(id(task))
         elif task.start_with_instance and should_run(
-            task, data_dir, srv.vendor_id, srv.api_reference, srv.gpu_count
+            task,
+            data_dir,
+            srv.vendor_id,
+            srv.api_reference,
+            srv.gpu_count,
+            cpu_count=srv.vcpus,
         ):
             logging.info(f"Adding {task.name} (start_with_instance) for co-start")
             tasks.append(task)
@@ -1216,7 +1256,12 @@ def tasks_to_start_dbaas(vendor: str, data_dir: str | os.PathLike, target) -> li
             tasks.append(task)
             started.add(id(task))
         elif isinstance(task, DbaasDbTask) and task.start_with_instance and should_run(
-            task, data_dir, vendor, target.native_id, 0.0
+            task,
+            data_dir,
+            vendor,
+            target.native_id,
+            0.0,
+            cpu_count=target.cpu_count,
         ):
             tasks.append(task)
             started.add(id(task))
