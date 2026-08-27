@@ -1,0 +1,12 @@
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+ENV GEEKBENCH_VER=6.7.1
+RUN apt-get update && apt-get install -y \
+    curl ca-certificates openssl python3 libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /opt/geekbench \
+    && curl -sSLfo - "https://cdn.geekbench.com/Geekbench-${GEEKBENCH_VER}-LinuxARMPreview.tar.gz" \
+      | tar zxf - -C /opt/geekbench --strip-components=1
+COPY geekbench.sh geekbench_capture.py /opt/
+RUN chmod +x /opt/geekbench.sh
+WORKDIR /opt
