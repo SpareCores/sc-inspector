@@ -19,7 +19,10 @@ upload_run_status() {
         return
     fi
     terminated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    cat <<EOF | curl -sfS -X PUT -H "Content-Type: application/json" --data-binary @- "$url"
+    # Never let a failed upload (network blip, expired presign, ...) abort the
+    # script under `set -e` - that would skip the poweroff below and leave the
+    # instance running indefinitely with no run record to trigger cleanup.
+    cat <<EOF | curl -sfS -X PUT -H "Content-Type: application/json" --data-binary @- "$url" || true
 {"vendor":"{VENDOR}","instance":"{INSTANCE}","region":"{REGION}","zone":"{ZONE}","workflow":"{GITHUB_WORKFLOW}","run_id":"{GITHUB_RUN_ID}","topology":"{TOPOLOGY}","instance_key":"{MANAGED_DB_INSTANCE_KEY}","dbaas_slug":"{SC_PROVISION_STACK_SLUG}","terminated_at":"$terminated_at","success":$success,"exit_code":$exit_code}
 EOF
 }
