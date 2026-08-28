@@ -480,6 +480,14 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
 
 
 def stack_key_for_record(record) -> tuple:
+    # DBaaS records' "instance" is the pgbench client's instance type, not the
+    # DB stack's identity - since the fixed price-first client picker, many
+    # different DB SKUs in the same region/zone share one client type, so
+    # keying on it collides distinct stacks into one group (cleanup_s3_stack
+    # only destroys group_records[0]'s stack but deletes every grouped S3
+    # record, orphaning the rest). dbaas_slug uniquely identifies the stack.
+    if getattr(record, "topology", "") == "dbaas":
+        return (record.vendor, record.region or record.zone, record.dbaas_slug)
     if record.vendor == "gcp":
         return (record.vendor, record.zone, record.instance)
     return (record.vendor, record.region, record.instance)
