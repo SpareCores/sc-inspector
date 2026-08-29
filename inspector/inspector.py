@@ -680,6 +680,141 @@ def cleanup_s3_stack(vendor: str, records: list, *, data_dir: str | None = None)
         s3_runs.delete_run_record(key)
 
 
+def _destroy_dbaas_stack_by_name(vendor: str, stack_name: str) -> None:
+    """Destroy a Pulumi stack referenced directly by its backend name.
+
+    Used for the DBaaS meta/Pulumi-backend safety net: the stack was found in the
+    Pulumi S3 backend with no corresponding S3 run record, so there is no
+    ``instance``/``dbaas_slug`` to rebuild resource_opts from. ``get_stack``/
+    ``destroy_stack``/``cancel`` only use resource_opts to derive a stack name when
+    ``pulumi_opts["stack_name"]`` isn't already set, so passing it directly here
+    skips that (and doesn't require reconstructing a valid resource_opts).
+    """
+    from sc_runner import runner
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tempdir:
+        pulumi_opts = dict(work_dir=tempdir, stack_name=stack_name)
+
+        def cancel_lock() -> None:
+            runner.cancel(vendor, pulumi_opts, {})
+
+        try:
+            stack = lib.retry_locked_cleanup(
+                lambda: runner.get_stack(vendor, pulumi_opts, {}),
+                cancel_func=cancel_lock,
+            )
+        except lib.StackLockedError:
+            logging.warning("Stack %s is locked; will retry next sweep", stack_name)
+            return
+        except AttributeError:
+            logging.exception("Couldn't get stack %s", stack_name)
+            return
+
+        resources = stack.export_stack().deployment.get("resources", [])
+        if len(resources) <= 1:
+            logging.info(
+                "Pulumi stack %s already clean (%d resources), no cleanup needed",
+                stack_name,
+                len(resources),
+            )
+            return
+
+        logging.info("Destroying orphaned DBaaS Pulumi stack %s (no matching S3 run record)", stack_name)
+        try:
+            lib.retry_locked_cleanup(
+                lambda: runner.destroy_stack(
+                    vendor, pulumi_opts, {}, stack_opts=dict(on_output=lib.pulumi_log_output)
+                ),
+                cancel_func=cancel_lock,
+            )
+        except lib.StackLockedError:
+            logging.warning("Destroy for stack %s is locked; will retry next sweep", stack_name)
+
+
+def _run_dbaas_meta_cleanup_for_vendor(
+    repo_path: str,
+    vendor: str | None,
+    *,
+    threads: int,
+    lookback_mins: int | None = None,
+    data_only: bool = True,
+    force: bool = False,
+) -> None:
+    """Pulumi-backend safety net for DBaaS stacks with no matching S3 run record.
+
+    Analogous to `_run_meta_cleanup_for_vendor` for EC2 (which uses
+    `pulumi_backend.instances_with_stacks` so stacks are never permanently
+    orphaned even if their S3 run record disappears). DBaaS cleanup
+    (`_run_dbaas_s3_cleanup`) is otherwise entirely S3-run-record driven: if a
+    record is ever deleted without the underlying stack being destroyed (a bug,
+    a manual S3 delete, a race), nothing else would ever find that stack again.
+
+    DBaaS Pulumi stack names end in a `dbaas_slug` segment (see
+    `dbaas_selector.stack_slug`); we match that against the current DBaaS
+    catalog to identify DBaaS-shaped stacks, then destroy any that have no
+    corresponding S3 run record and no recent activity.
+    """
+    from dbaas_selector import stack_slug
+    from sc_runner.resources import supported_vendors
+    import concurrent.futures
+    import pulumi_backend
+
+    repo_dbaas = os.path.join(repo_path, "dbaas")
+    dbaas_vendors = [vendor] if vendor else sorted({"aws", "azure", "gcp"})
+
+    futures = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
+        for vnd in dbaas_vendors:
+            if vnd not in supported_vendors:
+                continue
+            catalog = _dbaas_catalog_for_cleanup(vnd, repo_dbaas)
+            slug_to_key: dict[str, str] = {}
+            for (_v, instance_key), (target, *_rest) in catalog.items():
+                slug_to_key[stack_slug(target)] = instance_key
+            if not slug_to_key:
+                continue
+
+            stack_names = pulumi_backend.stack_names_ending_with(vnd, set(slug_to_key))
+            if not stack_names:
+                continue
+
+            known_records = _dbaas_run_records_for_catalog(catalog)
+            known_groups = {stack_key_for_record(r) for r in known_records}
+
+            for name in stack_names:
+                slug = name.rsplit(".", 1)[-1]
+                instance_key = slug_to_key.get(slug)
+                if not instance_key:
+                    continue
+                region, zone = pulumi_backend.parse_dbaas_stack_location(name, vnd)
+                location = region or zone
+                if (vnd, location, slug) in known_groups:
+                    # already covered by the S3-record-driven cleanup path
+                    continue
+                if not force and not lib.should_scan_dbaas_for_cleanup(
+                    repo_dbaas, vnd, instance_key, lookback_mins=lookback_mins, data_only=data_only
+                ):
+                    continue
+                logging.info(
+                    "Adding orphan DBaaS stack %s (%s/%s) to meta cleanup: no matching S3 run record",
+                    name,
+                    vnd,
+                    instance_key,
+                )
+                futures.append((vnd, name, executor.submit(_destroy_dbaas_stack_by_name, vnd, name)))
+
+        failures = False
+        for vnd, name, future in futures:
+            try:
+                future.result()
+            except Exception:
+                logging.exception("DBaaS meta cleanup failed for %s/%s", vnd, name)
+                failures = True
+        if failures:
+            raise Exception("Errors occurred during DBaaS meta cleanup")
+
+
 def _run_meta_cleanup_for_vendor(
     repo_path: str,
     vendor: str | None,
@@ -822,6 +957,15 @@ def cleanup_sweep(ctx, threads, force, all_regions, lookback_mins, data_only, ve
     except Exception:
         logging.exception("DBaaS cleanup sweep failed")
         raise
+
+    _run_dbaas_meta_cleanup_for_vendor(
+        repo_path,
+        vendor,
+        threads=threads,
+        lookback_mins=lookback_mins,
+        data_only=data_only,
+        force=force,
+    )
 
 
 @cli.command()

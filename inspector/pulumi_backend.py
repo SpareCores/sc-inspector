@@ -209,6 +209,43 @@ def locations_for_instance(vendor: str, instance: str) -> tuple[list[str], list[
     return regions, zones
 
 
+def stack_names_ending_with(vendor: str, suffixes: set[str]) -> list[str]:
+    """Return raw backend stack names for `vendor` whose trailing dot-segment is in `suffixes`.
+
+    Used to find DBaaS-shaped stacks (see ``dbaas_selector.stack_slug``) directly by
+    their slug, without needing to know the client instance type in advance (unlike
+    :func:`parse_stack_for_instance`, which requires the instance to locate the split
+    point between location and instance).
+    """
+    if not suffixes:
+        return []
+    try:
+        stacks = list_vendor_stack_names(vendor)
+    except Exception:
+        logging.exception("Failed to list Pulumi backend stacks for %s", vendor)
+        return []
+    return [name for name, _size in stacks if name.rsplit(".", 1)[-1] in suffixes]
+
+
+def parse_dbaas_stack_location(stack_name: str, vendor: str) -> tuple[str | None, str | None]:
+    """Return (region, zone) from a DBaaS-shaped stack name's leading location segments.
+
+    Assumes ``<vendor>.<region>.<zone>.<...instance/slug>`` or ``<vendor>.<zone>.<...>``
+    per vendor shape (see ``_REGION_ZONE_VENDORS`` / ``_ZONE_VENDORS`` / ``_REGION_VENDORS``
+    above); the client-instance and dbaas-slug segments after the location are ignored.
+    """
+    parts = stack_name.split(".")
+    if vendor in _ZONE_VENDORS:
+        return None, _normalize_loc(parts[1]) if len(parts) > 1 else None
+    if vendor in _REGION_ZONE_VENDORS:
+        region = _normalize_loc(parts[1]) if len(parts) > 1 else None
+        zone = _normalize_loc(parts[2]) if len(parts) > 2 else None
+        return region, zone
+    if vendor in _REGION_VENDORS:
+        return (_normalize_loc(parts[1]) if len(parts) > 1 else None), None
+    return None, None
+
+
 def instances_with_stacks(vendor: str) -> set[str]:
     """Instance api_reference values that have at least one backend stack."""
     try:
