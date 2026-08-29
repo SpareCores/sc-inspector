@@ -45,10 +45,12 @@ def _date_path(when: datetime | None = None) -> str:
     return f"{when.year}/{when.month:02d}/{when.day:02d}"
 
 
-def log_key(vendor: str, instance: str, run_id: str, *, when: datetime | None = None) -> str:
+def log_key(
+    vendor: str, instance: str, run_id: str, *, when: datetime | None = None, suffix: str = ""
+) -> str:
     return (
         f"logs/{INSPECTOR_RUNS_CATEGORY}/{_sanitize_segment(vendor)}/{_sanitize_segment(instance)}/"
-        f"{_date_path(when)}/{_sanitize_segment(run_id)}.log"
+        f"{_date_path(when)}/{_sanitize_segment(run_id)}{suffix}.log"
     )
 
 
@@ -59,10 +61,12 @@ def task_logs_prefix(vendor: str, instance: str, run_id: str, *, when: datetime 
     )
 
 
-def run_key(vendor: str, instance: str, run_id: str, *, when: datetime | None = None) -> str:
+def run_key(
+    vendor: str, instance: str, run_id: str, *, when: datetime | None = None, suffix: str = ""
+) -> str:
     return (
         f"runs/{INSPECTOR_RUNS_CATEGORY}/{_sanitize_segment(vendor)}/{_sanitize_segment(instance)}/"
-        f"{_date_path(when)}/{_sanitize_segment(run_id)}.json"
+        f"{_date_path(when)}/{_sanitize_segment(run_id)}{suffix}.json"
     )
 
 
@@ -297,11 +301,23 @@ def upload_task_logs_to_s3(data_dir: str) -> None:
 
 
 def presigned_urls_for_instance(vendor: str, instance: str) -> tuple[str, str]:
+    """Presigned PUT URLs for one instance's log and run-status uploads.
+
+    A random suffix keeps the S3 keys unique per instance: {vendor}/{instance}/{run_id}
+    alone is shared by every stack started within one workflow run (same GITHUB_RUN_ID),
+    and since the DBaaS client picker often gives several stacks the same client
+    instance type too, without it concurrent uploads race-overwrite each other's
+    run record, silently losing all but the last writer (see user_data_script_key
+    for the same issue already handled on the boot-script upload path).
+    """
     run_id = os.environ.get("GITHUB_RUN_ID", "local")
     when = datetime.now(timezone.utc)
-    log_url = presigned_put_url(log_key(vendor, instance, run_id, when=when), content_type="text/plain")
+    suffix = f"-{secrets.token_hex(4)}"
+    log_url = presigned_put_url(
+        log_key(vendor, instance, run_id, when=when, suffix=suffix), content_type="text/plain"
+    )
     run_url = presigned_put_url(
-        run_key(vendor, instance, run_id, when=when),
+        run_key(vendor, instance, run_id, when=when, suffix=suffix),
         content_type="application/json",
     )
     return log_url, run_url
