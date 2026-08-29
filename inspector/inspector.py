@@ -449,10 +449,15 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
                             logging.exception("Couldn't get stack")
                             # this vendor is not yet supported
                             return
-                        resources = stack.export_stack().deployment.get("resources", [])
-                        if len(resources) <= 1:
+                        deployment = stack.export_stack().deployment or {}
+                        resources = deployment.get("resources", [])
+                        pending = deployment.get("pending_operations") or deployment.get("pendingOperations")
+                        if len(resources) <= 1 and not pending:
                             # a non-existent stack will have zero, a clean (already destroyed) stack should have exactly one
                             # resource (the Pulumi Stack itself). If we can see either of these, we have nothing to clean up.
+                            # A stack can still carry a pending create/update/delete with no confirmed resource in
+                            # `resources` (e.g. the process died before the provider ever confirmed the create) -
+                            # skipping destroy there would abandon the only lead back to a possibly-real cloud resource.
                             logging.info(
                                 f"Pulumi stack for {vendor}/{value}/{server} has {len(resources)} resources, no cleanup needed"
                             )
@@ -634,8 +639,10 @@ def cleanup_s3_stack(vendor: str, records: list, *, data_dir: str | None = None)
         except AttributeError:
             raise RuntimeError(f"vendor {vendor} not supported for {record.key}") from None
 
-        resources = stack.export_stack().deployment.get("resources", [])
-        if len(resources) <= 1:
+        deployment = stack.export_stack().deployment or {}
+        resources = deployment.get("resources", [])
+        pending = deployment.get("pending_operations") or deployment.get("pendingOperations")
+        if len(resources) <= 1 and not pending:
             logging.info(
                 "Pulumi stack for %s/%s in %s already clean (%d resources); removing %d run record(s)",
                 vendor,
@@ -711,8 +718,10 @@ def _destroy_dbaas_stack_by_name(vendor: str, stack_name: str) -> None:
             logging.exception("Couldn't get stack %s", stack_name)
             return
 
-        resources = stack.export_stack().deployment.get("resources", [])
-        if len(resources) <= 1:
+        deployment = stack.export_stack().deployment or {}
+        resources = deployment.get("resources", [])
+        pending = deployment.get("pending_operations") or deployment.get("pendingOperations")
+        if len(resources) <= 1 and not pending:
             logging.info(
                 "Pulumi stack %s already clean (%d resources), no cleanup needed",
                 stack_name,
