@@ -298,6 +298,12 @@ def start_dbaas(ctx, vendor, instance_key, limit):
     for (vnd, key), (target, regions, zones, zone_to_region) in lib.sort_managed_dbs_for_start(
         available_managed_dbs(vendor=vendor)
     ):
+        if (
+            vnd == "aws"
+            and target.native_id.split(".")[1] not in AWS_MAIN_INSTANCE_FAMILIES_ONLY
+            and not (instance_key and key == instance_key)
+        ):
+            continue
         if instance_key and key != instance_key:
             continue
         data_dir = dbaas_data_dir(ctx.parent.params["repo_path"], vnd, key)
