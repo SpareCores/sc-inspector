@@ -269,7 +269,11 @@ def start(ctx, exclude, start_only, vendor, limit):
     "--instance-key",
     type=str,
     default=None,
-    help="Only start this managed DB instance key (e.g. db-perf-optimized-N-8/postgres/18/standalone)",
+    help=(
+        "Only start this managed DB instance: either the full key "
+        "(e.g. db-perf-optimized-N-8/postgres/18/standalone) or just the native "
+        "instance id (e.g. db.m5.large), which is unambiguous per vendor"
+    ),
 )
 @click.option(
     "--limit",
@@ -298,13 +302,14 @@ def start_dbaas(ctx, vendor, instance_key, limit):
     for (vnd, key), (target, regions, zones, zone_to_region) in lib.sort_managed_dbs_for_start(
         available_managed_dbs(vendor=vendor)
     ):
+        instance_key_matches = instance_key and instance_key in (key, target.native_id)
         if (
             vnd == "aws"
             and target.native_id.split(".")[1] not in AWS_MAIN_INSTANCE_FAMILIES_ONLY
-            and not (instance_key and key == instance_key)
+            and not instance_key_matches
         ):
             continue
-        if instance_key and key != instance_key:
+        if instance_key and not instance_key_matches:
             continue
         data_dir = dbaas_data_dir(ctx.parent.params["repo_path"], vnd, key)
         tasks = lib.tasks_to_start_dbaas(vnd, data_dir, target)
