@@ -565,11 +565,20 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
     """Return True if we should start a server for this task."""
     if isinstance(task, DbaasDbTask):
         return False
-    if task.start_with_instance or task.always_run:
+    meta = load_task_meta(task, data_dir)
+    # Spot self-heal must be able to trigger a boot even for start_with_instance/always_run
+    # tasks (e.g. vllm, llm): they never reach the scheduling checks below on their own, so
+    # without this, an unfinished Spot run of one of these tasks past cleanup timeout could
+    # never be retried on-demand unless some other, independently-triggering task on the
+    # same instance also happened to be due for a run.
+    spot_self_heal = bool(
+        is_unfinished_spot_meta(meta)
+        and force_ondemand_after_spot_timeout(srv.vendor_id, srv.api_reference, data_dir)
+    )
+    if (task.start_with_instance or task.always_run) and not spot_self_heal:
         logging.info(f"Skipping task {task.name}, does not trigger an instance start on its own")
         return False
-    meta = load_task_meta(task, data_dir)
-    if meta.start and (datetime.now() - meta.start) <= WAIT_SINCE_LAST_START:
+    if meta.start and (datetime.now() - meta.start) <= WAIT_SINCE_LAST_START and not spot_self_heal:
         logging.info(f"Skipping task {task.name}, last start: {meta.start}")
         return False
     thash = task_hash(task)
@@ -613,10 +622,7 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
     if meta.exit_code == -1 and is_retryable_start_error(meta.error_msg):
         logging.info(f"Retrying task {task.name} due to retryable start error, meta: {meta}")
         return True
-    if (
-        is_unfinished_spot_meta(meta)
-        and force_ondemand_after_spot_timeout(srv.vendor_id, srv.api_reference, data_dir)
-    ):
+    if spot_self_heal:
         logging.info(
             f"Retrying task {task.name} on-demand after Spot run passed cleanup timeout, meta: {meta}"
         )

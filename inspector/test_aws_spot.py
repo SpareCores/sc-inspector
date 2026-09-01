@@ -116,6 +116,64 @@ def test_should_start_skips_recent_unfinished_spot(tmp_path):
         assert not lib.should_start(task, tmp_path, srv)
 
 
+def test_should_start_spot_self_heal_for_start_with_instance_task(tmp_path):
+    """vllm/llm-style tasks (start_with_instance=True) never reach the scheduling
+    checks below the early bail-out on their own; the Spot self-heal must still be
+    able to trigger a boot for them, or an unfinished Spot run of such a task could
+    never be retried on-demand unless some unrelated task also happened to be due."""
+    task = lib.Task(
+        name="vllm", command="true", timeout=timedelta(hours=1), start_with_instance=True
+    )
+    # Older than WAIT_SINCE_LAST_START so the early skip does not fire.
+    meta = lib.Meta(
+        start=NOW - timedelta(hours=2, minutes=1),
+        spot=True,
+        task_hash=lib.task_hash(task),
+    )
+    lib.write_meta(meta, tmp_path / task.name / lib.META_NAME)
+    srv = SimpleNamespace(
+        vendor_id="aws",
+        api_reference="t3.micro",
+        gpu_count=0,
+        memory_amount=1024,
+        vcpus=2,
+    )
+    real_datetime = lib.datetime
+
+    class _DT:
+        @staticmethod
+        def now():
+            return NOW
+
+        def __call__(self, *a, **k):
+            return real_datetime(*a, **k)
+
+    with (
+        mock.patch.object(lib, "get_tasks", return_value=[task]),
+        mock.patch.object(lib, "datetime", _DT()),
+        mock.patch.object(lib, "force_ondemand_after_spot_timeout", return_value=True),
+    ):
+        assert lib.should_start(task, tmp_path, srv)
+        # and it must actually make it into the boot task list, not just should_start
+        assert lib.tasks_to_start("aws", tmp_path, srv) == [task]
+
+
+def test_should_start_start_with_instance_task_without_spot_self_heal(tmp_path):
+    """Without an unfinished-Spot-past-timeout condition, start_with_instance tasks
+    still never trigger a boot on their own (unchanged prior behavior)."""
+    task = lib.Task(
+        name="vllm", command="true", timeout=timedelta(hours=1), start_with_instance=True
+    )
+    meta = lib.Meta(start=NOW - timedelta(hours=2, minutes=1), spot=False, task_hash=lib.task_hash(task))
+    lib.write_meta(meta, tmp_path / task.name / lib.META_NAME)
+    srv = SimpleNamespace(
+        vendor_id="aws", api_reference="t3.micro", gpu_count=0, memory_amount=1024, vcpus=2
+    )
+    with mock.patch("lib.datetime") as dt:
+        dt.now.return_value = NOW
+        assert not lib.should_start(task, tmp_path, srv)
+
+
 def test_update_task_metas_spot(tmp_path):
     task = _task()
     lib.write_meta(
