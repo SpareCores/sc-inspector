@@ -781,7 +781,7 @@ def _run_dbaas_meta_cleanup_for_vendor(
     import pulumi_backend
 
     repo_dbaas = os.path.join(repo_path, "dbaas")
-    dbaas_vendors = [vendor] if vendor else sorted({"aws", "azure", "gcp"})
+    dbaas_vendors = [vendor] if vendor else sorted({"aws", "azure", "gcp", "ovh", "upcloud", "vultr"})
 
     futures = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:

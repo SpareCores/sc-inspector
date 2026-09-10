@@ -77,6 +77,8 @@ def _db_sslmode() -> str:
         return "require"
     if network_mode == "private_vpc":
         return "prefer"
+    if network_mode == "public":
+        return "require"
     return "prefer"
 
 

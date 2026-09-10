@@ -44,6 +44,47 @@ def _provision_spec_aws(target: ManagedDbTarget, storage: dict[str, Any], schema
     }
 
 
+def _provision_spec_ovh(target: ManagedDbTarget, storage: dict[str, Any], schema_gib: float) -> dict[str, Any]:
+    # native_id: postgresql-<plan>-<flavor>; edition is plan (essential/…).
+    flavor = target.native_id
+    plan = target.edition or "essential"
+    if flavor.startswith("postgresql-"):
+        parts = flavor.split("-")
+        if len(parts) >= 3:
+            plan = parts[1]
+            flavor = "-".join(parts[2:])
+    return {
+        **storage,
+        "sku_name": flavor,
+        "sku_tier": plan,
+        "schema_gib": schema_gib,
+        "admin_login": "avnadmin",
+        "database_name": "bench",
+    }
+
+
+def _provision_spec_upcloud(target: ManagedDbTarget, storage: dict[str, Any], schema_gib: float) -> dict[str, Any]:
+    return {
+        **storage,
+        "sku_name": target.native_id,
+        "sku_tier": target.edition or "",
+        "schema_gib": schema_gib,
+        "admin_login": "scadmin",
+        "database_name": "bench",
+    }
+
+
+def _provision_spec_vultr(target: ManagedDbTarget, storage: dict[str, Any], schema_gib: float) -> dict[str, Any]:
+    return {
+        **storage,
+        "sku_name": target.native_id,
+        "sku_tier": target.edition or "",
+        "schema_gib": schema_gib,
+        "admin_login": "vultradmin",
+        "database_name": "bench",
+    }
+
+
 def provision_spec(target: ManagedDbTarget) -> dict[str, Any]:
     """Return provision parameters sized from the managed instance's memory."""
     mem_gib = float(target.memory_gib or 0) or 16.0
@@ -59,4 +100,10 @@ def provision_spec(target: ManagedDbTarget) -> dict[str, Any]:
         return _provision_spec_gcp(target, storage, schema_gib)
     if target.vendor_id == "aws":
         return _provision_spec_aws(target, storage, schema_gib)
+    if target.vendor_id == "ovh":
+        return _provision_spec_ovh(target, storage, schema_gib)
+    if target.vendor_id == "upcloud":
+        return _provision_spec_upcloud(target, storage, schema_gib)
+    if target.vendor_id == "vultr":
+        return _provision_spec_vultr(target, storage, schema_gib)
     return _provision_spec_azure(target, storage, schema_gib)

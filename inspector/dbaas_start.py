@@ -63,14 +63,20 @@ def _dbaas_user_data_replacements(
             "TOPOLOGY": "dbaas",
             "MANAGED_DB_INSTANCE_KEY": target.instance_key,
             "SC_DB_HOST": "{SC_DB_HOST}",
-            "SC_DB_PORT": "5432",
+            "SC_DB_PORT": "{SC_DB_PORT}",
             "SC_DB_USER": provision.get("admin_login", "scadmin"),
             "SC_DB_PASSWORD": "{SC_DB_PASSWORD}",
             "SC_DB_NAME": provision.get("database_name", "bench"),
             "SC_DB_BOOTSTRAP_USER": (
-                "postgres" if vendor == "gcp" else provision.get("admin_login", "scadmin")
+                "postgres"
+                if vendor == "gcp"
+                else "avnadmin"
+                if vendor == "ovh"
+                else provision.get("admin_login", "scadmin")
             ),
-            "SC_DB_BOOTSTRAP_DATABASE": "postgres",
+            "SC_DB_BOOTSTRAP_DATABASE": (
+                "defaultdb" if vendor in ("ovh", "vultr", "upcloud") else "postgres"
+            ),
             "DB_WAIT_TIMEOUT_SEC": os.environ.get("DB_WAIT_TIMEOUT_SEC", "3600"),
             "MEM_GIB": str(target.memory_gib),
             "SC_PROVISION_VENDOR_ID": target.vendor_id,
@@ -90,7 +96,9 @@ def _dbaas_user_data_replacements(
             "SC_PROVISION_REGION": region,
             "SC_PROVISION_ZONE": zone or "",
             "SC_PROVISION_NETWORK_MODE": (
-                "private_vpc" if vendor in ("gcp", "aws") else "private_vnet"
+                "private_vpc"
+                if vendor in ("gcp", "aws", "upcloud", "vultr", "ovh")
+                else "private_vnet"
             ),
             "SC_PROVISION_STACK_SLUG": stack_slug(target),
             "SC_PROVISION_SYNC_COMMIT_SETTABLE": "",
@@ -127,7 +135,20 @@ def _build_dbaas_resource_opts(
         opts["zone"] = zone
     else:
         opts["region"] = region
+    if vendor == "ovh":
+        from sc_runner import data as sc_data
+
+        opts["client_region"] = sc_data.companion_region("ovh", region)
     return opts
+
+
+def _dbaas_client_location(vendor: str, region: str) -> str:
+    """Region used to pick the companion VM (may differ from DBaaS region)."""
+    if vendor == "ovh":
+        from sc_runner import data as sc_data
+
+        return sc_data.companion_region("ovh", region)
+    return region
 
 
 def _dbaas_location_candidates(
@@ -345,11 +366,15 @@ def try_start_dbaas_inspect(
             )
             continue
 
-        clients = rank_dbaas_client_instances(vendor, region, client_req)
+        clients = rank_dbaas_client_instances(
+            vendor, _dbaas_client_location(vendor, region), client_req
+        )
         if not clients:
             logging.info("No DBaaS client for %s/%s", vendor, location)
             continue
-        clients = filter_clients_by_vm_quota(vendor, region, clients)
+        clients = filter_clients_by_vm_quota(
+            vendor, _dbaas_client_location(vendor, region), clients
+        )
         if not clients:
             continue
 

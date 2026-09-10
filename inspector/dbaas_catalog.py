@@ -23,6 +23,9 @@ _STANDALONE_PRICE_HA: dict[str, str] = {
     "aws": "SINGLE_ZONE",
     "azure": "NONE",
     "gcp": "NONE",
+    "ovh": "NONE",
+    "upcloud": "NONE",
+    "vultr": "NONE",
 }
 
 _SUPPORTED_VENDORS = frozenset(_STANDALONE_PRICE_HA)
@@ -32,6 +35,9 @@ _REGION_ALLOWLIST_ENV = {
     "aws": "DBAAS_AWS_REGIONS",
     "azure": "DBAAS_AZURE_REGIONS",
     "gcp": "DBAAS_GCP_REGIONS",
+    "ovh": "DBAAS_OVH_REGIONS",
+    "upcloud": "DBAAS_UPCLOUD_REGIONS",
+    "vultr": "DBAAS_VULTR_REGIONS",
 }
 
 
@@ -131,6 +137,9 @@ def _edition_for_row(vendor_id: str, family: str | None) -> str | None:
         ):
             return "PerformanceOptimized"
         return "Enterprise"
+    if vendor_id == "ovh":
+        # Essential / Business / Enterprise → plan name for Pulumi.
+        return (family or "Essential").lower()
     return family
 
 
@@ -187,7 +196,7 @@ def available_managed_dbs(
                  AND dp.database_id = d.database_id
                 JOIN region AS r
                   ON r.vendor_id = dp.vendor_id
-                 AND r.region_id = dp.region_id
+                 AND LOWER(r.region_id) = LOWER(dp.region_id)
                 WHERE d.vendor_id = :vendor_id
                   AND d.status = 'ACTIVE'
                   AND UPPER(CAST(d.engine AS TEXT)) IN ('POSTGRESQL', 'POSTGRES')
