@@ -54,7 +54,10 @@ def _db_host() -> str:
 
 
 def _db_port() -> int:
-    return int(os.environ.get("SC_DB_PORT", "5432"))
+    raw = (os.environ.get("SC_DB_PORT") or "5432").strip()
+    if not raw or (raw.startswith("{") and raw.endswith("}")):
+        raise RuntimeError(f"SC_DB_PORT is not configured (got {raw!r})")
+    return int(raw)
 
 
 def _mem_gib() -> float:
@@ -187,6 +190,9 @@ def _wait_bootstrap_ready() -> None:
 
 def wait_db_ready() -> None:
     """Block until the managed Postgres endpoint accepts connections."""
+    # Validate static config before the retry loop so bad placeholders fail fast.
+    _db_host()
+    _db_port()
     _wait_bootstrap_ready()
     _bootstrap_managed_db()
     import psycopg2
