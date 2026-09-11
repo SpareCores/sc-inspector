@@ -21,8 +21,14 @@ _X86_CPU_ARCHITECTURES = (CpuArchitecture.X86_64,)
 
 # Shared/burstable vCPUs (credit-throttled, or time-sliced with other tenants)
 # give inconsistent throughput driving pgbench — companions need steady,
-# known performance, so only dedicated CPUs are eligible.
+# known performance, so only dedicated CPUs are eligible when available.
 _DEDICATED_CPU_ALLOCATIONS = (CpuAllocation.DEDICATED,)
+# Some vendors (notably UpCloud) catalogue every cloud VM as SHARED; DBaaS
+# companions must still run there, so we fall back to SHARED when a location
+# has no dedicated SKUs in the DBaaS client size band.
+_SHARED_CPU_ALLOCATIONS = (CpuAllocation.SHARED,)
+_DBAAS_CPU_ALLOCATIONS_PREFERRED = _DEDICATED_CPU_ALLOCATIONS
+_DBAAS_CPU_ALLOCATIONS_FALLBACK = _DEDICATED_CPU_ALLOCATIONS + _SHARED_CPU_ALLOCATIONS
 
 
 @cache
@@ -207,14 +213,19 @@ def _eligible_dbaas_clients_with_prices(
     vendor: str,
     location: str,
     req: DbaasClientRequirements,
+    *,
+    cpu_allocations: tuple = _DBAAS_CPU_ALLOCATIONS_PREFERRED,
 ) -> list[tuple[Any, float]]:
-    """Small, non-burstable DBaaS client candidates in a location, any price.
+    """Small DBaaS client candidates in a location, any price.
 
     Separate from _eligible_servers_with_prices: bounded on *both* ends of
     memory (not just a floor), since DBaaS client sizing is a fixed small
     target, not derived from the DB being benchmarked. No price bound here —
     rank_dbaas_client_instances applies a dynamic per-location cutoff over
     this candidate set instead of a fixed ceiling.
+
+    Prefers dedicated CPUs; callers may widen ``cpu_allocations`` to include
+    SHARED when a vendor has no dedicated SKUs in-band.
     """
     from sc_crawler.tables import Server, ServerPrice
     from sqlmodel import Session, select
@@ -236,6 +247,7 @@ def _eligible_dbaas_clients_with_prices(
                 Server.memory_amount,
                 Server.gpu_count,
                 Server.cpu_architecture,
+                Server.cpu_allocation,
                 ServerPrice.price,
             )
             .join(ServerPrice, ServerPrice.server_id == Server.server_id)
@@ -245,7 +257,7 @@ def _eligible_dbaas_clients_with_prices(
             .where(Server.status == "ACTIVE")
             .where(Server.gpu_count == 0)
             .where(Server.cpu_architecture.in_(_X86_CPU_ARCHITECTURES))
-            .where(Server.cpu_allocation.in_(_DEDICATED_CPU_ALLOCATIONS))
+            .where(Server.cpu_allocation.in_(cpu_allocations))
             .where(Server.vcpus >= req.min_vcpus)
             .where(Server.vcpus <= req.max_vcpus)
             .where(Server.memory_amount >= min_mem_mib)
@@ -255,7 +267,16 @@ def _eligible_dbaas_clients_with_prices(
         rows = session.exec(stmt).all()
 
     best: dict[str, tuple[Any, float]] = {}
-    for server_id, api_ref, vcpus, memory_amount, gpu_count, cpu_arch, price in rows:
+    for (
+        server_id,
+        api_ref,
+        vcpus,
+        memory_amount,
+        gpu_count,
+        cpu_arch,
+        cpu_allocation,
+        price,
+    ) in rows:
         price_f = float(price)
         if server_id not in best or price_f < best[server_id][1]:
             stub = SimpleNamespace(
@@ -265,6 +286,7 @@ def _eligible_dbaas_clients_with_prices(
                 memory_amount=memory_amount,
                 gpu_count=gpu_count or 0,
                 cpu_architecture=cpu_arch,
+                cpu_allocation=cpu_allocation,
             )
             best[server_id] = (stub, price_f)
     return list(best.values())
@@ -299,8 +321,24 @@ def rank_dbaas_client_instances(
 
     Excludes price outliers (see _tukey_price_fence) using this location's
     own candidate pool, recomputed fresh each call — not a fixed ceiling.
+    Prefers dedicated CPUs; falls back to SHARED when none are in-band
+    (UpCloud catalogues all cloud VMs as SHARED).
     """
     candidates = _eligible_dbaas_clients_with_prices(vendor, location, req)
+    if not candidates:
+        candidates = _eligible_dbaas_clients_with_prices(
+            vendor,
+            location,
+            req,
+            cpu_allocations=_DBAAS_CPU_ALLOCATIONS_FALLBACK,
+        )
+        if candidates:
+            logging.info(
+                "DBaaS client fallback to SHARED CPUs for %s/%s (%d candidate(s))",
+                vendor,
+                location,
+                len(candidates),
+            )
     fence = _tukey_price_fence([price for _server, price in candidates])
     if fence is not None:
         excluded = [c for c in candidates if c[1] > fence]
@@ -313,11 +351,16 @@ def rank_dbaas_client_instances(
                 sorted(f"{s.api_reference}(${p:.3f})" for s, p in excluded),
             )
         candidates = [c for c in candidates if c[1] <= fence]
+    dedicated = set(_DEDICATED_CPU_ALLOCATIONS)
     return [
         server
         for server, _price in sorted(
             candidates,
-            key=lambda item: (item[1], item[0].api_reference),
+            key=lambda item: (
+                0 if getattr(item[0], "cpu_allocation", None) in dedicated else 1,
+                item[1],
+                item[0].api_reference,
+            ),
         )
     ]
 

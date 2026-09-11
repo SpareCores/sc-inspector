@@ -364,18 +364,24 @@ def try_start_dbaas_inspect(
                 location,
                 pg_reason,
             )
+            error_msgs.append(f"Skipping DBaaS {vendor}/{location}: {pg_reason}")
             continue
 
         clients = rank_dbaas_client_instances(
             vendor, _dbaas_client_location(vendor, region), client_req
         )
         if not clients:
-            logging.info("No DBaaS client for %s/%s", vendor, location)
+            msg = f"No DBaaS client for {vendor}/{location}"
+            logging.info(msg)
+            error_msgs.append(msg)
             continue
         clients = filter_clients_by_vm_quota(
             vendor, _dbaas_client_location(vendor, region), clients
         )
         if not clients:
+            msg = f"No DBaaS client after quota filter for {vendor}/{location}"
+            logging.info(msg)
+            error_msgs.append(msg)
             continue
 
         for client in clients:
