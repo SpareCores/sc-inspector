@@ -55,6 +55,10 @@ class ManagedDbTarget:
     memory_gib: float
     edition: str | None = None
     sync_commit_session_settable: bool | None = None
+    # Included / minimum disk GiB from sc-data ``database.storage_size`` (OVH flex floor).
+    storage_size_gib: int | None = None
+    # Max additional GiB beyond ``storage_size_gib`` (``database.storage_extra_max``).
+    storage_extra_max_gib: int | None = None
 
     @property
     def instance_key(self) -> str:
@@ -188,6 +192,8 @@ def available_managed_dbs(
                     d.vcpus,
                     d.memory_amount,
                     d.engine_versions,
+                    d.storage_size,
+                    d.storage_extra_max,
                     r.api_reference AS region_api,
                     MIN(dp.price) AS min_price
                 FROM database AS d
@@ -213,6 +219,8 @@ def available_managed_dbs(
                     d.vcpus,
                     d.memory_amount,
                     d.engine_versions,
+                    d.storage_size,
+                    d.storage_extra_max,
                     r.api_reference
                 ORDER BY d.database_id, min_price, r.api_reference
                 """
@@ -244,6 +252,8 @@ def available_managed_dbs(
                         continue
                     native_id = row["api_reference"] or db_id
                     edition = _edition_for_row(vendor_id, row["family"])
+                    storage_size = row["storage_size"]
+                    storage_extra_max = row["storage_extra_max"]
                     target = ManagedDbTarget(
                         vendor_id=vendor_id,
                         engine="postgres",
@@ -255,6 +265,10 @@ def available_managed_dbs(
                         memory_gib=float(row["memory_amount"]) / 1024.0,
                         edition=edition,
                         sync_commit_session_settable=True,
+                        storage_size_gib=int(storage_size) if storage_size else None,
+                        storage_extra_max_gib=(
+                            int(storage_extra_max) if storage_extra_max is not None else None
+                        ),
                     )
                     by_db[db_id] = {
                         "target": target,

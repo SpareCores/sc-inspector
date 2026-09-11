@@ -53,11 +53,22 @@ def _provision_spec_ovh(target: ManagedDbTarget, storage: dict[str, Any], schema
         if len(parts) >= 3:
             plan = parts[1]
             flavor = "-".join(parts[2:])
-    # OVH's "flex" DBaaS disk sizing requires the requested size (GiB) to be a
-    # multiple of 10, or the create call fails with FlexDiskSizeNotMultiple.
-    storage_gib = storage.get("storage_gib")
+    # OVH flex disk: size must be within [storage_size, storage_size+extra_max]
+    # and a multiple of 10 GiB. Schema-derived sizes (e.g. 70) are often below
+    # the flavor floor (e.g. discovery b3-16 → 320) and fail with FlexDiskSizeInvalid.
+    storage_gib = int(storage.get("storage_gib") or 0)
+    floor = int(target.storage_size_gib or 0)
+    if floor:
+        storage_gib = max(storage_gib, floor)
     if storage_gib:
-        storage = {**storage, "storage_gib": -(-int(storage_gib) // 10) * 10}
+        storage_gib = -(-storage_gib // 10) * 10
+    if floor and target.storage_extra_max_gib is not None:
+        ceiling = floor + int(target.storage_extra_max_gib)
+        storage_gib = min(storage_gib, ceiling)
+        # Keep a valid multiple of 10 after clamping to ceiling.
+        storage_gib = (storage_gib // 10) * 10
+        storage_gib = max(storage_gib, floor)
+    storage = {**storage, "storage_gib": storage_gib} if storage_gib else storage
     return {
         **storage,
         "sku_name": flavor,
