@@ -536,6 +536,8 @@ def run_dbaas_task(
                 sync_settable=sync_settable,
             ),
         )
+        meta.stdout_bytes = len(stdout)
+        meta.stderr_bytes = len(stderr)
         ver = task.image.rsplit(":", 1)[-1]
         return ver, stdout, stderr
     except Exception as exc:

@@ -7,10 +7,15 @@ import requests
 def raw(meta, task, task_dir, stdout, stderr) -> list[str]:
     outputs: list[str] = []
     for name in ("stdout", "stderr"):
-        if len(locals()[name]):
-            with open(os.path.join(task_dir, name), "wb") as f:
-                f.write(locals()[name])
+        path = os.path.join(task_dir, name)
+        data = locals()[name]
+        if len(data):
+            with open(path, "wb") as f:
+                f.write(data)
             outputs.append(name)
+        elif os.path.exists(path):
+            # Drop stale stream from a prior run so meta.outputs matches the tree.
+            os.remove(path)
 
     return outputs
 
