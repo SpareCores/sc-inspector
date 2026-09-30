@@ -221,6 +221,8 @@ def _changed_files_under(repo_root: str, rel_path: str) -> list[str]:
     Must be called BEFORE fetching so origin/main still points to our base.
     The returned list is stable across retries and safe to pass to
     ``_squash_commit_and_push`` even after origin/main advances.
+
+    Includes deletions (e.g. transform.raw dropping a stale empty stdout).
     """
     out = run_git_command(
         ["diff", "--name-only", "origin/main", "HEAD", "--", rel_path],
@@ -229,35 +231,62 @@ def _changed_files_under(repo_root: str, rel_path: str) -> list[str]:
     return [f.strip() for f in out.splitlines() if f.strip()]
 
 
+def _path_in_commit(repo_root: str, commit: str, path: str) -> bool:
+    """True if ``path`` exists as a blob in ``commit`` (not a deletion)."""
+    return (
+        subprocess.run(
+            ["git", "cat-file", "-e", f"{commit}:{path}"],
+            cwd=repo_root,
+            capture_output=True,
+        ).returncode
+        == 0
+    )
+
+
 def _squash_commit_and_push(
-    repo_root: str, rel_path: str, msg: str, changed_files: list[str],
+    repo_root: str,
+    rel_path: str,
+    msg: str,
+    changed_files: list[str],
+    saved_head: str,
 ) -> None:
     """
     Publish *only* ``changed_files`` as a single commit on origin/main.
 
-    The caller captures ``changed_files`` once (before fetching) so the list
-    reflects exactly the files this inspector modified, regardless of how
-    origin/main moves between retries.  Only those files are checked out from
-    ``saved_head`` — the rest of the tree (including paths written by other
-    concurrent inspectors) is left at origin/main's version.
+    The caller captures ``changed_files`` and ``saved_head`` once (before
+    fetching) so retries still restore from the inspector's result commit even
+    after a failed attempt's ``reset --hard origin/main``.  Present files are
+    checked out from ``saved_head``; paths deleted there (stale stdout/stderr)
+    are ``git rm``'d after the reset — ``git checkout saved_head -- deleted``
+    would pathspec-fail and wipe the working tree for good.
     """
     if not changed_files:
         logging.info("No changed files under %s to push", rel_path)
         return
 
     origin = "origin/main"
-    saved_head = run_git_command(["rev-parse", "HEAD"], cwd=repo_root).strip()
+    present = [f for f in changed_files if _path_in_commit(repo_root, saved_head, f)]
+    deleted = [f for f in changed_files if f not in present]
     logging.info(
-        "Squashing %d files under %s onto %s from %s",
+        "Squashing %d files under %s onto %s from %s (%d present, %d deleted)",
         len(changed_files),
         rel_path,
         origin,
         saved_head[:8],
+        len(present),
+        len(deleted),
     )
 
     run_git_command(["reset", "--hard", origin], cwd=repo_root)
-    run_git_command(["checkout", saved_head, "--"] + changed_files, cwd=repo_root)
-    run_git_command(["add", "--"] + changed_files, cwd=repo_root)
+    if present:
+        run_git_command(["checkout", saved_head, "--"] + present, cwd=repo_root)
+        run_git_command(["add", "--"] + present, cwd=repo_root)
+    # After reset, origin may still have paths we intentionally dropped.
+    to_remove = [
+        f for f in deleted if os.path.lexists(os.path.join(repo_root, f))
+    ]
+    if to_remove:
+        run_git_command(["rm", "-f", "--"] + to_remove, cwd=repo_root)
 
     no_staged_changes = subprocess.run(
         ["git", "diff", "--cached", "--quiet"],
@@ -355,12 +384,15 @@ def push_path(path: str | os.PathLike, msg: str):
             run_git_command(["add", rel_path], cwd=repo_root)
             logging.info("Committing changes...")
             run_git_command(["commit", "-m", msg], cwd=repo_root)
-            # Snapshot the exact files we changed BEFORE fetching.
+            # Snapshot the exact files + result commit BEFORE fetching/reset.
             # origin/main still points to our base, so this diff is stable.
+            # saved_head must outlive retries: a failed squash does reset --hard
+            # to origin/main, and re-reading HEAD then would lose the results.
             changed_files = _changed_files_under(repo_root, rel_path)
             if not changed_files:
                 logging.info("Commit created but no file-level diff vs origin/main")
                 return
+            saved_head = run_git_command(["rev-parse", "HEAD"], cwd=repo_root).strip()
             # Retry push with exponential backoff (many inspectors push concurrently)
             deadline = time.monotonic() + 10 * 60  # 10 minutes total
             wait_sec = 5  # initial backoff in seconds
@@ -377,7 +409,9 @@ def push_path(path: str | os.PathLike, msg: str):
                         wait_sec = min(wait_sec * 2, max_wait_per_round)
                     logging.info("Fetching origin/main and squashing push...")
                     _fetch_origin_main(repo_root)
-                    _squash_commit_and_push(repo_root, rel_path, msg, changed_files)
+                    _squash_commit_and_push(
+                        repo_root, rel_path, msg, changed_files, saved_head
+                    )
                     logging.info(f"Successfully pushed changes to git: {msg}")
                     break
                 except subprocess.CalledProcessError as e:
