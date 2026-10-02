@@ -384,7 +384,7 @@ ffmpeg = DockerTask(
 # Needs the host PID namespace so it can read /proc/1/mountinfo and nsenter
 # into the host mount namespace. Initially limited to ovh i1-90 for validation.
 storage = DockerTask(
-    servers_only={("ovh", "i1-90")},
+    servers_only={("ovh", "i1-90"), ("gcp", "c4a-standard-16-lssd")},
     parallel=False,
     image="ghcr.io/sparecores/storage-benchmark:main",
     docker_opts=DOCKER_OPTS
