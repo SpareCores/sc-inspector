@@ -379,6 +379,22 @@ ffmpeg = DockerTask(
     minimum_memory=1,
 )
 
+# Raw block-device fio benchmark. Default priority (inf) so it always runs
+# last among finite-priority tasks: it may unmount and overwrite free disks.
+# Needs the host PID namespace so it can read /proc/1/mountinfo and nsenter
+# into the host mount namespace. Initially limited to ovh i1-90 for validation.
+storage = DockerTask(
+    servers_only={("ovh", "i1-90")},
+    parallel=False,
+    image="ghcr.io/sparecores/storage-benchmark:main",
+    docker_opts=DOCKER_OPTS
+    | dict(pid_mode="host")
+    | tracker_docker_opts("storage"),
+    version_command="--version",
+    command=None,
+    timeout=timedelta(hours=1),
+)
+
 # An extended version of the multicore StressNg task: running
 # stress-ng for an increasing number of seconds per minute, then
 # sleeping until the start of the next minute, repeated 1440 times,
