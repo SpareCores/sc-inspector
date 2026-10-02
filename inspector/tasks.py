@@ -386,7 +386,7 @@ ffmpeg = DockerTask(
 storage = DockerTask(
     servers_only={("ovh", "i1-90"), ("gcp", "c4a-standard-16-lssd")},
     parallel=False,
-    image="ghcr.io/sparecores/storage-benchmark:main",
+    image="ghcr.io/sparecores/benchmark-storage:main",
     docker_opts=DOCKER_OPTS
     | dict(pid_mode="host")
     | tracker_docker_opts("storage"),
