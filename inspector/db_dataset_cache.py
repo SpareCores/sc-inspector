@@ -134,7 +134,12 @@ def restore_from_cdn(
     env = _pg_env(password)
     sslmode = os.environ.get("SC_DB_SSLMODE", "prefer").strip() or "prefer"
     env["PGSSLMODE"] = sslmode
-    shell = f"curl -fsSL {sh_quote(url)} | zstd -d | {' '.join(sh_quote(a) for a in psql)}"
+    # pipefail so a truncated CDN download / failed zstd is not masked by psql
+    # exiting 0 when the partial SQL happens to end on a statement boundary.
+    shell = (
+        f"set -o pipefail; curl -fsSL {sh_quote(url)} | zstd -d | "
+        f"{' '.join(sh_quote(a) for a in psql)}"
+    )
     _run(["bash", "-c", shell], env=env)
 
 
