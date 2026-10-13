@@ -4,9 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 import keeper_client
+import pytest
 from keeper_client import KeeperUnavailable
 
 
@@ -64,9 +63,11 @@ def test_http_error_is_fail_closed():
     mock_resp = MagicMock()
     mock_resp.status_code = 500
     mock_resp.text = "boom"
-    with patch("keeper_client.requests.get", return_value=mock_resp):
-        with pytest.raises(KeeperUnavailable):
-            keeper_client.server_task_block_reasons("hcloud", "cx22", ["membench"])
+    with (
+        patch("keeper_client.requests.get", return_value=mock_resp),
+        pytest.raises(KeeperUnavailable),
+    ):
+        keeper_client.server_task_block_reasons("hcloud", "cx22", ["membench"])
 
 
 def test_task_allowed():

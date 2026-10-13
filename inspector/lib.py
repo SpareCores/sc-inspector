@@ -1085,7 +1085,7 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, gpu_co
             c = d.containers.run(task.image, command, **docker_opts)
         except Exception as e:
             if is_gpu_attempt:
-                logger.info(f"GPU run failed, retrying without GPU: {str(e)}")
+                logger.info(f"GPU run failed, retrying without GPU: {e!s}")
                 if c is not None:
                     container_remove(c)
                 continue
@@ -1103,7 +1103,7 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, gpu_co
             c.stop()
             meta.error_msg = f"Execution timed out after {task.timeout.total_seconds()}s"
             if is_gpu_attempt:
-                logger.info(f"GPU run timed out, retrying without GPU")
+                logger.info("GPU run timed out, retrying without GPU")
                 container_remove(c)
                 continue
             return ver, b"", b""
@@ -1114,7 +1114,7 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, gpu_co
             res = c.wait(timeout=60)
         except Exception as e:
             if is_gpu_attempt:
-                logger.info(f"GPU run failed during wait, retrying without GPU: {str(e)}")
+                logger.info(f"GPU run failed during wait, retrying without GPU: {e!s}")
                 container_remove(c)
                 continue
             meta.error_msg = str(e)
