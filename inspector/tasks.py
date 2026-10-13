@@ -33,19 +33,6 @@ def tracker_docker_opts(job_name: str, **extra_env: str | None) -> dict:
     )
 
 
-GPU_EXCLUDE = {
-    ("aws", "g3.4xlarge"),
-    ("aws", "g3.8xlarge"),
-    ("aws", "g3.16xlarge"),
-    ("aws", "g4dn.metal"),
-    ("aws", "p2.8xlarge"),
-    ("aws", "p2.xlarge"),
-    ("aws", "p4d.24xlarge"),
-    ("aws", "g3s.xlarge"),
-    ("gcp", "a2-megagpu-16g"),
-}
-
-
 # Records timing/* checkpoints (user_data mount, machine boot, inspector); see sc-inspector-data README.
 timing = Task(
     parallel=True,
@@ -132,7 +119,6 @@ nvidia_smi = DockerTask(
     # we have to adapt to the oldest supported CUDA version
     image="nvidia/cuda:11.4.3-base-ubuntu20.04",
     gpu=True,
-    servers_exclude=GPU_EXCLUDE,
     version_command="bash -c \"nvidia-smi -h | head -1 | egrep -o 'v[0-9.]+'\"",
     command="nvidia-smi -q -x",
     precheck_command="lshw -C display -json | jq -r '.[].vendor'",
@@ -157,8 +143,7 @@ virtualization = DockerTask(
 # the client on a separate companion instance was pure waste. The image
 # starts its own local Postgres server when SC_DB_HOST is unset (see
 # benchmark.py in sc-images/benchmark-pgbench-postgres) instead of requiring
-# a companion VM. servers_only is dropped along with it — no family
-# allowlist is needed once every started instance can just run this locally.
+# a companion VM. Eligibility (memory/SKU) is enforced by keeper.
 #
 # The multi-VM machinery itself (MultiVmDbTask, postgres_multi.py,
 # companion_picker.py) is untouched and still available for benchmarks that
@@ -169,7 +154,6 @@ pgbench_postgres_ro_durable = DockerTask(
     parallel=False,
     start_with_instance=True,
     priority=1.02,
-    minimum_memory=2.0,
     image="ghcr.io/sparecores/benchmark-pgbench-postgres:main",
     timeout=timedelta(minutes=120),
     docker_opts=DB_DOCKER_OPTS
@@ -242,9 +226,6 @@ geekbench = DockerTask(
         memswap_limit=int(mem_bytes * 0.85),
         mem_swappiness=0,
     ),
-    # geekbench struggles and give truncated results with less than 2GB of memory
-    minimum_memory=2.1,
-    maximum_cpus=32,
     transform_output=[transform.raw, transform.fetch_geekbench_results],
     command="nice -n -20 geekbench.sh",
     timeout=timedelta(hours=1),
@@ -253,7 +234,6 @@ geekbench = DockerTask(
 compression_text = DockerTask(
     parallel=False,
     priority=6,
-    minimum_memory=1,
     timeout=timedelta(hours=1),
     image="ghcr.io/sparecores/benchmark:main",
     docker_opts=DOCKER_OPTS | tracker_docker_opts("compression_text"),
@@ -270,10 +250,6 @@ membench = DockerTask(
     command="-Hv -t 1800",
     start_with_instance=True,
     version_command="-V",
-    minimum_memory=0.9,
-    servers_exclude={
-        ("ovh", "r3-128"),
-    },
 )
 
 bw_mem = DockerTask(
@@ -283,11 +259,6 @@ bw_mem = DockerTask(
     image="ghcr.io/sparecores/benchmark:main",
     docker_opts=DOCKER_OPTS | tracker_docker_opts("bw_mem"),
     command="bw_mem.sh",
-    # These machines either crash or hang when running this benchmark
-    servers_exclude={
-        ("ovh", "a10-180"),
-        ("ovh", "l4-360"),
-    },
 )
 
 static_web = DockerTask(
@@ -317,7 +288,6 @@ nvbandwidth = DockerTask(
     image="ghcr.io/sparecores/nvbandwidth:main",
     docker_opts=DOCKER_OPTS | tracker_docker_opts("nvbandwidth"),
     gpu=True,
-    servers_exclude=GPU_EXCLUDE,
     version_command="bash -c \"nvbandwidth --help | head -1 | egrep -o 'v[0-9.]+'\"",
     command="nvbandwidth -j",
     precheck_command="lshw -C display -json | jq -r '.[].vendor'",
@@ -333,14 +303,12 @@ passmark = DockerTask(
     image="ghcr.io/sparecores/benchmark-passmark:main",
     docker_opts=DOCKER_OPTS | tracker_docker_opts("passmark"),
     command=None,
-    maximum_cpus=32,
 )
 
 llm = DockerTask(
     parallel=False,
     # might be slow when testing large models
     timeout=timedelta(hours=1.5),
-    minimum_memory=1,
     priority=13,
     image="ghcr.io/sparecores/benchmark-llm:main",
     docker_opts=DOCKER_OPTS | tracker_docker_opts("llm"),
@@ -354,7 +322,6 @@ llm = DockerTask(
 vllm = VllmDockerTask(
     parallel=False,
     timeout=timedelta(hours=3),
-    minimum_memory=2,
     priority=14,
     images=[
         "ghcr.io/sparecores/benchmark-vllm-gpu:main",
@@ -376,15 +343,13 @@ ffmpeg = DockerTask(
     command=None,
     timeout=timedelta(hours=2),
     start_with_instance=True,
-    minimum_memory=1,
 )
 
 # Raw block-device fio benchmark. Default priority (inf) so it always runs
 # last among finite-priority tasks: it may unmount and overwrite free disks.
 # Needs the host PID namespace so it can read /proc/1/mountinfo and nsenter
-# into the host mount namespace. Initially limited to ovh i1-90 for validation.
+# into the host mount namespace. SKU limits are enforced by keeper.
 storage = DockerTask(
-    servers_only={("ovh", "i1-90"), ("gcp", "c4a-standard-16-lssd")},
     parallel=False,
     image="ghcr.io/sparecores/benchmark-storage:main",
     docker_opts=DOCKER_OPTS
@@ -401,17 +366,8 @@ storage = DockerTask(
 # so running for a full day.
 # The load is increased from 5 seconds per minute (in the 1st hour)
 # to 55 seconds per minute (from the 11th hour) linearly.
+# SKU allowlist is enforced by keeper.
 stressnglongrun = DockerTask(
-    servers_only={
-        ("aws", "t4g.medium"),
-        ("aws", "c7g.large"),
-        ("gcp", "e2-medium"),
-        ("gcp", "c2d-highcpu-2"),
-        ("hcloud", "cx21"),
-        ("hcloud", "cx22"),
-        ("hcloud", "cax11"),
-        ("hcloud", "ccx13"),
-    },
     parallel=False,
     timeout=timedelta(hours=26),
     image="ghcr.io/sparecores/stress-ng-longrun:main",

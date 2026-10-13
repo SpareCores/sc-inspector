@@ -45,35 +45,6 @@ logging.basicConfig(
 for handler in logging.getLogger().handlers:
     handler.setFormatter(ContextAwareFormatter(formatter_str, "%Y-%m-%d %H:%M:%S"))
 lib.logging = logging
-EXCLUDE_INSTANCES: list[tuple[str, str]] = [
-    # too small memory instances
-    ("aws", "t3.nano"),
-    ("gcp", "f1-micro"),
-    # we can't (yet) start these
-    ("aws", "f2.48xlarge"),
-    ("aws", "p4de.24xlarge"),
-    ("aws", "p5.4xlarge"),
-    ("aws", "p5.48xlarge"),
-    ("aws", "p5e.48xlarge"),
-    ("aws", "p5en.48xlarge"),
-    ("aws", "p6-b200.48xlarge"),
-    ("aws", "p6-b300.48xlarge"),
-    ("aws", "trn2.48xlarge"),
-    ("aws", "u7i-12tb.224xlarge"),
-    ("aws", "u7i-8tb.112xlarge"),
-    ("aws", "u7in-16tb.224xlarge"),
-    ("aws", "u7in-24tb.224xlarge"),
-    ("aws", "u7in-32tb.224xlarge"),
-]
-
-# TEMPORARY: while validating AWS Spot self-heal + the pgbench multi-VM rollout,
-# only start these AWS instance families as the "main" (primary/single-VM)
-# instance. Does not restrict the multi-VM companion/client instance, which is
-# picked independently by companion_picker.py. Remove once validated.
-AWS_MAIN_INSTANCE_FAMILIES_ONLY = {
-    "t3", "c8g", "c9g", "c8i", "c8a",
-    "m9g", "m8g", "m7i", "m7g", "m6g", "m6i", "t4g",
-}
 
 
 @cache
@@ -149,7 +120,7 @@ def cli(repo_path):
 
 @cli.command()
 @click.pass_context
-@click.option("--exclude", type=(str, str), default=EXCLUDE_INSTANCES, multiple=True, help="Exclude $vendor $instance")
+@click.option("--exclude", type=(str, str), multiple=True, help="Exclude $vendor $instance (operator override)")
 @click.option("--start-only", type=(str, str), multiple=True, help="Start only $vendor $instance")
 @click.option("--vendor", type=str, default=None, help="Only start instances for the specified vendor")
 @click.option(
@@ -163,6 +134,7 @@ def start(ctx, exclude, start_only, vendor, limit):
     import concurrent.futures
     import threading
     import traceback
+    import keeper_client
 
     threading.current_thread().name = "main"
 
@@ -170,6 +142,13 @@ def start(ctx, exclude, start_only, vendor, limit):
         limit = int(os.environ.get("START_LIMIT", "8"))
     if limit < 1:
         raise click.ClickException("--limit must be >= 1")
+
+    # Empty vendor string yields every task (no vendors_only filters match as exclusive).
+    task_names = [t.name for t in lib.get_tasks("")]
+    try:
+        servers_block = keeper_client.servers_task_block_reasons(task_names)
+    except keeper_client.KeeperUnavailable as e:
+        raise click.ClickException(f"Keeper unavailable (fail-closed): {e}") from e
 
     futures = {}
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1024)
@@ -183,24 +162,22 @@ def start(ctx, exclude, start_only, vendor, limit):
         if vnd not in supported_vendors:
             # sc-runner can't yet handle this vendor
             continue
-        if (
-            vnd == "aws"
-            and server.split(".")[0] not in AWS_MAIN_INSTANCE_FAMILIES_ONLY
-            and not (start_only and (vnd, server) in start_only)
-        ):
-            logging.info(f"Excluding {vnd}/{server}: not in AWS_MAIN_INSTANCE_FAMILIES_ONLY")
-            continue
-        gpu_count = srv_data.gpu_count
+        gpu_count = getattr(srv_data, "gpu_count", None) or getattr(
+            srv_data, "accelerator_count", 0
+        )
         logging.info(f"Evaluating {vnd}/{server} with {gpu_count} GPUs")
-        if (vnd, server) in exclude:
+        if exclude and (vnd, server) in exclude:
             logging.info(f"Excluding {vnd}/{server}")
             continue
         if start_only and (vnd, server) not in start_only:
             logging.info(f"Excluding {vnd}/{server} as --start-only {start_only} is given")
             continue
         data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vnd, server)
+        block_reasons = servers_block.get(vnd, {}).get(server)
         try:
-            tasks = lib.tasks_to_start(vnd, data_dir, srv_data)
+            tasks = lib.tasks_to_start(
+                vnd, data_dir, srv_data, block_reasons=block_reasons
+            )
         except Exception as e:
             # record failure but keep evaluating other servers; raised at end of run
             if exception is None:
@@ -288,11 +265,20 @@ def start_dbaas(ctx, vendor, instance_key, limit):
     from dbaas_start import start_dbaas_inspect
     import concurrent.futures
     import threading
+    import keeper_client
 
     if limit is None:
         limit = int(os.environ.get("DBAAS_START_LIMIT", "4"))
     if limit < 1:
         raise click.ClickException("--limit must be >= 1")
+
+    task_names = [t.name for t in lib.get_tasks("") if isinstance(t, lib.DbaasDbTask)]
+    if not task_names:
+        task_names = ["pgbench_postgres_dbaas_ro_durable"]
+    try:
+        databases_block = keeper_client.databases_task_block_reasons(task_names)
+    except keeper_client.KeeperUnavailable as e:
+        raise click.ClickException(f"Keeper unavailable (fail-closed): {e}") from e
 
     threading.current_thread().name = "main"
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(8, limit))
@@ -303,16 +289,13 @@ def start_dbaas(ctx, vendor, instance_key, limit):
         available_managed_dbs(vendor=vendor)
     ):
         instance_key_matches = instance_key and instance_key in (key, target.native_id)
-        if (
-            vnd == "aws"
-            and target.native_id.split(".")[1] not in AWS_MAIN_INSTANCE_FAMILIES_ONLY
-            and not instance_key_matches
-        ):
-            continue
         if instance_key and not instance_key_matches:
             continue
         data_dir = dbaas_data_dir(ctx.parent.params["repo_path"], vnd, key)
-        tasks = lib.tasks_to_start_dbaas(vnd, data_dir, target)
+        block_reasons = databases_block.get(vnd, {}).get(target.native_id)
+        tasks = lib.tasks_to_start_dbaas(
+            vnd, data_dir, target, block_reasons=block_reasons
+        )
         if not tasks:
             logging.info("No DBaaS tasks for %s/%s", vnd, key)
             continue
@@ -395,9 +378,7 @@ def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
     # see if we have to destroy the resources in the Pulumi stack
     now = datetime.now()
     applicable_tasks = [
-        task for task in tasks
-        if not (task.servers_only and (vendor, server) not in task.servers_only)
-        and not (task.servers_exclude and (vendor, server) in task.servers_exclude)
+        task for task in tasks if not isinstance(task, lib.DbaasDbTask)
     ]
     task_metas = [(task, lib.load_task_meta(task, data_dir=data_dir)) for task in applicable_tasks]
     last_activity = max((meta.end for _, meta in task_metas if meta.end), default=None)

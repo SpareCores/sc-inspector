@@ -1,13 +1,5 @@
-from collections import defaultdict
-from datetime import datetime, timedelta, timezone
-from functools import cache
-from itertools import chain
-from pydantic import BaseModel
-from queue import Queue
-from typing import Any, Callable, ClassVar, Literal
 import base64
 import copy
-import docker
 import hashlib
 import inspect
 import json
@@ -17,16 +9,31 @@ import os
 import platform
 import random
 import re
-import repo
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from collections import defaultdict
+from collections.abc import Callable
+from datetime import datetime, timedelta, timezone
+from functools import cache
+from itertools import chain
+from queue import Queue
+from typing import Any, ClassVar, Literal
+from zlib import crc32
+
+import docker
+import repo
 import transform
 import user_data as user_data_pack
-from resource_tracker import configure_resource_tracker_docker_opts, upload_resource_tracker_metrics
-from zlib import crc32
+from pydantic import BaseModel
+from resource_tracker import (
+    configure_resource_tracker_docker_opts,
+    upload_resource_tracker_metrics,
+)
+
+logger = logging.getLogger(__name__)
 
 META_NAME = "meta.json"
 TIMING_TASK_NAME = "timing"
@@ -311,7 +318,7 @@ def _gpu_compute_capabilities() -> list[tuple[int, int]] | None:
                 caps.append(parsed)
         if caps:
             return caps
-        logging.warning("Invalid GPU_COMPUTE_CAP=%r, ignoring", raw)
+        logger.warning("Invalid GPU_COMPUTE_CAP=%r, ignoring", raw)
 
     try:
         out = subprocess.check_output(
@@ -374,7 +381,7 @@ def _vllm_image_attempts(
                 gpu_caps = _gpu_compute_capabilities()
                 gpu_caps_checked = True
             if not _vllm_gpu_image_supported(gpu_caps):
-                logging.info(
+                logger.info(
                     "Skipping %s: GPU compute capability %s < %s.%s "
                     "(Ampere+/sm_80 required)",
                     _vllm_image_label(image),
@@ -397,7 +404,7 @@ def load_task_meta(task: Task, data_dir: str | os.PathLike, **kwargs) -> Meta:
         meta |= kwargs
         return Meta.model_validate(meta)
     else:
-        logging.debug(f"{fn} not found, returning an empty Meta object")
+        logger.debug(f"{fn} not found, returning an empty Meta object")
         return Meta(**kwargs)
 
 
@@ -453,10 +460,62 @@ def _target_in_dbaas_only(dbaas_only, vendor, instance_key):
     return (vendor, instance_key) in dbaas_only
 
 
-def _task_matches_target_for_start(task: Task, target, data_dir: str | os.PathLike) -> bool:
-    if target.memory_gib < task.minimum_memory:
+def _dbaas_api_reference_from_env() -> str:
+    native = os.environ.get("SC_PROVISION_NATIVE_ID", "").strip()
+    if native:
+        return native
+    key = os.environ.get("MANAGED_DB_INSTANCE_KEY", "").strip()
+    return key.split("/", 1)[0] if key else ""
+
+
+def _keeper_task_reasons(
+    vendor: str,
+    resource: str,
+    task_name: str,
+    *,
+    kind: str,
+    block_reasons: dict[str, list[str]] | None = None,
+) -> list[str]:
+    """Return keeper block reasons for one task (empty list = allowed).
+
+    ``block_reasons`` is an optional per-resource map from a bulk fetch.
+    Raises ``keeper_client.KeeperUnavailable`` on transport/API failure.
+    """
+    import keeper_client
+
+    if block_reasons is not None:
+        return list(block_reasons.get(task_name, []))
+    if kind == "database":
+        return keeper_client.database_task_block_reasons(vendor, resource, [task_name]).get(
+            task_name, []
+        )
+    return keeper_client.server_task_block_reasons(vendor, resource, [task_name]).get(
+        task_name, []
+    )
+
+
+def _task_matches_target_for_start(
+    task: Task,
+    target,
+    data_dir: str | os.PathLike,
+    *,
+    block_reasons: dict[str, list[str]] | None = None,
+) -> bool:
+    import keeper_client
+
+    try:
+        reasons = _keeper_task_reasons(
+            target.vendor_id,
+            target.native_id,
+            task.name,
+            kind="database",
+            block_reasons=block_reasons,
+        )
+    except keeper_client.KeeperUnavailable as e:
+        logger.error("Keeper unavailable for DBaaS eligibility: %s", e)
         return False
-    if task.maximum_cpus and target.cpu_count > task.maximum_cpus:
+    if reasons:
+        keeper_client.log_block_reasons(task.name, target.vendor_id, target.native_id, reasons)
         return False
     if isinstance(task, DbaasDbTask):
         if task.dbaas_only and not _target_in_dbaas_only(
@@ -471,22 +530,32 @@ def _task_matches_target_for_start(task: Task, target, data_dir: str | os.PathLi
     return True
 
 
-def _task_matches_server_for_start(task: Task, srv, data_dir: str | os.PathLike) -> bool:
+def _task_matches_server_for_start(
+    task: Task,
+    srv,
+    data_dir: str | os.PathLike,
+    *,
+    block_reasons: dict[str, list[str]] | None = None,
+) -> bool:
+    import keeper_client
+
     if isinstance(task, DbaasDbTask):
         return False
-    if task.gpu and not srv.gpu_count:
+    try:
+        reasons = _keeper_task_reasons(
+            srv.vendor_id,
+            srv.api_reference,
+            task.name,
+            kind="server",
+            block_reasons=block_reasons,
+        )
+    except keeper_client.KeeperUnavailable as e:
+        logger.error("Keeper unavailable for server eligibility: %s", e)
         return False
-    if srv.memory_amount < task.minimum_memory * 1024:
-        return False
-    if task.maximum_cpus and srv.vcpus > task.maximum_cpus:
-        return False
-    if task.servers_only and not _server_in_servers_only(
-        task.servers_only, srv.vendor_id, srv.api_reference, data_dir
-    ):
-        return False
-    if task.servers_exclude and (srv.vendor_id, srv.api_reference) in task.servers_exclude:
-        return False
-    if (crc32(srv.api_reference.encode("utf-8")) / 0xFFFFFFFF) > task.rollout:
+    if reasons:
+        keeper_client.log_block_reasons(
+            task.name, srv.vendor_id, srv.api_reference, reasons
+        )
         return False
     if isinstance(task, MultiVmDbTask):
         from disk import effective_disk_gib
@@ -513,12 +582,18 @@ def boot_meta_for_task(task: Task, data_dir: str | os.PathLike, **fields) -> Met
     return Meta(**data)
 
 
-def reconcile_stale_start_retries(vendor: str, data_dir: str | os.PathLike, srv) -> bool:
+def reconcile_stale_start_retries(
+    vendor: str,
+    data_dir: str | os.PathLike,
+    srv,
+    *,
+    block_reasons: dict[str, list[str]] | None = None,
+) -> bool:
     """Reset or finalize tasks stuck with no output after FAIL_IF_NO_OUTPUT."""
     candidates = [
         task
         for task in get_tasks(vendor)
-        if _task_matches_server_for_start(task, srv, data_dir)
+        if _task_matches_server_for_start(task, srv, data_dir, block_reasons=block_reasons)
         and _is_stale_no_output(load_task_meta(task, data_dir))
     ]
     if not candidates:
@@ -540,7 +615,7 @@ def reconcile_stale_start_retries(vendor: str, data_dir: str | os.PathLike, srv)
                 f"No output after {FAIL_IF_NO_OUTPUT.days} days; "
                 f"exceeded {MAX_START_RETRIES} stale start retries"
             )
-            logging.info(
+            logger.info(
                 f"Task {task.name} exhausted stale start retries ({meta.start_retries}), "
                 "will not trigger instance starts"
             )
@@ -550,7 +625,7 @@ def reconcile_stale_start_retries(vendor: str, data_dir: str | os.PathLike, srv)
             meta.end = None
             meta.exit_code = None
             meta.error_msg = None
-            logging.info(
+            logger.info(
                 f"Task {task.name} stale with no output; "
                 f"retry {meta.start_retries}/{MAX_START_RETRIES}"
             )
@@ -561,7 +636,13 @@ def reconcile_stale_start_retries(vendor: str, data_dir: str | os.PathLike, srv)
     return changed
 
 
-def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
+def should_start(
+    task: Task,
+    data_dir: str | os.PathLike,
+    srv,
+    *,
+    block_reasons: dict[str, list[str]] | None = None,
+) -> bool:
     """Return True if we should start a server for this task."""
     if isinstance(task, DbaasDbTask):
         return False
@@ -576,36 +657,17 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
         and force_ondemand_after_spot_timeout(srv.vendor_id, srv.api_reference, data_dir)
     )
     if (task.start_with_instance or task.always_run) and not spot_self_heal:
-        logging.info(f"Skipping task {task.name}, does not trigger an instance start on its own")
+        logger.info(f"Skipping task {task.name}, does not trigger an instance start on its own")
         return False
     if meta.start and (datetime.now() - meta.start) <= WAIT_SINCE_LAST_START and not spot_self_heal:
-        logging.info(f"Skipping task {task.name}, last start: {meta.start}")
+        logger.info(f"Skipping task {task.name}, last start: {meta.start}")
         return False
     thash = task_hash(task)
-    if not _task_matches_server_for_start(task, srv, data_dir):
-        if task.gpu and not srv.gpu_count:
-            logging.info(f"Skipping task {task.name} because it requires GPU, but gpu_count is {srv.gpu_count}")
-        elif srv.memory_amount < task.minimum_memory * 1024:
-            mem_gib = srv.memory_amount / 1024
-            logging.info(
-                f"Skipping task {task.name} because it requires {task.minimum_memory} GiB RAM, "
-                f"but this machine has only {mem_gib:.03}"
-            )
-        elif task.maximum_cpus and srv.vcpus > task.maximum_cpus:
-            logging.info(
-                f"Skipping task {task.name} because it allows at most {task.maximum_cpus} CPUs, "
-                f"but this machine has {srv.vcpus}"
-            )
-        elif task.servers_only and not _server_in_servers_only(
-            task.servers_only, srv.vendor_id, srv.api_reference, data_dir
-        ):
-            logging.info(f"Skipping task {task.name} because it is not enabled for {srv.vendor_id}/{srv.api_reference}")
-        elif task.servers_exclude and (srv.vendor_id, srv.api_reference) in task.servers_exclude:
-            logging.info(f"Skipping task {task.name} because it is not enabled for {srv.vendor_id}/{srv.api_reference}")
-        else:
-            logging.info(
-                f"Skipping task {task.name} because not selected for rolling out yet ({task.rollout * 100}%)"
-            )
+    if not _task_matches_server_for_start(task, srv, data_dir, block_reasons=block_reasons):
+        logger.info(
+            f"Skipping task {task.name}: not eligible via keeper / multi-vm checks "
+            f"for {srv.vendor_id}/{srv.api_reference}"
+        )
         return False
 
     if meta.start:
@@ -613,28 +675,28 @@ def should_start(task: Task, data_dir: str | os.PathLike, srv) -> bool:
             raise RuntimeError(f"{task.name} was last started at {meta.start} and failed!")
     if meta.end and task.rerun and (datetime.now() - meta.end) >= task.rerun and meta.exit_code == 0:
         # if rerun is set and there's a successful run, run the task again if rerun time interval has passed
-        logging.info(f"Task {task.name} should be started: {task.rerun} has passed since last run")
+        logger.info(f"Task {task.name} should be started: {task.rerun} has passed since last run")
         return True
     if meta.task_hash != thash:
         # This will be triggered when a task is first created or if it has been changed.
-        logging.info(f"Task {task.name} should run as its task hash has changed: {meta.task_hash} -> {thash}")
+        logger.info(f"Task {task.name} should run as its task hash has changed: {meta.task_hash} -> {thash}")
         return True
     if meta.exit_code == -1 and is_retryable_start_error(meta.error_msg):
-        logging.info(f"Retrying task {task.name} due to retryable start error, meta: {meta}")
+        logger.info(f"Retrying task {task.name} due to retryable start error, meta: {meta}")
         return True
     if spot_self_heal:
-        logging.info(
+        logger.info(
             f"Retrying task {task.name} on-demand after Spot run passed cleanup timeout, meta: {meta}"
         )
         return True
     if not meta.start:
-        logging.info(f"Task {task.name} should run, no start field")
+        logger.info(f"Task {task.name} should run, no start field")
         return True
     # Skip the task. If it was started, but hasn't yet produced output, we won't start a new run, as it would
     # ruin the above checks for failing outputs, and we don't want to constantly and silently restart the tasks.
     if meta.exit_code != 0:
         # don't report succeeded tasks
-        logging.info(f"Skipping task {task.name}, meta: {meta}")
+        logger.info(f"Skipping task {task.name}, meta: {meta}")
     return False
 
 
@@ -645,36 +707,14 @@ def _task_resource_checks(
     instance: str,
     gpu_count: float,
     mem_bytes: int,
-    cpu_count: int | float | None = None,
+    cpu_count: float | None = None,
 ) -> bool:
-    if mem_bytes < task.minimum_memory * 1024 ** 3:
-        mem_gib = mem_bytes / 1024 ** 3
-        logging.info(
-            f"Skipping task {task.name} because it requires {task.minimum_memory} GiB RAM, "
-            f"but this machine has only {mem_gib:.03}"
-        )
-        return False
-    host_cpus = cpu_count if cpu_count is not None else (os.cpu_count() or 1)
-    if task.maximum_cpus and host_cpus > task.maximum_cpus:
-        logging.info(
-            f"Skipping task {task.name} because it allows at most {task.maximum_cpus} CPUs, "
-            f"but this machine has {host_cpus}"
-        )
-        return False
-    if task.gpu and not gpu_count:
-        logging.info(f"Skipping task {task.name} because it requires GPU, but gpu_count is {gpu_count}")
-        return False
-    if task.servers_only and not _server_in_servers_only(task.servers_only, vendor, instance, data_dir):
-        logging.info(f"Skipping task {task.name} because it is not enabled for {vendor}/{instance}")
-        return False
-    if task.servers_exclude and (vendor, instance) in task.servers_exclude:
-        logging.info(f"Skipping task {task.name} because it is not enabled for {vendor}/{instance}")
-        return False
+    """Live MultiVm / DBaaS feasibility (catalog SKU policy is enforced via keeper)."""
     if isinstance(task, MultiVmDbTask):
         from postgres_multi import multi_vm_supported
 
         if not multi_vm_supported(vendor):
-            logging.info(f"Skipping task {task.name}: multi-VM not supported for {vendor}")
+            logger.info(f"Skipping task {task.name}: multi-VM not supported for {vendor}")
             return False
         provisioned = VOLUME_SIZE
         if os.environ.get("PROVISIONED_DISK_GIB"):
@@ -684,7 +724,7 @@ def _task_resource_checks(
             mem_bytes / 1024**3,
             provisioned,
         ):
-            logging.info(f"Skipping task {task.name}: not feasible on live host")
+            logger.info(f"Skipping task {task.name}: not feasible on live host")
             return False
     if isinstance(task, DbaasDbTask):
         mem_gib = float(os.environ.get("MEM_GIB") or mem_bytes / 1024**3)
@@ -707,10 +747,10 @@ def _task_resource_checks(
             )
             storage = float(provision_spec(stub)["storage_gib"])
         if not task.feasible_on(db_vcpus, mem_gib, storage):
-            logging.info(f"Skipping task {task.name}: not feasible on DBaaS host")
+            logger.info(f"Skipping task {task.name}: not feasible on DBaaS host")
             return False
         if not task.supported_on_runtime():
-            logging.info(
+            logger.info(
                 f"Skipping task {task.name}: async durability not supported on this managed DB"
             )
             return False
@@ -739,7 +779,9 @@ def should_run(
     instance: str,
     gpu_count: float,
     *,
-    cpu_count: int | float | None = None,
+    cpu_count: float | None = None,
+    block_reasons: dict[str, list[str]] | None = None,
+    resource_kind: str | None = None,
 ) -> bool:
     """Return True if we should run a task.
 
@@ -747,12 +789,36 @@ def should_run(
     From the start orchestrator (GHA), pass catalog vCPUs so checks do not use
     the runner's ``os.cpu_count()``.
     """
+    import keeper_client
+
     if isinstance(task, DbaasDbTask) and os.environ.get("TOPOLOGY") != "dbaas":
-        logging.info(f"Skipping task {task.name}: TOPOLOGY is not dbaas")
+        logger.info(f"Skipping task {task.name}: TOPOLOGY is not dbaas")
         return False
     if os.environ.get("TOPOLOGY") == "dbaas" and not isinstance(task, DbaasDbTask):
-        logging.info(f"Skipping task {task.name}: characterization tasks don't run on DBaaS topology")
+        logger.info(f"Skipping task {task.name}: characterization tasks don't run on DBaaS topology")
         return False
+
+    kind = resource_kind or (
+        "database" if os.environ.get("TOPOLOGY") == "dbaas" else "server"
+    )
+    resource_ref = instance
+    if kind == "database":
+        resource_ref = _dbaas_api_reference_from_env() or instance
+    try:
+        reasons = _keeper_task_reasons(
+            vendor,
+            resource_ref,
+            task.name,
+            kind=kind,
+            block_reasons=block_reasons,
+        )
+    except keeper_client.KeeperUnavailable as e:
+        logger.error("Keeper unavailable; failing closed for %s: %s", task.name, e)
+        return False
+    if reasons:
+        keeper_client.log_block_reasons(task.name, vendor, resource_ref, reasons)
+        return False
+
     import psutil  # lazy load
 
     mem_bytes = psutil.virtual_memory().available
@@ -761,7 +827,7 @@ def should_run(
             task, data_dir, vendor, instance, gpu_count, mem_bytes, cpu_count=cpu_count
         ):
             return False
-        logging.info(f"Running {task.name} (always_run)")
+        logger.info(f"Running {task.name} (always_run)")
         return True
 
     if not _task_resource_checks(
@@ -775,11 +841,11 @@ def should_run(
         return True
     if meta.exit_code != 0 or meta.task_hash != thash:
         if meta.exit_code != 0:
-            logging.info(f"Task {task.name} should run as last run has exit code: {meta.exit_code}")
+            logger.info(f"Task {task.name} should run as last run has exit code: {meta.exit_code}")
         if meta.task_hash != thash:
-            logging.info(f"Task {task.name} should run as its task hash has changed: {meta.task_hash} -> {thash}")
+            logger.info(f"Task {task.name} should run as its task hash has changed: {meta.task_hash} -> {thash}")
         return True
-    logging.info(f"Skipping task {task.name}, {meta.end}, {meta.exit_code}")
+    logger.info(f"Skipping task {task.name}, {meta.end}, {meta.exit_code}")
     return False
 
 
@@ -821,14 +887,14 @@ def docker_prune_after_round() -> None:
         containers = d.containers.prune()
         images = d.images.prune(filters={"dangling": False})
         networks = d.networks.prune()
-        logging.info(
+        logger.info(
             "Docker prune after taskgroup: containers_deleted=%s images_space_reclaimed=%s networks_deleted=%s",
             containers.get("ContainersDeleted"),
             images.get("SpaceReclaimed"),
             networks.get("NetworksDeleted"),
         )
     except Exception:
-        logging.exception("Docker prune failed (non-fatal)")
+        logger.exception("Docker prune failed (non-fatal)")
 
 
 def _vllm_subtask_docker_opts(
@@ -878,7 +944,7 @@ def _vllm_probe_image(
         timeout=task.probe_timeout,
         use_gpu=use_gpu,
     )
-    logging.info("vLLM probe mode=%s image=%s", mode, image)
+    logger.info("vLLM probe mode=%s image=%s", mode, image)
     run_docker(probe_meta, sub, data_dir, gpu_count if use_gpu else 0.0)
     if probe_meta.exit_code == 0:
         return True, ""
@@ -902,10 +968,10 @@ def run_vllm_docker(
         )
         if ok:
             selected = (mode, image, use_gpu)
-            logging.info("vLLM probe selected mode=%s image=%s", mode, image)
+            logger.info("vLLM probe selected mode=%s image=%s", mode, image)
             break
         probe_errors.append(f"probe {mode}: {detail}")
-        logging.info("vLLM probe failed mode=%s (%s), trying next", mode, detail)
+        logger.info("vLLM probe failed mode=%s (%s), trying next", mode, detail)
 
     if not selected:
         meta.error_msg = "; ".join(probe_errors) or "No vLLM image passed startup probe"
@@ -926,7 +992,7 @@ def run_vllm_docker(
         timeout=task.timeout,
         use_gpu=use_gpu,
     )
-    logging.info("vLLM full benchmark mode=%s image=%s", mode, image)
+    logger.info("vLLM full benchmark mode=%s image=%s", mode, image)
     ver, stdout, stderr = run_docker(
         meta, sub, data_dir, gpu_count if use_gpu else 0.0
     )
@@ -965,7 +1031,7 @@ def _gpu_vram_mib() -> int | None:
             raise ValueError("non-positive VRAM")
         return vram
     except ValueError:
-        logging.warning("Invalid GPU_VRAM_MIB=%r, ignoring host VRAM hint", raw)
+        logger.warning("Invalid GPU_VRAM_MIB=%r, ignoring host VRAM hint", raw)
         return None
 
 
@@ -1019,7 +1085,7 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, gpu_co
             c = d.containers.run(task.image, command, **docker_opts)
         except Exception as e:
             if is_gpu_attempt:
-                logging.info(f"GPU run failed, retrying without GPU: {str(e)}")
+                logger.info(f"GPU run failed, retrying without GPU: {str(e)}")
                 if c is not None:
                     container_remove(c)
                 continue
@@ -1037,7 +1103,7 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, gpu_co
             c.stop()
             meta.error_msg = f"Execution timed out after {task.timeout.total_seconds()}s"
             if is_gpu_attempt:
-                logging.info(f"GPU run timed out, retrying without GPU")
+                logger.info(f"GPU run timed out, retrying without GPU")
                 container_remove(c)
                 continue
             return ver, b"", b""
@@ -1048,7 +1114,7 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, gpu_co
             res = c.wait(timeout=60)
         except Exception as e:
             if is_gpu_attempt:
-                logging.info(f"GPU run failed during wait, retrying without GPU: {str(e)}")
+                logger.info(f"GPU run failed during wait, retrying without GPU: {str(e)}")
                 container_remove(c)
                 continue
             meta.error_msg = str(e)
@@ -1089,7 +1155,7 @@ def format_timing_utc(dt: datetime) -> str:
 def github_run_id() -> str:
     run_id = os.environ.get("GITHUB_RUN_ID", "").strip()
     if not run_id:
-        logging.warning("GITHUB_RUN_ID not set, using 'unknown' for timing paths")
+        logger.warning("GITHUB_RUN_ID not set, using 'unknown' for timing paths")
         return "unknown"
     return run_id
 
@@ -1173,14 +1239,14 @@ def record_timing_from_host(
     for filename in (TIMING_USER_DATA_START, TIMING_USER_DATA_END):
         src = os.path.join(host_dir, filename)
         if not os.path.isfile(src):
-            logging.info(f"Host timing file not found: {src}")
+            logger.info(f"Host timing file not found: {src}")
             continue
         with open(src) as f:
             ts = f.read().strip()
         try:
             when = parse_timing_utc(ts)
         except ValueError:
-            logging.exception(f"Invalid timestamp in {src}: {ts!r}")
+            logger.exception(f"Invalid timestamp in {src}: {ts!r}")
             continue
         write_timing_file(data_dir, filename, when, run_id=run_id)
 
@@ -1192,14 +1258,24 @@ def record_timing_metrics(data_dir: str | os.PathLike, *, run_id: str | None = N
     record_timing_machine_start(data_dir, run_id=run_id)
 
 
-def tasks_to_start(vendor: str, data_dir: str | os.PathLike, srv) -> list[Task]:
+def tasks_to_start(
+    vendor: str,
+    data_dir: str | os.PathLike,
+    srv,
+    *,
+    block_reasons: dict[str, list[str]] | None = None,
+) -> list[Task]:
     """Tasks that should trigger starting an instance.
 
     Tasks with start_with_instance or always_run never start an instance on their own, but are
     added here when another task is already starting the machine.
     """
-    reconcile_stale_start_retries(vendor, data_dir, srv)
-    tasks = [task for task in get_tasks(vendor) if should_start(task, data_dir, srv)]
+    reconcile_stale_start_retries(vendor, data_dir, srv, block_reasons=block_reasons)
+    tasks = [
+        task
+        for task in get_tasks(vendor)
+        if should_start(task, data_dir, srv, block_reasons=block_reasons)
+    ]
     if not tasks:
         return []
     started = {id(task) for task in tasks}
@@ -1209,7 +1285,7 @@ def tasks_to_start(vendor: str, data_dir: str | os.PathLike, srv) -> list[Task]:
         if isinstance(task, DbaasDbTask):
             continue
         if task.always_run:
-            logging.info(f"Adding {task.name} (always_run) for co-start")
+            logger.info(f"Adding {task.name} (always_run) for co-start")
             tasks.append(task)
             started.add(id(task))
         elif task.start_with_instance and should_run(
@@ -1219,14 +1295,22 @@ def tasks_to_start(vendor: str, data_dir: str | os.PathLike, srv) -> list[Task]:
             srv.api_reference,
             srv.gpu_count,
             cpu_count=srv.vcpus,
+            block_reasons=block_reasons,
+            resource_kind="server",
         ):
-            logging.info(f"Adding {task.name} (start_with_instance) for co-start")
+            logger.info(f"Adding {task.name} (start_with_instance) for co-start")
             tasks.append(task)
             started.add(id(task))
     return tasks
 
 
-def should_start_dbaas(task: Task, data_dir: str | os.PathLike, target) -> bool:
+def should_start_dbaas(
+    task: Task,
+    data_dir: str | os.PathLike,
+    target,
+    *,
+    block_reasons: dict[str, list[str]] | None = None,
+) -> bool:
     """Return True if we should start a DBaaS stack for this task."""
     if not isinstance(task, DbaasDbTask):
         return False
@@ -1235,7 +1319,9 @@ def should_start_dbaas(task: Task, data_dir: str | os.PathLike, target) -> bool:
     meta = load_task_meta(task, data_dir)
     if meta.start and (datetime.now() - meta.start) <= WAIT_SINCE_LAST_START:
         return False
-    if not _task_matches_target_for_start(task, target, data_dir):
+    if not _task_matches_target_for_start(
+        task, target, data_dir, block_reasons=block_reasons
+    ):
         return False
     thash = task_hash(task)
     if meta.end and task.rerun and (datetime.now() - meta.end) >= task.rerun and meta.exit_code == 0:
@@ -1249,9 +1335,19 @@ def should_start_dbaas(task: Task, data_dir: str | os.PathLike, target) -> bool:
     return False
 
 
-def tasks_to_start_dbaas(vendor: str, data_dir: str | os.PathLike, target) -> list[Task]:
+def tasks_to_start_dbaas(
+    vendor: str,
+    data_dir: str | os.PathLike,
+    target,
+    *,
+    block_reasons: dict[str, list[str]] | None = None,
+) -> list[Task]:
     """DBaaS tasks that should trigger starting a managed DB + client stack."""
-    tasks = [task for task in get_tasks(vendor) if should_start_dbaas(task, data_dir, target)]
+    tasks = [
+        task
+        for task in get_tasks(vendor)
+        if should_start_dbaas(task, data_dir, target, block_reasons=block_reasons)
+    ]
     if not tasks:
         return []
     started = {id(task) for task in tasks}
@@ -1268,6 +1364,8 @@ def tasks_to_start_dbaas(vendor: str, data_dir: str | os.PathLike, target) -> li
             target.native_id,
             0.0,
             cpu_count=target.cpu_count,
+            block_reasons=block_reasons,
+            resource_kind="database",
         ):
             tasks.append(task)
             started.add(id(task))
@@ -1375,7 +1473,7 @@ def _finalize_multi_vm_band_if_done(
             return
         finalize_multi_vm(data_dir)
     except Exception:
-        logging.exception("multi-VM companion shutdown failed")
+        logger.exception("multi-VM companion shutdown failed")
 
 
 def _push_data_dirs(data_dirs: list[str | os.PathLike], message: str) -> None:
@@ -1385,7 +1483,7 @@ def _push_data_dirs(data_dirs: list[str | os.PathLike], message: str) -> None:
                 repo.push_path(data_dir, message)
                 break
             except Exception:
-                logging.exception("push failed")
+                logger.exception("push failed")
                 if i < 2:
                     time.sleep(random.randint(1, 10))
 
@@ -1434,7 +1532,7 @@ def run_tasks(
             if task.precheck_command and task.precheck_regex:
                 check_res = subprocess.run(task.precheck_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
                 if not re.search(task.precheck_regex, check_res.stdout, re.IGNORECASE):
-                    logging.info("Task precheck_regex didn't match, skipping")
+                    logger.info("Task precheck_regex didn't match, skipping")
                     meta.end = datetime.now()
                     meta.exit_code = -3
                     meta.task_hash=task_hash(task)
@@ -1443,7 +1541,7 @@ def run_tasks(
                     changed_dirs.append(task_dir_root)
                     continue
 
-            logging.info(f"Starting {task.name}")
+            logger.info(f"Starting {task.name}")
             if not task.parallel:
                 # Persist the real start time before blocking on this task, and push it
                 # now rather than waiting for the taskgroup-end push below. Otherwise the
@@ -1541,12 +1639,7 @@ def instance_task_metas(
 ) -> list[tuple[Task, Meta]]:
     """Applicable (task, meta) pairs for cleanup / Spot heal decisions."""
     if tasks is None:
-        tasks = [
-            task
-            for task in get_tasks(vendor)
-            if not (task.servers_only and (vendor, server) not in task.servers_only)
-            and not (task.servers_exclude and (vendor, server) in task.servers_exclude)
-        ]
+        tasks = [task for task in get_tasks(vendor) if not isinstance(task, DbaasDbTask)]
     return [(task, load_task_meta(task, data_dir=data_dir)) for task in tasks]
 
 
@@ -1602,19 +1695,11 @@ def finalize_task_metas(
     changed_dirs: list[str | os.PathLike] = []
     last_activity = None
     for task in get_tasks(vendor):
-        if task.servers_only and (vendor, instance) not in task.servers_only:
-            continue
-        if task.servers_exclude and (vendor, instance) in task.servers_exclude:
-            continue
         task_dir_root = task_data_dir(task, data_dir, client_data_dir)
         meta = load_task_meta(task, data_dir=task_dir_root)
         if meta.end:
             last_activity = max(last_activity, meta.end) if last_activity else meta.end
     for task in get_tasks(vendor):
-        if task.servers_only and (vendor, instance) not in task.servers_only:
-            continue
-        if task.servers_exclude and (vendor, instance) in task.servers_exclude:
-            continue
         task_dir_root = task_data_dir(task, data_dir, client_data_dir)
         meta = load_task_meta(task, data_dir=task_dir_root)
         if not meta.start or meta.end is not None:
@@ -1638,12 +1723,7 @@ def finalize_task_metas(
 
 
 def _applicable_tasks(vendor: str, server: str):
-    return [
-        task for task in get_tasks(vendor)
-        if not isinstance(task, DbaasDbTask)
-        and not (task.servers_only and (vendor, server) not in task.servers_only)
-        and not (task.servers_exclude and (vendor, server) in task.servers_exclude)
-    ]
+    return [task for task in get_tasks(vendor) if not isinstance(task, DbaasDbTask)]
 
 
 def _applicable_dbaas_tasks(vendor: str, instance_key: str):
@@ -1926,6 +2006,9 @@ def inspector_user_data_replacements(
         "GITHUB_WORKFLOW": s3_runs.workflow_slug(),
         "BENCHMARK_SECRETS_PASSPHRASE": os.environ.get("BENCHMARK_SECRETS_PASSPHRASE", ""),
         "SENTINEL_API_TOKEN": os.environ.get("SENTINEL_API_TOKEN", ""),
+        "KEEPER_API_BASE": os.environ.get(
+            "KEEPER_API_BASE", "https://keeper.sparecores.net"
+        ),
         "HF_TOKEN": os.environ.get("HF_TOKEN", ""),
         "VENDOR": vendor,
         "INSTANCE": server,
@@ -2073,7 +2156,7 @@ def delayed_destroy(vendor, server, resource_opts):
     try:
         runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
     except Exception:
-        logging.exception("Failed to destroy")
+        logger.exception("Failed to destroy")
 
 
 def _order_location_candidates(candidates: set[str], *preference_lists: list[str]) -> list[str]:
@@ -2117,7 +2200,7 @@ def candidate_regions(vendor: str, server: str, regions: list[str]) -> list[str]
             candidates = _order_location_candidates(available, candidates, list(available))
     prices = sc_data.server_region_prices(vendor, server)
     ordered = sc_data.sort_by_price(candidates, prices)
-    logging.info(f"Region order for {vendor}/{server}: {ordered}")
+    logger.info(f"Region order for {vendor}/{server}: {ordered}")
     return ordered
 
 
@@ -2143,7 +2226,7 @@ def candidate_zones(
         )
     else:
         ordered = sc_data.sort_by_price(zones, prices)
-    logging.info(f"Zone order for {vendor}/{server}: {ordered}")
+    logger.info(f"Zone order for {vendor}/{server}: {ordered}")
     return ordered
 
 
@@ -2198,7 +2281,7 @@ def redact_pulumi_output(text: str) -> str:
 
 
 def pulumi_log_output(message: str) -> None:
-    logging.info(redact_pulumi_output(message))
+    logger.info(redact_pulumi_output(message))
 
 
 def pulumi_on_output(logger):
@@ -2353,7 +2436,7 @@ def record_instance_start_failure(lock, data_dir, tasks, error_msgs, fallback_ms
         error_msg = fallback_msg
     else:
         error_msg = "Failed to start instance"
-    logging.info(f"Failed to start instance, uploading error messages: {error_msg}")
+    logger.info(f"Failed to start instance, uploading error messages: {error_msg}")
     with lock:
         repo.pull()
         for task in tasks:
@@ -2381,7 +2464,7 @@ def delayed_destroy(vendor, server, resource_opts):
     try:
         runner.destroy(vendor, {}, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
     except Exception:
-        logging.exception("Failed to destroy")
+        logger.exception("Failed to destroy")
 
 
 def remove_matches(regexes, input_string):
@@ -2422,7 +2505,7 @@ def retry_locked_cleanup(func: Callable[[], Any], cancel_func: Callable[[], None
                 and now - created_at > STALE_LOCK_AGE
                 and not stale_cancelled
             ):
-                logging.warning(
+                logger.warning(
                     "Cancelling stale Pulumi lock created at %s (older than %s)",
                     created_at,
                     STALE_LOCK_AGE,
@@ -2431,7 +2514,7 @@ def retry_locked_cleanup(func: Callable[[], Any], cancel_func: Callable[[], None
                 stale_cancelled = True
                 continue
             if i < 2:
-                logging.warning("ConcurrentUpdateError during cleanup, retry #%d", i + 1)
+                logger.warning("ConcurrentUpdateError during cleanup, retry #%d", i + 1)
                 time.sleep(random.randint(1, 5))
                 continue
             raise StackLockedError(str(exc)) from exc
@@ -2453,11 +2536,11 @@ def retry_locked(
         try:
             return func(*args, **kwargs)
         except pulumi.automation.errors.ConcurrentUpdateError:
-            logging.exception(f"ConcurrentUpdateError, retry #{i}")
+            logger.exception(f"ConcurrentUpdateError, retry #{i}")
             time.sleep(random.randint(1, 5))
         except Exception as exc:
             if is_retryable_pulumi_error(exc, error_msgs) and i < 2:
-                logging.warning("Retryable Pulumi error, retry #%d: %s", i + 1, exc)
+                logger.warning("Retryable Pulumi error, retry #%d: %s", i + 1, exc)
                 time.sleep(random.randint(1, 5))
                 continue
             raise
@@ -2486,8 +2569,8 @@ def _try_start_multi_vm_inspect(
     import secrets
 
     from benchmark_tiers import merge_client_requirements
-    from db_storage import db_storage_plan
     from companion_picker import pick_client_instance
+    from db_storage import db_storage_plan
     from sc_runner import runner
     from sc_runner.resources.multi_vm import MultiVmStackSpec
 
@@ -2496,13 +2579,7 @@ def _try_start_multi_vm_inspect(
         return False
 
     # Size disk for every multi-VM task on this instance, not only those triggering this start.
-    planned_multi = [
-        t
-        for t in get_tasks(vendor)
-        if isinstance(t, MultiVmDbTask)
-        and (not t.servers_only or (vendor, server) in t.servers_only)
-        and (not t.servers_exclude or (vendor, server) not in t.servers_exclude)
-    ]
+    planned_multi = [t for t in get_tasks(vendor) if isinstance(t, MultiVmDbTask)]
     disk_sources = planned_multi or multi_tasks
     client_req = merge_client_requirements([t.client_requirements(srv_data) for t in disk_sources])
     mem_gib = float(srv_data.memory_amount) / 1024.0
@@ -2531,7 +2608,7 @@ def _try_start_multi_vm_inspect(
 
     for mode_idx, use_spot in enumerate(market_modes):
         if vendor == "aws" and mode_idx > 0:
-            logging.info(
+            logger.info(
                 f"{vendor}/{server}: multi-VM Spot exhausted all regions; falling back to on-demand"
             )
             with lock:
@@ -2540,7 +2617,7 @@ def _try_start_multi_vm_inspect(
                 repo.push_path(data_dir, f"Falling back to on-demand from {repo.gha_url()}")
             error_msgs.clear()
         if vendor == "aws":
-            logging.info(
+            logger.info(
                 f"{vendor}/{server}: multi-VM trying market={'spot' if use_spot else 'on-demand'}"
             )
 
@@ -2554,10 +2631,10 @@ def _try_start_multi_vm_inspect(
                 region = location
                 zone = None
             if client is None:
-                logging.info(f"No companion client for {vendor}/{location}")
+                logger.info(f"No companion client for {vendor}/{location}")
                 continue
 
-            logging.info(
+            logger.info(
                 f"Multi-VM: {vendor}/{server} + client {client.api_reference} in {location}"
             )
             _, client_ud_b64 = build_inspector_user_data(
@@ -2649,7 +2726,7 @@ def _try_start_multi_vm_inspect(
                 )
                 return True
             except Exception as exc:
-                logging.exception("Multi-VM create failed for %s", location)
+                logger.exception("Multi-VM create failed for %s", location)
                 if not error_msgs:
                     error_msgs.append(str(exc))
                 executor.submit(delayed_destroy, vendor, server, copy.deepcopy(resource_opts))
@@ -2657,9 +2734,9 @@ def _try_start_multi_vm_inspect(
 
 
 def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, regions, zones, zone_to_region=None):
-    from sc_runner.resources import default
-    from sc_runner import runner
     import sc_runner.resources
+    from sc_runner import runner
+    from sc_runner.resources import default
 
     # change the thread name for logging
     current_thread = threading.current_thread()
@@ -2673,7 +2750,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
     force_ondemand = force_ondemand_after_spot_timeout(vendor, server, data_dir, tasks)
     aws_market_modes = aws_instance_market_modes(force_ondemand=force_ondemand) if vendor == "aws" else None
     if force_ondemand:
-        logging.info(f"{vendor}/{server}: Spot self-heal → on-demand only")
+        logger.info(f"{vendor}/{server}: Spot self-heal → on-demand only")
     initial_spot = (
         bool(aws_market_modes[0]) if vendor == "aws" and aws_market_modes else None
     )
@@ -2688,7 +2765,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             sum_timeout += task.timeout
         repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
     timeout_mins = int(sum_timeout.total_seconds()/60)
-    logging.info(f"Starting {vendor}/{server} with {timeout_mins}m timeout")
+    logger.info(f"Starting {vendor}/{server} with {timeout_mins}m timeout")
     # Construct SSH repo URL from GitHub Actions context, or use fallback
     github_repo = os.environ.get("GITHUB_REPOSITORY", "SpareCores/sc-inspector-data")
     repo_url_ssh = f"git@github.com:{github_repo}.git"
@@ -2743,7 +2820,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             resource_opts |= dict(public_key=os.environ.get("SSH_PUBLIC_KEY"))
             resource_opts |= dict(disk_size=VOLUME_SIZE)
         for region in candidate_regions(vendor, server, regions):
-            logging.info(f"Trying {region}")
+            logger.info(f"Trying {region}")
             resource_opts["region"] = region
             user_data, b64_user_data = build_inspector_user_data(
                 vendor, server, srv_data, region, None, timeout_mins, ssh_deploy_key_b64, repo_url_ssh
@@ -2764,7 +2841,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 break
             except Exception as e:
                 # on failure, try the next one
-                logging.exception("Couldn't start instance")
+                logger.exception("Couldn't start instance")
                 if not error_msgs:
                     error_msgs.append(str(e))
 
@@ -2775,7 +2852,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             disk_size=VOLUME_SIZE,
         )
         for region in candidate_regions(vendor, server, regions):
-            logging.info(f"Trying {region}")
+            logger.info(f"Trying {region}")
             resource_opts["region"] = region
             user_data, b64_user_data = build_inspector_user_data(
                 vendor, server, srv_data, region, None, timeout_mins, ssh_deploy_key_b64, repo_url_ssh
@@ -2796,7 +2873,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 break
             except Exception as e:
                 # on failure, try the next one
-                logging.exception("Couldn't start instance")
+                logger.exception("Couldn't start instance")
                 if not error_msgs:
                     error_msgs.append(str(e))
 
@@ -2806,7 +2883,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         instance_opts |= dict(key_name="spare-cores")
         for mode_idx, use_spot in enumerate(aws_market_modes or aws_instance_market_modes()):
             if mode_idx > 0:
-                logging.info(
+                logger.info(
                     f"{vendor}/{server}: Spot exhausted all regions; falling back to on-demand"
                 )
                 with lock:
@@ -2814,7 +2891,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                     update_task_metas_spot(data_dir, tasks, spot=False)
                     repo.push_path(data_dir, f"Falling back to on-demand from {repo.gha_url()}")
                 error_msgs.clear()
-            logging.info(
+            logger.info(
                 f"{vendor}/{server}: trying market={'spot' if use_spot else 'on-demand'}"
             )
             # AWS rejects ModifyInstanceAttribute(InstanceInitiatedShutdownBehavior) for
@@ -2825,7 +2902,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             if not use_spot:
                 mode_instance_opts["instance_initiated_shutdown_behavior"] = "terminate"
             for region in candidate_regions(vendor, server, regions):
-                logging.info(f"Trying {region}")
+                logger.info(f"Trying {region}")
                 resource_opts["region"] = region
                 user_data, b64_user_data = build_inspector_user_data(
                     vendor, server, srv_data, region, None, timeout_mins, ssh_deploy_key_b64, repo_url_ssh
@@ -2851,7 +2928,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                     break
                 except Exception as e:
                     # on failure, try the next one
-                    logging.exception("Couldn't start instance")
+                    logger.exception("Couldn't start instance")
                     if not error_msgs:
                         error_msgs.append(str(e))
             if instance_started:
@@ -2868,12 +2945,12 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             # Get region from the zone_to_region mapping (from database)
             region = zone_to_region.get(zone)
             if not region:
-                logging.warning(f"Unknown region for zone {zone}, skipping")
+                logger.warning(f"Unknown region for zone {zone}, skipping")
                 continue
             if region.startswith("cn-"):
                 # Chinese regions have weak network connectivity, warn but try as fallback
-                logging.warning(f"Trying cn- zone {zone} as fallback (slow network expected)")
-            logging.info(f"Trying zone {zone} (region {region})")
+                logger.warning(f"Trying cn- zone {zone} as fallback (slow network expected)")
+            logger.info(f"Trying zone {zone} (region {region})")
             resource_opts["region"] = region
             resource_opts["availability_zone"] = zone
             user_data, b64_user_data = build_inspector_user_data(
@@ -2890,7 +2967,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             # Ensure first attempt has cloud_auto
             current_instance_opts["system_disk_category"] = "cloud_auto"
             for attempt in range(2):
-                logging.info(f"Attempt {attempt + 1} for zone {zone} with instance_opts: {current_instance_opts}")
+                logger.info(f"Attempt {attempt + 1} for zone {zone} with instance_opts: {current_instance_opts}")
                 try:
                     retry_locked(runner.create, vendor, pulumi_opts,
                                  resource_opts | dict(instance_opts=current_instance_opts, user_data=b64_user_data),
@@ -2905,7 +2982,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                     # Check if the error is about disk category not being supported
                     error_text = str(e) + " " + " ".join(error_msgs) + " " + " ".join(output)
                     if "specified instance does not support this disk category" in error_text:
-                        logging.exception(f"Disk category error, retrying without system_disk_category for zone {zone}")
+                        logger.exception(f"Disk category error, retrying without system_disk_category for zone {zone}")
                         # Remove system_disk_category for second attempt
                         current_instance_opts.pop("system_disk_category", None)
                         # clear error_msgs before retry
@@ -2916,7 +2993,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                     # name is alicloud.{region}.{instance} (zone is not part of it), so a
                     # background destroy from a failed zone would delete a later success
                     # in the same region; the next iteration's sync destroy handles cleanup
-                    logging.exception(f"Couldn't start instance in zone {zone}")
+                    logger.exception(f"Couldn't start instance in zone {zone}")
                     break
             if done:
                 break
@@ -2929,7 +3006,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             image_sku = "server-arm64"
         done = False
         for region in candidate_regions(vendor, server, regions):
-            logging.info(f"Trying {region}")
+            logger.info(f"Trying {region}")
             resource_opts["region"] = region
             user_data, b64_user_data = build_inspector_user_data(
                 vendor, server, srv_data, region, None, timeout_mins, ssh_deploy_key_b64, repo_url_ssh
@@ -2961,15 +3038,15 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                     # Hypervisor Generation of the selected VM Size. If this was an Update operation please select
                     # a Hypervisor Generation '2' VM Size. For more information, see https://aka.ms/azuregen2vm
                     if any(["cannot boot Hypervisor Generation '2'" in s for s in output]):
-                        logging.exception(f"Hypervisor Generation error, image_sku={image_sku}, adding -gen1")
+                        logger.exception(f"Hypervisor Generation error, image_sku={image_sku}, adding -gen1")
                         if "gen1" not in image_sku:
                             image_sku += "-gen1"
                         # The NIC will be blocked for 180s, so wait until we retry
                         # Nic(s) in request is reserved for another Virtual Machine for 180 seconds.
-                        logging.info("Sleeping 180s to make the NIC free again")
+                        logger.info("Sleeping 180s to make the NIC free again")
                         time.sleep(180)
                         continue
-                    logging.exception(f"Couldn't start instance, deleting the stack for {region} in the background")
+                    logger.exception(f"Couldn't start instance, deleting the stack for {region} in the background")
                     # on failure, destroy the stack in the background (as we have to wait 180s for the NIC), so we're
                     # not blocking further tries
                     executor.submit(delayed_destroy, vendor, server, copy.deepcopy(resource_opts))
@@ -3027,7 +3104,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         )
         # enable nested virtualization
         for zone in candidate_zones(vendor, server, zones):
-            logging.info(f"Trying {zone}")
+            logger.info(f"Trying {zone}")
             resource_opts["zone"] = zone
             user_data, b64_user_data = build_inspector_user_data(
                 vendor, server, srv_data, "", zone, timeout_mins, ssh_deploy_key_b64, repo_url_ssh
@@ -3042,7 +3119,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
 
             for attempt, maintenance in enumerate(maintenance_attempts):
                 scheduling_opts["on_host_maintenance"] = maintenance
-                logging.info(
+                logger.info(
                     f"GCP create attempt {attempt + 1} in {zone} with on_host_maintenance={maintenance}"
                 )
                 error_msgs = []
@@ -3065,7 +3142,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                     )
                     if can_fallback:
                         nxt = maintenance_attempts[attempt + 1]
-                        logging.exception(
+                        logger.exception(
                             f"on_host_maintenance={maintenance} rejected for {server}, "
                             f"retrying with {nxt}"
                         )
@@ -3077,7 +3154,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                         )
                         continue
                     # on failure, try the next zone
-                    logging.exception("Couldn't start instance")
+                    logger.exception("Couldn't start instance")
                     if not error_msgs:
                         error_msgs.append(str(e))
                     break
@@ -3090,7 +3167,7 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             record_timing_api(data_dir, instance_timing.start, instance_timing.end)
             repo.push_path(data_dir, f"Instance creation timing from {repo.gha_url()}")
     elif instance_started and any(task.always_run for task in tasks):
-        logging.warning(
+        logger.warning(
             f"Instance started but creation timing not captured for {vendor}/{server} "
             f"(start={instance_timing.start}, end={instance_timing.end})"
         )
@@ -3103,9 +3180,9 @@ def thread_monitor(executor, interval=60):
     while True:
         running_tasks = [task for task in executor._threads if task.is_alive()]
         if not running_tasks:
-            logging.info("Executor shut down and no tasks left")
+            logger.info("Executor shut down and no tasks left")
             break
         frames = sys._current_frames()
         for t in running_tasks:
-            logging.info(f"thread {t.name}: {frames.get(t.ident)}")
+            logger.info(f"thread {t.name}: {frames.get(t.ident)}")
         time.sleep(interval)
