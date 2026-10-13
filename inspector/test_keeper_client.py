@@ -81,7 +81,7 @@ def test_should_start_skips_when_keeper_blocks(tmp_path):
     srv = MagicMock()
     srv.vendor_id = "hcloud"
     srv.api_reference = "cx22"
-    srv.gpu_count = 0
+    srv.accelerator_count = 0
     srv.vcpus = 2
     srv.memory_amount = 4 * 1024
 

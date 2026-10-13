@@ -162,10 +162,9 @@ def start(ctx, exclude, start_only, vendor, limit):
         if vnd not in supported_vendors:
             # sc-runner can't yet handle this vendor
             continue
-        gpu_count = getattr(srv_data, "gpu_count", None) or getattr(
-            srv_data, "accelerator_count", 0
+        logging.info(
+            f"Evaluating {vnd}/{server} with {srv_data.accelerator_count} accelerators"
         )
-        logging.info(f"Evaluating {vnd}/{server} with {gpu_count} GPUs")
         if exclude and (vnd, server) in exclude:
             logging.info(f"Excluding {vnd}/{server}")
             continue
@@ -1073,14 +1072,16 @@ def parse(ctx):
 @click.pass_context
 @click.option("--vendor", required=True, help="Vendor ID for this machine")
 @click.option("--instance", required=True, help="Instance ID for this machine")
-@click.option("--gpu-count", default=0.0, type=float, help="Number of GPUs")
+@click.option(
+    "--accelerator-count", default=0.0, type=float, help="Number of accelerators"
+)
 @click.option("--threads", default=8, show_default=True, help="Parallelism in a given task group")
 @click.option(
     "--dbaas-instance-key",
     default=None,
     help="Managed DB instance key for DBaaS sparse checkout (under dbaas/<vendor>/)",
 )
-def inspect(ctx, vendor, instance, gpu_count, threads, dbaas_instance_key):
+def inspect(ctx, vendor, instance, accelerator_count, threads, dbaas_instance_key):
     """Run inspection on this machine."""
     # Disable OOM killer for this task as Linux tends to kill this instead of benchmarks, like bw_mem
     pid = os.getpid()
@@ -1117,7 +1118,7 @@ def inspect(ctx, vendor, instance, gpu_count, threads, dbaas_instance_key):
             vendor,
             data_dir,
             instance=instance,
-            gpu_count=gpu_count,
+            accelerator_count=accelerator_count,
             nthreads=threads,
         )
     finally:
@@ -1125,7 +1126,7 @@ def inspect(ctx, vendor, instance, gpu_count, threads, dbaas_instance_key):
             vendor,
             data_dir,
             instance,
-            gpu_count=gpu_count,
+            accelerator_count=accelerator_count,
         )
         lib.record_timing_inspector_end(data_dir)
         try:

@@ -46,6 +46,6 @@ def target_sizing_stub(target: ManagedDbTarget) -> SimpleNamespace:
         vcpus=target.cpu_count,
         memory_amount=target.memory_gib * 1024,
         api_reference=target.native_id,
-        gpu_count=0,
+        accelerator_count=0,
         cpu_architecture="x86_64",
     )

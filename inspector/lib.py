@@ -367,14 +367,14 @@ def _host_is_arm64() -> bool:
 
 
 def _vllm_image_attempts(
-    task: VllmDockerTask, gpu_count: float
+    task: VllmDockerTask, accelerator_count: float
 ) -> list[tuple[str, str, bool]]:
     attempts: list[tuple[str, str, bool]] = []
     gpu_caps: list[tuple[int, int]] | None = None
     gpu_caps_checked = False
     for image in task.images:
         use_gpu = _vllm_image_use_gpu(image)
-        if use_gpu and gpu_count <= 0:
+        if use_gpu and accelerator_count <= 0:
             continue
         if use_gpu:
             if not gpu_caps_checked:
@@ -705,7 +705,7 @@ def _task_resource_checks(
     data_dir: str | os.PathLike,
     vendor: str,
     instance: str,
-    gpu_count: float,
+    accelerator_count: float,
     mem_bytes: int,
     cpu_count: float | None = None,
 ) -> bool:
@@ -777,7 +777,7 @@ def should_run(
     data_dir: str | os.PathLike,
     vendor: str,
     instance: str,
-    gpu_count: float,
+    accelerator_count: float,
     *,
     cpu_count: float | None = None,
     block_reasons: dict[str, list[str]] | None = None,
@@ -824,14 +824,14 @@ def should_run(
     mem_bytes = psutil.virtual_memory().available
     if task.always_run:
         if not _task_resource_checks(
-            task, data_dir, vendor, instance, gpu_count, mem_bytes, cpu_count=cpu_count
+            task, data_dir, vendor, instance, accelerator_count, mem_bytes, cpu_count=cpu_count
         ):
             return False
         logger.info(f"Running {task.name} (always_run)")
         return True
 
     if not _task_resource_checks(
-        task, data_dir, vendor, instance, gpu_count, mem_bytes, cpu_count=cpu_count
+        task, data_dir, vendor, instance, accelerator_count, mem_bytes, cpu_count=cpu_count
     ):
         return False
 
@@ -933,7 +933,7 @@ def _vllm_probe_image(
     image: str,
     mode: str,
     use_gpu: bool,
-    gpu_count: float,
+    accelerator_count: float,
 ) -> tuple[bool, str]:
     """Return (ok, error_detail). Only tests server startup, not bench serve."""
     probe_meta = Meta(start=datetime.now())
@@ -945,7 +945,7 @@ def _vllm_probe_image(
         use_gpu=use_gpu,
     )
     logger.info("vLLM probe mode=%s image=%s", mode, image)
-    run_docker(probe_meta, sub, data_dir, gpu_count if use_gpu else 0.0)
+    run_docker(probe_meta, sub, data_dir, accelerator_count if use_gpu else 0.0)
     if probe_meta.exit_code == 0:
         return True, ""
     detail = probe_meta.error_msg or f"exit_code={probe_meta.exit_code}"
@@ -956,15 +956,15 @@ def run_vllm_docker(
     meta: Meta,
     task: VllmDockerTask,
     data_dir: str | os.PathLike,
-    gpu_count: float = 0.0,
+    accelerator_count: float = 0.0,
 ) -> tuple[str | None, bytes, bytes]:
-    attempts = _vllm_image_attempts(task, gpu_count)
+    attempts = _vllm_image_attempts(task, accelerator_count)
     probe_errors: list[str] = []
     selected: tuple[str, str, bool] | None = None
 
     for mode, image, use_gpu in attempts:
         ok, detail = _vllm_probe_image(
-            task, data_dir, image, mode, use_gpu, gpu_count
+            task, data_dir, image, mode, use_gpu, accelerator_count
         )
         if ok:
             selected = (mode, image, use_gpu)
@@ -994,7 +994,7 @@ def run_vllm_docker(
     )
     logger.info("vLLM full benchmark mode=%s image=%s", mode, image)
     ver, stdout, stderr = run_docker(
-        meta, sub, data_dir, gpu_count if use_gpu else 0.0
+        meta, sub, data_dir, accelerator_count if use_gpu else 0.0
     )
     if meta.exit_code != 0:
         meta.error_msg = (
@@ -1009,12 +1009,12 @@ NVBANDWIDTH_BUFFER_MIB_LOW_VRAM = 256
 NVBANDWIDTH_LOW_VRAM_THRESHOLD_MIB = 2048
 
 
-def nvbandwidth_command(vram_mib: int | None = None, gpu_count: float = 0.0) -> str:
+def nvbandwidth_command(vram_mib: int | None = None, accelerator_count: float = 0.0) -> str:
     """nvbandwidth CLI; bidirectional CE needs 3x buffer MiB on GPU (size + 2*size)."""
     buffer_mib = NVBANDWIDTH_BUFFER_MIB_DEFAULT
     if vram_mib is not None and vram_mib <= NVBANDWIDTH_LOW_VRAM_THRESHOLD_MIB:
         buffer_mib = NVBANDWIDTH_BUFFER_MIB_LOW_VRAM
-    elif vram_mib is None and gpu_count > 0 and gpu_count != int(gpu_count):
+    elif vram_mib is None and accelerator_count > 0 and accelerator_count != int(accelerator_count):
         # Fractional GPUs are typically low-VRAM; avoid -b 512 OOM when nvidia-smi fails.
         buffer_mib = NVBANDWIDTH_BUFFER_MIB_LOW_VRAM
     return f"nvbandwidth -j -b {buffer_mib}"
@@ -1035,20 +1035,20 @@ def _gpu_vram_mib() -> int | None:
         return None
 
 
-def _resolve_docker_command(task: DockerTask, gpu_count: float = 0.0) -> str | list | None:
+def _resolve_docker_command(task: DockerTask, accelerator_count: float = 0.0) -> str | list | None:
     if task.name == "nvbandwidth":
-        return nvbandwidth_command(_gpu_vram_mib(), gpu_count=gpu_count)
+        return nvbandwidth_command(_gpu_vram_mib(), accelerator_count=accelerator_count)
     return task.command
 
 
-def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, gpu_count: float = 0.0) -> tuple[str | None, bytes, bytes]:
+def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, accelerator_count: float = 0.0) -> tuple[str | None, bytes, bytes]:
     ver = None
     stdout = stderr = b""
-    command = _resolve_docker_command(task, gpu_count=gpu_count)
+    command = _resolve_docker_command(task, accelerator_count=accelerator_count)
     
     # Define the different docker options to try
     docker_options = []
-    if gpu_count > 0:
+    if accelerator_count > 0:
         # First try with GPU if available
         docker_opts = copy.deepcopy(task.docker_opts) | DOCKER_OPTS_GPU
         version_docker_opts = copy.deepcopy(task.version_docker_opts) | DOCKER_OPTS_GPU
@@ -1293,7 +1293,7 @@ def tasks_to_start(
             data_dir,
             srv.vendor_id,
             srv.api_reference,
-            srv.gpu_count,
+            srv.accelerator_count,
             cpu_count=srv.vcpus,
             block_reasons=block_reasons,
             resource_kind="server",
@@ -1375,7 +1375,7 @@ def tasks_to_start_dbaas(
 def run_task(
     q: Queue,
     data_dir: str | os.PathLike,
-    gpu_count: float = 0.0,
+    accelerator_count: float = 0.0,
     client_data_dir: str | os.PathLike | None = None,
 ) -> None:
     while True:
@@ -1403,22 +1403,22 @@ def run_task(
             try:
                 if isinstance(task, VllmDockerTask):
                     ver, stdout, stderr = run_vllm_docker(
-                        meta, task, task_dir, gpu_count
+                        meta, task, task_dir, accelerator_count
                     )
                 elif isinstance(task, MultiVmDbTask):
                     from postgres_multi import run_multi_vm_task
 
                     ver, stdout, stderr = run_multi_vm_task(
-                        meta, task, task_dir_root, gpu_count
+                        meta, task, task_dir_root, accelerator_count
                     )
                 elif isinstance(task, DbaasDbTask):
                     from postgres_dbaas import run_dbaas_task
 
                     ver, stdout, stderr = run_dbaas_task(
-                        meta, task, task_dir_root, gpu_count
+                        meta, task, task_dir_root, accelerator_count
                     )
                 elif isinstance(task, DockerTask):
-                    ver, stdout, stderr = run_docker(meta, task, task_dir, gpu_count)
+                    ver, stdout, stderr = run_docker(meta, task, task_dir, accelerator_count)
                 else:
                     ver, stdout, stderr = run_native(meta, task, task_dir)
                 meta.version = ver
@@ -1492,7 +1492,7 @@ def run_tasks(
     vendor,
     data_dir: str | os.PathLike,
     instance: str,
-    gpu_count: float = 0.0,
+    accelerator_count: float = 0.0,
     nthreads: int = 8,
     client_data_dir: str | os.PathLike | None = None,
 ):
@@ -1505,7 +1505,7 @@ def run_tasks(
         threads.append(
             threading.Thread(
                 target=run_task,
-                args=(q, data_dir, gpu_count, client_data_dir),
+                args=(q, data_dir, accelerator_count, client_data_dir),
                 daemon=True,
             )
         )
@@ -1519,7 +1519,7 @@ def run_tasks(
         for task in taskgroups[taskgroup]:
             task_dir_root = task_data_dir(task, data_dir, client_data_dir)
             meta = load_task_meta(task, task_dir_root)
-            if not should_run(task, task_dir_root, vendor, instance, gpu_count):
+            if not should_run(task, task_dir_root, vendor, instance, accelerator_count):
                 if meta.start and meta.exit_code is None:
                     # update meta, if it doesn't yet have an exit code, so the monitoring won't fail on this
                     meta.end = datetime.now()
@@ -1688,7 +1688,7 @@ def finalize_task_metas(
     vendor: str,
     data_dir: str | os.PathLike,
     instance: str,
-    gpu_count: float = 0.0,
+    accelerator_count: float = 0.0,
     client_data_dir: str | os.PathLike | None = None,
 ) -> None:
     """Mark unfinished task metas when inspect ends before every queued task ran."""
@@ -1704,7 +1704,7 @@ def finalize_task_metas(
         meta = load_task_meta(task, data_dir=task_dir_root)
         if not meta.start or meta.end is not None:
             continue
-        if should_run(task, task_dir_root, vendor, instance, gpu_count):
+        if should_run(task, task_dir_root, vendor, instance, accelerator_count):
             meta.end = datetime.now()
             meta.exit_code = -4
             meta.task_hash = task_hash(task)
@@ -2014,7 +2014,7 @@ def inspector_user_data_replacements(
         "INSTANCE": server,
         "REGION": region or "",
         "ZONE": zone or "",
-        "GPU_COUNT": srv_data.gpu_count,
+        "ACCELERATOR_COUNT": srv_data.accelerator_count,
         "SHUTDOWN_MINS": timeout_mins + 30,  # give enough time to set up the machine
         "HOST_TIMING_DIR": host_timing_dir(vendor, server, github_run_id()),
         "LOG_UPLOAD_URL": log_url,
@@ -3071,12 +3071,12 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                 bootdisk_init_opts |= dict(image="debian-12")
 
         # e2 needs to be spot; we only have spot quota for GPU instances.
-        # srv_data.gpu_count is reliably populated by the crawler for every GPU
-        # family (A2/A3/A4/A4X/G2/G4), unlike cpu_architecture above, so no
+        # srv_data.accelerator_count is reliably populated by the crawler for every
+        # GPU family (A2/A3/A4/A4X/G2/G4), unlike cpu_architecture above, so no
         # hardcoded series list is needed here — accelerators cannot live-migrate.
         # https://cloud.google.com/compute/docs/gpus/gpu-host-maintenance
         # https://cloud.google.com/compute/docs/instances/setting-vm-host-options
-        has_gpu = (srv_data.gpu_count or 0) > 0
+        has_gpu = (srv_data.accelerator_count or 0) > 0
         is_preemptible = server.startswith("e2") or has_gpu
         # a3-highgpu-{1,2,4}g (and other <8-GPU A3 sizes) reject the legacy
         # preemptible=true flag alone: without an explicit provisioning_model,

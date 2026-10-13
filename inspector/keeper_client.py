@@ -65,8 +65,7 @@ def server_task_block_reasons(
         f"/inspector/server/{quote(vendor, safe='')}/"
         f"{quote(server, safe='')}/task_block_reason_codes"
     )
-    data = _get_json(path, tasks)
-    return {str(k): list(v) for k, v in data.items()}
+    return _get_json(path, tasks)
 
 
 def database_task_block_reasons(
@@ -77,42 +76,21 @@ def database_task_block_reasons(
         f"/inspector/database/{quote(vendor, safe='')}/"
         f"{quote(database, safe='')}/task_block_reason_codes"
     )
-    data = _get_json(path, tasks)
-    return {str(k): list(v) for k, v in data.items()}
+    return _get_json(path, tasks)
 
 
 def servers_task_block_reasons(
     tasks: Iterable[str],
 ) -> dict[str, dict[str, dict[str, list[str]]]]:
     """Bulk ACTIVE servers: vendor → api_reference → task → reasons."""
-    data = _get_json("/inspector/servers/task_block_reason_codes", tasks)
-    out: dict[str, dict[str, dict[str, list[str]]]] = {}
-    for vendor, servers in data.items():
-        if not isinstance(servers, dict):
-            continue
-        out[str(vendor)] = {
-            str(ref): {str(t): list(rs) for t, rs in task_map.items()}
-            for ref, task_map in servers.items()
-            if isinstance(task_map, dict)
-        }
-    return out
+    return _get_json("/inspector/servers/task_block_reason_codes", tasks)
 
 
 def databases_task_block_reasons(
     tasks: Iterable[str],
 ) -> dict[str, dict[str, dict[str, list[str]]]]:
     """Bulk ACTIVE databases: vendor → api_reference → task → reasons."""
-    data = _get_json("/inspector/databases/task_block_reason_codes", tasks)
-    out: dict[str, dict[str, dict[str, list[str]]]] = {}
-    for vendor, databases in data.items():
-        if not isinstance(databases, dict):
-            continue
-        out[str(vendor)] = {
-            str(ref): {str(t): list(rs) for t, rs in task_map.items()}
-            for ref, task_map in databases.items()
-            if isinstance(task_map, dict)
-        }
-    return out
+    return _get_json("/inspector/databases/task_block_reason_codes", tasks)
 
 
 def task_allowed(reasons: list[str] | None) -> bool:
