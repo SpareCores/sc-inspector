@@ -157,13 +157,13 @@ fi
 install_docker_apt() {
     apt_retry update -y && apt_retry install -y $NVIDIA_PKGS $DOCKER_APT_PKGS
 }
-# nvidia drivers/toolkit when GPU_COUNT != 0
+# nvidia drivers/toolkit when ACCELERATOR_COUNT != 0
 NVIDIA_PKGS=""
 NVIDIA_DRIVER_PKG=""
 ALIYUN_DRIVER_PLUGIN=""
 FRACTIONAL_GPU_DRIVER=""
 
-if [ "{GPU_COUNT}" != "0" ] && [ "{GPU_COUNT}" != "0.0" ]; then
+if [ "{ACCELERATOR_COUNT}" != "0" ] && [ "{ACCELERATOR_COUNT}" != "0.0" ]; then
     # Ubuntu cloud images (e.g. UpCloud) may boot with nouveau bound to the GPU.
     # Blacklist and unbind without reboot so the proprietary driver can probe the device.
     disable_nouveau() {
@@ -225,9 +225,9 @@ EOF
         sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
         sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
     
-    # Check if this is a fractional GPU instance (GPU_COUNT is not a whole number)
+    # Check if this is a fractional GPU instance (ACCELERATOR_COUNT is not a whole number)
     # Use awk to check if the number has a non-zero fractional part
-    IS_FRACTIONAL=$(echo "{GPU_COUNT}" | awk '{if ($1 != int($1)) print "true"; else print "false"}')
+    IS_FRACTIONAL=$(echo "{ACCELERATOR_COUNT}" | awk '{if ($1 != int($1)) print "true"; else print "false"}')
     if [ "$IS_FRACTIONAL" = "true" ]; then
         IS_FRACTIONAL_GPU=true
     else
@@ -299,7 +299,7 @@ EOF
         esac
     fi
 
-    # Alibaba vGPU VWS types need GRID via acs-plugin-manager regardless of GPU_COUNT fractionality
+    # Alibaba vGPU VWS types need GRID via acs-plugin-manager regardless of ACCELERATOR_COUNT fractionality
     if [ "{VENDOR}" = "alicloud" ] && [ -z "$FRACTIONAL_GPU_DRIVER" ]; then
         if command -v acs-plugin-manager >/dev/null 2>&1; then
             case "{INSTANCE}" in
@@ -373,7 +373,7 @@ if [ -n "$NVIDIA_DRIVER_PKG" ]; then
     configure_headless_nvidia
     activate_nvidia_driver
 fi
-if [ "{GPU_COUNT}" != "0" ] && [ "{GPU_COUNT}" != "0.0" ]; then
+if [ "{ACCELERATOR_COUNT}" != "0" ] && [ "{ACCELERATOR_COUNT}" != "0.0" ]; then
     nvidia-ctk runtime configure --runtime=nvidia 2>/dev/null || true
 fi
 # Docker defaults to 3 concurrent layer downloads per pull; raise for better aggregate
@@ -437,14 +437,14 @@ apt-get autoremove -y $(dpkg-query -W -f='${Package}\n' \
 nvidia-smi -pm 1
 GPU_VRAM_MIB=""
 GPU_COMPUTE_CAP=""
-if [ "{GPU_COUNT}" != "0" ] && [ "{GPU_COUNT}" != "0.0" ]; then
+if [ "{ACCELERATOR_COUNT}" != "0" ] && [ "{ACCELERATOR_COUNT}" != "0.0" ]; then
     _gpu_vram=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d '[:space:]')
     case "$_gpu_vram" in
         ''|*[!0-9]*) ;;
         *) GPU_VRAM_MIB="$_gpu_vram" ;;
     esac
     if [ -z "$GPU_VRAM_MIB" ]; then
-        echo "GPU VRAM query failed on host; inspector will use gpu_count fallbacks"
+        echo "GPU VRAM query failed on host; inspector will use accelerator_count fallbacks"
     else
         echo "Host GPU VRAM: ${GPU_VRAM_MIB} MiB"
     fi
@@ -472,6 +472,7 @@ if [ "{INSPECTOR_ROLE}" = "client" ]; then
         -e HOST_BENCHMARK_OUTPUT_DIR="$BENCHMARK_OUTPUT_DIR" \
         -e BENCHMARK_OUTPUT_MOUNT=/benchmark-output \
         -e GITHUB_RUN_ID={GITHUB_RUN_ID} -e SENTINEL_API_TOKEN={SENTINEL_API_TOKEN} \
+        -e KEEPER_API_BASE={KEEPER_API_BASE} \
         -e HF_TOKEN={HF_TOKEN} \
         -e SC_CDN_BASE_URL={SC_CDN_BASE_URL} \
         -e SC_CDN_DATASET_POST_B64={SC_CDN_DATASET_POST_B64} \
@@ -487,6 +488,7 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e HOST_TIMING_DIR="$TIMING_HOST_DIR" \
     -e BENCHMARK_SECRETS_PASSPHRASE={BENCHMARK_SECRETS_PASSPHRASE} \
     -e SENTINEL_API_TOKEN={SENTINEL_API_TOKEN} \
+    -e KEEPER_API_BASE={KEEPER_API_BASE} \
     -e HF_TOKEN={HF_TOKEN} \
     -e TASK_LOGS_S3_POST_B64={TASK_LOGS_S3_POST_B64} \
     -e SC_CDN_BASE_URL={SC_CDN_BASE_URL} \
@@ -516,7 +518,7 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e SC_PROVISION_NETWORK_MODE={SC_PROVISION_NETWORK_MODE} \
     -e TOPOLOGY=dbaas \
     -e MANAGED_DB_INSTANCE_KEY={MANAGED_DB_INSTANCE_KEY} \
-    ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT} --dbaas-instance-key {MANAGED_DB_INSTANCE_KEY}
+    ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --accelerator-count {ACCELERATOR_COUNT} --dbaas-instance-key {MANAGED_DB_INSTANCE_KEY}
 inspect_exit=$?
 else
 docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/docker.sock -v /root/.ssh:/root/.ssh \
@@ -528,6 +530,7 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e HOST_TIMING_DIR="$TIMING_HOST_DIR" \
     -e BENCHMARK_SECRETS_PASSPHRASE={BENCHMARK_SECRETS_PASSPHRASE} \
     -e SENTINEL_API_TOKEN={SENTINEL_API_TOKEN} \
+    -e KEEPER_API_BASE={KEEPER_API_BASE} \
     -e HF_TOKEN={HF_TOKEN} \
     -e TASK_LOGS_S3_POST_B64={TASK_LOGS_S3_POST_B64} \
     -e SC_CDN_BASE_URL={SC_CDN_BASE_URL} \
@@ -544,7 +547,7 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e MULTI_VM_DB_DISK_TYPE={MULTI_VM_DB_DISK_TYPE} \
     -e MULTI_VM_DB_DISK_IOPS={MULTI_VM_DB_DISK_IOPS} \
     -e MULTI_VM_DB_DISK_THROUGHPUT={MULTI_VM_DB_DISK_THROUGHPUT} \
-    ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --gpu-count {GPU_COUNT}
+    ghcr.io/sparecores/sc-inspector:main inspect --vendor {VENDOR} --instance {INSTANCE} --accelerator-count {ACCELERATOR_COUNT}
 inspect_exit=$?
 fi
 set -e

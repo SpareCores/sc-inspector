@@ -488,7 +488,7 @@ def run_multi_vm_task(
     meta: Meta,
     task,
     data_dir: str | os.PathLike,
-    gpu_count: float = 0.0,
+    accelerator_count: float = 0.0,
 ) -> tuple[str | None, bytes, bytes]:
     session = get_session()
     pg_container = None

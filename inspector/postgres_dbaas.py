@@ -464,7 +464,7 @@ def run_dbaas_task(
     meta: Meta,
     task,
     data_dir: str | os.PathLike,
-    gpu_count: float = 0.0,
+    accelerator_count: float = 0.0,
 ) -> tuple[str | None, bytes, bytes]:
     sync_settable = _sync_commit_session_settable()
     os.environ["SC_PROVISION_SYNC_COMMIT_SETTABLE"] = "true" if sync_settable else "false"

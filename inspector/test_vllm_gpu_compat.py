@@ -39,7 +39,7 @@ class VllmGpuCompatTest(unittest.TestCase):
             command=None,
             timeout=timedelta(hours=1),
         )
-        attempts = lib._vllm_image_attempts(task, gpu_count=2)
+        attempts = lib._vllm_image_attempts(task, accelerator_count=2)
         self.assertEqual(
             [label for label, _, _ in attempts],
             ["benchmark-vllm-cpu"],
@@ -55,7 +55,7 @@ class VllmGpuCompatTest(unittest.TestCase):
             command=None,
             timeout=timedelta(hours=1),
         )
-        attempts = lib._vllm_image_attempts(task, gpu_count=1)
+        attempts = lib._vllm_image_attempts(task, accelerator_count=1)
         self.assertEqual(
             [label for label, _, _ in attempts],
             ["benchmark-vllm-gpu", "benchmark-vllm-cpu"],
@@ -68,7 +68,7 @@ class VllmGpuCompatTest(unittest.TestCase):
                 command=None,
                 timeout=timedelta(hours=1),
             )
-            attempts = lib._vllm_image_attempts(task, gpu_count=1)
+            attempts = lib._vllm_image_attempts(task, accelerator_count=1)
         self.assertEqual([label for label, _, _ in attempts], ["benchmark-vllm-gpu"])
 
 

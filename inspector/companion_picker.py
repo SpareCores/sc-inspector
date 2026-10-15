@@ -98,7 +98,7 @@ def _server_api_refs_in_location(vendor: str, location: str) -> set[str]:
             .where(ServerPrice.status == "ACTIVE")
             .where(ServerPrice.allocation == "ONDEMAND")
             .where(Server.status == "ACTIVE")
-            .where(Server.gpu_count == 0)
+            .where(Server.accelerator_count == 0)
             .where(loc_filter)
             .distinct()
         )
@@ -146,7 +146,7 @@ def _eligible_servers_with_prices(
                 Server.api_reference,
                 Server.vcpus,
                 Server.memory_amount,
-                Server.gpu_count,
+                Server.accelerator_count,
                 Server.cpu_architecture,
                 ServerPrice.price,
             )
@@ -155,7 +155,7 @@ def _eligible_servers_with_prices(
             .where(ServerPrice.status == "ACTIVE")
             .where(ServerPrice.allocation == "ONDEMAND")
             .where(Server.status == "ACTIVE")
-            .where(Server.gpu_count == 0)
+            .where(Server.accelerator_count == 0)
             .where(Server.cpu_architecture.in_(_X86_CPU_ARCHITECTURES))
             .where(Server.cpu_allocation.in_(_DEDICATED_CPU_ALLOCATIONS))
             .where(Server.vcpus >= req.min_vcpus)
@@ -167,7 +167,7 @@ def _eligible_servers_with_prices(
         rows = session.exec(stmt).all()
 
     best: dict[str, tuple[Any, float]] = {}
-    for server_id, api_ref, vcpus, memory_amount, gpu_count, cpu_arch, price in rows:
+    for server_id, api_ref, vcpus, memory_amount, accelerator_count, cpu_arch, price in rows:
         price_f = float(price)
         if server_id not in best or price_f < best[server_id][1]:
             stub = SimpleNamespace(
@@ -175,7 +175,7 @@ def _eligible_servers_with_prices(
                 api_reference=api_ref,
                 vcpus=vcpus,
                 memory_amount=memory_amount,
-                gpu_count=gpu_count or 0,
+                accelerator_count=accelerator_count or 0,
                 cpu_architecture=cpu_arch,
             )
             best[server_id] = (stub, price_f)
@@ -245,7 +245,7 @@ def _eligible_dbaas_clients_with_prices(
                 Server.api_reference,
                 Server.vcpus,
                 Server.memory_amount,
-                Server.gpu_count,
+                Server.accelerator_count,
                 Server.cpu_architecture,
                 Server.cpu_allocation,
                 ServerPrice.price,
@@ -255,7 +255,7 @@ def _eligible_dbaas_clients_with_prices(
             .where(ServerPrice.status == "ACTIVE")
             .where(ServerPrice.allocation == "ONDEMAND")
             .where(Server.status == "ACTIVE")
-            .where(Server.gpu_count == 0)
+            .where(Server.accelerator_count == 0)
             .where(Server.cpu_architecture.in_(_X86_CPU_ARCHITECTURES))
             .where(Server.cpu_allocation.in_(cpu_allocations))
             .where(Server.vcpus >= req.min_vcpus)
@@ -272,7 +272,7 @@ def _eligible_dbaas_clients_with_prices(
         api_ref,
         vcpus,
         memory_amount,
-        gpu_count,
+        accelerator_count,
         cpu_arch,
         cpu_allocation,
         price,
@@ -284,7 +284,7 @@ def _eligible_dbaas_clients_with_prices(
                 api_reference=api_ref,
                 vcpus=vcpus,
                 memory_amount=memory_amount,
-                gpu_count=gpu_count or 0,
+                accelerator_count=accelerator_count or 0,
                 cpu_architecture=cpu_arch,
                 cpu_allocation=cpu_allocation,
             )

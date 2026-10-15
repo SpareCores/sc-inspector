@@ -74,7 +74,7 @@ def test_should_start_spot_self_heal(tmp_path):
     srv = SimpleNamespace(
         vendor_id="aws",
         api_reference="t3.micro",
-        gpu_count=0,
+        accelerator_count=0,
         memory_amount=1024,
         vcpus=2,
     )
@@ -107,7 +107,7 @@ def test_should_start_skips_recent_unfinished_spot(tmp_path):
     srv = SimpleNamespace(
         vendor_id="aws",
         api_reference="t3.micro",
-        gpu_count=0,
+        accelerator_count=0,
         memory_amount=1024,
         vcpus=2,
     )
@@ -134,7 +134,7 @@ def test_should_start_spot_self_heal_for_start_with_instance_task(tmp_path):
     srv = SimpleNamespace(
         vendor_id="aws",
         api_reference="t3.micro",
-        gpu_count=0,
+        accelerator_count=0,
         memory_amount=1024,
         vcpus=2,
     )
@@ -167,7 +167,7 @@ def test_should_start_start_with_instance_task_without_spot_self_heal(tmp_path):
     meta = lib.Meta(start=NOW - timedelta(hours=2, minutes=1), spot=False, task_hash=lib.task_hash(task))
     lib.write_meta(meta, tmp_path / task.name / lib.META_NAME)
     srv = SimpleNamespace(
-        vendor_id="aws", api_reference="t3.micro", gpu_count=0, memory_amount=1024, vcpus=2
+        vendor_id="aws", api_reference="t3.micro", accelerator_count=0, memory_amount=1024, vcpus=2
     )
     with mock.patch("lib.datetime") as dt:
         dt.now.return_value = NOW
