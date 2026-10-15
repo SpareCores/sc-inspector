@@ -10,7 +10,7 @@ psutil
 requests
 azure-identity
 boto3
-sparecores-crawler>=0.5
+sparecores-crawler>=0.10.0
 sparecores-data
 sparecores-runner>=0.0.75
 sqlmodel
