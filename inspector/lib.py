@@ -37,6 +37,10 @@ logger = logging.getLogger(__name__)
 
 META_NAME = "meta.json"
 TIMING_TASK_NAME = "timing"
+SCHEDULE_DIRNAME = "schedule"
+VARIANT_JSON_NAME = "variant.json"
+# Task names must not collide with layout directories.
+RESERVED_INSTANCE_DIRNAMES = frozenset({SCHEDULE_DIRNAME})
 # UTC timestamps for instance startup intelligence (separate from meta.json to avoid git conflicts)
 # Instance cloud-resource creation window (from Pulumi engine events / output), not full stack.up runtime
 TIMING_API_START = "api_start"
@@ -431,6 +435,7 @@ def get_taskgroups(vendor: str) -> dict[tuple[float, bool], list[Task]]:
         if isinstance(task, (Task, DockerTask, VllmDockerTask, MultiVmDbTask)):
             # task name becomes the variable's name
             task.name = name.lower()
+            validate_task_name(task.name)
             # only add the task if vendor is listed in vendors_only or if it's empty
             if vendor in task.vendors_only or not task.vendors_only:
                 # execute parallel tasks first by negating the parallel option, so it gets forward during sorting
@@ -1140,6 +1145,278 @@ def write_meta(meta: Meta, file: str | os.PathLike) -> None:
         f.write(meta.model_dump_json())
 
 
+def schedule_root(instance_root: str | os.PathLike) -> str:
+    """Scheduler meta/timing root: ``{instance}/schedule``."""
+    return os.path.join(instance_root, SCHEDULE_DIRNAME)
+
+
+def is_variant_dirname(name: str) -> bool:
+    return name.isdigit()
+
+
+def variant_root(instance_root: str | os.PathLike, index: int) -> str:
+    if index < 0:
+        raise ValueError(f"variant index must be >= 0, got {index}")
+    return os.path.join(instance_root, str(index))
+
+
+def variant_roots(instance_root: str | os.PathLike) -> list[str]:
+    """Sorted numeric variant directories under an instance root."""
+    if not os.path.isdir(instance_root):
+        return []
+    roots = []
+    for name in os.listdir(instance_root):
+        path = os.path.join(instance_root, name)
+        if os.path.isdir(path) and is_variant_dirname(name):
+            roots.append(path)
+    return sorted(roots, key=lambda p: int(os.path.basename(p)))
+
+
+def validate_task_name(name: str) -> None:
+    if name in RESERVED_INSTANCE_DIRNAMES or is_variant_dirname(name):
+        raise ValueError(f"task name {name!r} collides with reserved instance path component")
+
+
+def task_meta_path(task_root: str | os.PathLike, task: Task | str) -> str:
+    name = task if isinstance(task, str) else task.name
+    return os.path.join(task_root, name, META_NAME)
+
+
+def load_schedule_meta(task: Task, instance_root: str | os.PathLike, **kwargs) -> Meta:
+    return load_task_meta(task, schedule_root(instance_root), **kwargs)
+
+
+def load_variant_meta(task: Task, instance_root: str | os.PathLike, index: int, **kwargs) -> Meta:
+    return load_task_meta(task, variant_root(instance_root, index), **kwargs)
+
+
+def _meta_sort_key(meta: Meta) -> tuple:
+    """Newest-first key: prefer end, then start, then empty."""
+    return (
+        meta.end or datetime.min,
+        meta.start or datetime.min,
+    )
+
+
+def select_schedule_meta(
+    task: Task,
+    instance_root: str | os.PathLike,
+    *,
+    active_root: str | os.PathLike | None = None,
+    current_hash: str | None = None,
+) -> Meta | None:
+    """Materialized-union pick across variant metas for one task.
+
+    Only ``active_root`` (the variant this VM is running on) may contribute an
+    in-progress meta; unfinished metas in other variants are leftovers of dead
+    runs and must not pin the schedule as running. Otherwise: current-hash
+    success, else newest terminal current-hash, else newest available.
+    """
+    thash = current_hash if current_hash is not None else task_hash(task)
+    active = os.path.normpath(active_root) if active_root is not None else None
+    candidates: list[Meta] = []
+    for root in variant_roots(instance_root):
+        if not os.path.exists(task_meta_path(root, task)):
+            continue
+        meta = load_task_meta(task, root)
+        if meta.start and meta.end is None:
+            if os.path.normpath(root) == active:
+                return meta
+            continue
+        candidates.append(meta)
+    if not candidates:
+        return None
+
+    success = [m for m in candidates if m.exit_code == 0 and m.task_hash == thash and m.end]
+    if success:
+        return max(success, key=_meta_sort_key)
+
+    terminal_hash = [m for m in candidates if m.task_hash == thash and m.end is not None]
+    if terminal_hash:
+        return max(terminal_hash, key=_meta_sort_key)
+
+    return max(candidates, key=_meta_sort_key)
+
+
+def refresh_schedule_meta(
+    instance_root: str | os.PathLike,
+    task: Task,
+    *,
+    active_root: str | os.PathLike | None = None,
+    current_hash: str | None = None,
+) -> Meta | None:
+    """Recompute ``schedule/{task}/meta.json`` from all variant metas.
+
+    Leaves the schedule meta untouched when no variant has a usable meta: start
+    failures, stale-retry counters and ``-5`` live only in ``schedule/``.
+    """
+    selected = select_schedule_meta(
+        task, instance_root, active_root=active_root, current_hash=current_hash
+    )
+    if selected is None:
+        return None
+    write_meta(selected, task_meta_path(schedule_root(instance_root), task))
+    return selected
+
+
+def refresh_all_schedule_metas(
+    instance_root: str | os.PathLike,
+    vendor: str,
+    *,
+    active_root: str | os.PathLike | None = None,
+) -> None:
+    for task in get_tasks(vendor):
+        if isinstance(task, DbaasDbTask):
+            continue
+        refresh_schedule_meta(instance_root, task, active_root=active_root)
+
+
+def _schedule_placeholder(task: Task, instance_root: str | os.PathLike) -> Meta | None:
+    """This boot's unfinished schedule meta (boot placeholder or mirrored real start)."""
+    sched = load_schedule_meta(task, instance_root)
+    if sched.start and sched.end is None:
+        return sched
+    return None
+
+
+def vm_task_meta(
+    task: Task,
+    task_dir_root: str | os.PathLike,
+    instance_root: str | os.PathLike | None,
+) -> Meta:
+    """Meta the VM should transition for a task.
+
+    Boot placeholders are written to ``schedule/`` only, so when the selected
+    variant has no newer unfinished meta, start from the placeholder. That keeps
+    ``spot``/``start_retries`` and lets ``-2``/``-4`` finalize the placeholder.
+    """
+    meta = load_task_meta(task, task_dir_root)
+    if instance_root is None or (meta.start and meta.end is None):
+        return meta
+    placeholder = _schedule_placeholder(task, instance_root)
+    if placeholder is not None and (not meta.start or placeholder.start > meta.start):
+        return placeholder
+    return meta
+
+
+def write_variant_task_meta(
+    meta: Meta,
+    task: Task,
+    variant_root_dir: str | os.PathLike,
+    instance_root: str | os.PathLike | None,
+) -> None:
+    """Write task meta under the variant and refresh schedule when applicable."""
+    if instance_root is not None:
+        placeholder = _schedule_placeholder(task, instance_root)
+        if placeholder is not None:
+            if meta.spot is None:
+                meta.spot = placeholder.spot
+            meta.start_retries = max(meta.start_retries, placeholder.start_retries)
+    write_meta(meta, task_meta_path(variant_root_dir, task))
+    if instance_root is not None:
+        refresh_schedule_meta(instance_root, task, active_root=variant_root_dir)
+
+
+def probe_lscpu() -> tuple[dict[str, str], str | None, datetime]:
+    """Run the lscpu task's image/command once; return (fields, lscpu version, end time)."""
+    from variant_id import parse_lscpu_stdout
+
+    client = docker.from_env()
+    container = client.containers.run(
+        "ghcr.io/sparecores/hwinfo:main",
+        command=["bash", "-c", "lscpu --version | awk '{print $4}' >&2; lscpu -JB"],
+        **DOCKER_OPTS,
+    )
+    try:
+        result = container.wait()
+        end = datetime.now()
+        stdout = container.logs(stdout=True, stderr=False)
+        stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
+        if result.get("StatusCode", 1) != 0:
+            raise RuntimeError(f"lscpu probe failed: {stderr[:500]}")
+        version = stderr.strip().splitlines()[-1].strip() if stderr.strip() else None
+        return parse_lscpu_stdout(stdout), version, end
+    finally:
+        try:
+            container.remove(force=True)
+        except Exception:
+            pass
+
+
+def select_or_create_variant(
+    instance_root: str | os.PathLike,
+    fields: dict[str, str] | None = None,
+    *,
+    lscpu_version: str | None = None,
+    first_seen: datetime | None = None,
+) -> tuple[int, str, str]:
+    """Pick or create a numeric variant dir. Returns (index, root, variant_id)."""
+    from variant_id import (
+        build_variant_json,
+        match_variant,
+        variant_id_from_fields,
+        write_variant_json,
+    )
+
+    if fields is None:
+        fields, lscpu_version, first_seen = probe_lscpu()
+    vid = variant_id_from_fields(fields)
+
+    def _create(index: int) -> str:
+        root = variant_root(instance_root, index)
+        os.makedirs(root, exist_ok=True)
+        data = build_variant_json(
+            fields,
+            source="observed",
+            first_seen=(first_seen or datetime.now()).isoformat(),
+            lscpu_version=lscpu_version,
+        )
+        write_variant_json(os.path.join(root, VARIANT_JSON_NAME), data)
+        return root
+
+    if not os.path.exists(os.path.join(variant_root(instance_root, 0), VARIANT_JSON_NAME)):
+        return 0, _create(0), vid
+
+    roots = variant_roots(instance_root)
+    for root in roots:
+        vpath = os.path.join(root, VARIANT_JSON_NAME)
+        if not os.path.exists(vpath):
+            continue
+        with open(vpath, "r") as f:
+            stored = json.load(f)
+        if match_variant(fields, stored):
+            return int(os.path.basename(root)), root, vid
+
+    nxt = max(int(os.path.basename(r)) for r in roots) + 1
+    return nxt, _create(nxt), vid
+
+
+def parse_variant_outputs(instance_root: str | os.PathLike, tasks: list[Task]) -> list[str]:
+    """Run parsers for every numeric variant's task outputs; return variant roots walked."""
+    roots = variant_roots(instance_root)
+    for root in roots:
+        for task in tasks:
+            if isinstance(task, DbaasDbTask):
+                continue
+            meta = load_task_meta(task, data_dir=root)
+            if not meta.outputs:
+                continue
+            for parse_func in task.parse_output:
+                parse_func(meta, task, os.path.join(root, task.name))
+    return roots
+
+
+def write_variant_marker(
+    run_dir: str | os.PathLike,
+    index: int,
+    variant_id: str,
+) -> None:
+    os.makedirs(run_dir, exist_ok=True)
+    path = os.path.join(run_dir, "variant")
+    with open(path, "w") as f:
+        f.write(json.dumps({"n": index, "id": variant_id}) + "\n")
+
+
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -1174,6 +1451,32 @@ def timing_run_dir(data_dir: str | os.PathLike, run_id: str | None = None) -> st
 
 def timing_file_path(data_dir: str | os.PathLike, filename: str, run_id: str | None = None) -> str:
     return os.path.join(timing_run_dir(data_dir, run_id), filename)
+
+
+def prepare_variant_timing(
+    instance_root: str | os.PathLike,
+    variant_root_dir: str | os.PathLike,
+    index: int,
+    variant_id: str,
+    *,
+    run_id: str | None = None,
+) -> None:
+    """Copy schedule timing api_* into the variant run dir; write variant markers."""
+    rid = run_id or github_run_id()
+    src = timing_run_dir(schedule_root(instance_root), rid)
+    dst = timing_run_dir(variant_root_dir, rid)
+    os.makedirs(dst, exist_ok=True)
+    os.makedirs(src, exist_ok=True)
+    if os.path.isdir(src):
+        for name in (TIMING_API_START, TIMING_API_END):
+            sp = os.path.join(src, name)
+            if os.path.isfile(sp):
+                with open(sp, "rb") as f:
+                    data = f.read()
+                with open(os.path.join(dst, name), "wb") as f:
+                    f.write(data)
+    write_variant_marker(dst, index, variant_id)
+    write_variant_marker(src, index, variant_id)
 
 
 def write_timing_file(
@@ -1377,6 +1680,7 @@ def run_task(
     data_dir: str | os.PathLike,
     accelerator_count: float = 0.0,
     client_data_dir: str | os.PathLike | None = None,
+    instance_root: str | os.PathLike | None = None,
 ) -> None:
     while True:
         try:
@@ -1398,7 +1702,7 @@ def run_task(
                     failed = True
                     meta.exit_code = 256
                     meta.error_msg = str(e)
-                write_meta(meta, os.path.join(task_dir, META_NAME))
+                write_variant_task_meta(meta, task, task_dir_root, instance_root)
                 continue
             try:
                 if isinstance(task, VllmDockerTask):
@@ -1435,7 +1739,7 @@ def run_task(
             from s3_runs import upload_postgres_log
 
             upload_postgres_log(task.name, task_dir)
-            write_meta(meta, os.path.join(task_dir, META_NAME))
+            write_variant_task_meta(meta, task, task_dir_root, instance_root)
         except Exception:
             raise
         finally:
@@ -1495,8 +1799,15 @@ def run_tasks(
     accelerator_count: float = 0.0,
     nthreads: int = 8,
     client_data_dir: str | os.PathLike | None = None,
+    instance_root: str | os.PathLike | None = None,
 ):
     taskgroups = get_taskgroups(vendor)
+
+    def _push_roots(roots: list[str | os.PathLike], message: str) -> None:
+        push = list(roots)
+        if instance_root is not None:
+            push.append(schedule_root(instance_root))
+        _push_data_dirs(push, message)
 
     # initialize thread pool
     q: Queue = Queue(maxsize=nthreads)
@@ -1505,7 +1816,7 @@ def run_tasks(
         threads.append(
             threading.Thread(
                 target=run_task,
-                args=(q, data_dir, accelerator_count, client_data_dir),
+                args=(q, data_dir, accelerator_count, client_data_dir, instance_root),
                 daemon=True,
             )
         )
@@ -1518,7 +1829,7 @@ def run_tasks(
         changed_dirs: list[str | os.PathLike] = []
         for task in taskgroups[taskgroup]:
             task_dir_root = task_data_dir(task, data_dir, client_data_dir)
-            meta = load_task_meta(task, task_dir_root)
+            meta = vm_task_meta(task, task_dir_root, instance_root)
             if not should_run(task, task_dir_root, vendor, instance, accelerator_count):
                 if meta.start and meta.exit_code is None:
                     # update meta, if it doesn't yet have an exit code, so the monitoring won't fail on this
@@ -1526,7 +1837,7 @@ def run_tasks(
                     meta.exit_code = -2
                     meta.task_hash=task_hash(task)
                     meta.error_msg = "Task doesn't need to run on this instance"
-                    write_meta(meta, os.path.join(task_dir_root, task.name, META_NAME))
+                    write_variant_task_meta(meta, task, task_dir_root, instance_root)
                     changed_dirs.append(task_dir_root)
                 continue
             if task.precheck_command and task.precheck_regex:
@@ -1537,7 +1848,7 @@ def run_tasks(
                     meta.exit_code = -3
                     meta.task_hash=task_hash(task)
                     meta.error_msg = "Task precheck_regex didn't match"
-                    write_meta(meta, os.path.join(task_dir_root, task.name, META_NAME))
+                    write_variant_task_meta(meta, task, task_dir_root, instance_root)
                     changed_dirs.append(task_dir_root)
                     continue
 
@@ -1555,8 +1866,8 @@ def run_tasks(
                 meta.exit_code = None
                 meta.error_msg = None
                 meta.task_hash = task_hash(task)
-                write_meta(meta, os.path.join(task_dir_root, task.name, META_NAME))
-                _push_data_dirs([task_dir_root], f"Starting {task.name} from {repo.gha_url()}")
+                write_variant_task_meta(meta, task, task_dir_root, instance_root)
+                _push_roots([task_dir_root], f"Starting {task.name} from {repo.gha_url()}")
             q.put(task)
             changed_dirs.append(task_dir_root)
             if not task.parallel:
@@ -1566,7 +1877,7 @@ def run_tasks(
         docker_prune_after_round()
         # do a push at the end of each round if we made changes
         if changed_dirs:
-            _push_data_dirs(changed_dirs, f"Inspecting server from {repo.gha_url()}")
+            _push_roots(changed_dirs, f"Inspecting server from {repo.gha_url()}")
         _finalize_multi_vm_band_if_done(ordered_groups, group_index, data_dir)
     q.join()
 
@@ -1690,18 +2001,19 @@ def finalize_task_metas(
     instance: str,
     accelerator_count: float = 0.0,
     client_data_dir: str | os.PathLike | None = None,
+    instance_root: str | os.PathLike | None = None,
 ) -> None:
     """Mark unfinished task metas when inspect ends before every queued task ran."""
     changed_dirs: list[str | os.PathLike] = []
     last_activity = None
     for task in get_tasks(vendor):
         task_dir_root = task_data_dir(task, data_dir, client_data_dir)
-        meta = load_task_meta(task, data_dir=task_dir_root)
+        meta = vm_task_meta(task, task_dir_root, instance_root)
         if meta.end:
             last_activity = max(last_activity, meta.end) if last_activity else meta.end
     for task in get_tasks(vendor):
         task_dir_root = task_data_dir(task, data_dir, client_data_dir)
-        meta = load_task_meta(task, data_dir=task_dir_root)
+        meta = vm_task_meta(task, task_dir_root, instance_root)
         if not meta.start or meta.end is not None:
             continue
         if should_run(task, task_dir_root, vendor, instance, accelerator_count):
@@ -1709,15 +2021,20 @@ def finalize_task_metas(
             meta.exit_code = -4
             meta.task_hash = task_hash(task)
             meta.error_msg = "Inspect ended before task completed"
-            write_meta(meta, os.path.join(task_dir_root, task.name, META_NAME))
+            write_variant_task_meta(meta, task, task_dir_root, instance_root)
             changed_dirs.append(task_dir_root)
         elif meta.exit_code is None:
             meta.end = datetime.now()
             meta.exit_code = -2
             meta.task_hash = task_hash(task)
             meta.error_msg = "Task doesn't need to run on this instance"
-            write_meta(meta, os.path.join(task_dir_root, task.name, META_NAME))
+            write_variant_task_meta(meta, task, task_dir_root, instance_root)
             changed_dirs.append(task_dir_root)
+    # Refresh schedule for every task so co-start boot placeholders clear when
+    # another variant already has a successful union result.
+    if instance_root is not None:
+        refresh_all_schedule_metas(instance_root, vendor, active_root=data_dir)
+        changed_dirs.append(schedule_root(instance_root))
     if changed_dirs:
         _push_data_dirs(changed_dirs, f"Finalized task metas from {repo.gha_url()}")
 
@@ -1767,7 +2084,8 @@ def get_last_start(data_dir, vendor, server):
     if not tasks:
         # if there are no tasks, return a low value which can be used as a sort key
         return datetime.min
-    server_data_dir = os.path.join(data_dir, vendor, server)
+    # Scheduler metas live under data/{vendor}/{server}/schedule/
+    server_data_dir = schedule_root(os.path.join(data_dir, vendor, server))
     tasks = _applicable_tasks(vendor, server)
     meta_starts = [load_task_meta(task, data_dir=server_data_dir).start for task in tasks]
     meta_starts = [start for start in meta_starts if start]
@@ -1778,7 +2096,7 @@ def get_last_start(data_dir, vendor, server):
 
 
 def get_last_end(data_dir, vendor, server):
-    server_data_dir = os.path.join(data_dir, vendor, server)
+    server_data_dir = schedule_root(os.path.join(data_dir, vendor, server))
     meta_ends = [
         load_task_meta(task, data_dir=server_data_dir).end
         for task in _applicable_tasks(vendor, server)
@@ -1844,7 +2162,7 @@ def active_run_blocks_s3_cleanup(
         task_data_dir = data_dir
         tasks = _applicable_dbaas_tasks(vendor, instance_key)
     else:
-        task_data_dir = os.path.join(data_dir, vendor, instance)
+        task_data_dir = schedule_root(os.path.join(data_dir, vendor, instance))
         tasks = _applicable_tasks(vendor, instance)
     if not os.path.isdir(task_data_dir):
         return None

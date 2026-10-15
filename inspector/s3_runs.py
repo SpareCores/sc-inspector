@@ -288,6 +288,9 @@ def upload_task_logs_to_s3(data_dir: str) -> None:
         task_dir = os.path.join(data_dir, name)
         if not os.path.isdir(task_dir):
             continue
+        # Expects a variant root; never treat layout dirs of an instance root as tasks.
+        if name == "schedule" or name.isdigit():
+            continue
         for stream in ("stdout", "stderr", RESOURCE_TRACKER_OUTPUT_FILENAME, POSTGRES_LOG_FILENAME):
             if upload_task_artifact(
                 name,

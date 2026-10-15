@@ -171,7 +171,9 @@ def start(ctx, exclude, start_only, vendor, limit):
         if start_only and (vnd, server) not in start_only:
             logging.info(f"Excluding {vnd}/{server} as --start-only {start_only} is given")
             continue
-        data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vnd, server)
+        instance_root = os.path.join(ctx.parent.params["repo_path"], "data", vnd, server)
+        # Start/cleanup read and write only schedule/ metas and timing.
+        data_dir = lib.schedule_root(instance_root)
         block_reasons = servers_block.get(vnd, {}).get(server)
         try:
             tasks = lib.tasks_to_start(
@@ -881,7 +883,7 @@ def _run_meta_cleanup_for_vendor(
             backend_regions, backend_zones = pulumi_backend.locations_for_instance(vnd, server)
             regions = list(dict.fromkeys([*list(regions or []), *backend_regions]))
             zones = list(dict.fromkeys([*list(zones or []), *backend_zones]))
-            data_dir = os.path.join(repo_path, "data", vnd, server)
+            data_dir = lib.schedule_root(os.path.join(repo_path, "data", vnd, server))
             if vnd in {"gcp"}:
                 futures.append(
                     (vnd, server, executor.submit(
@@ -1054,17 +1056,11 @@ def parse(ctx):
     for srv in servers():
         vendor = srv.vendor_id
         server = srv.api_reference
-        data_dir = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
+        instance_root = os.path.join(ctx.parent.params["repo_path"], "data", vendor, server)
         tasks = list(lib.get_tasks(vendor))
         if not tasks:
             continue
-        for task in tasks:
-            meta = lib.load_task_meta(task, data_dir=data_dir)
-            if not meta.outputs:
-                continue
-            for parse_func in task.parse_output:
-                parse_func(meta, task, os.path.join(data_dir, task.name))
-        if os.path.exists(data_dir):
+        for data_dir in lib.parse_variant_outputs(instance_root, tasks):
             repo.push_path(data_dir, f"Parsed outputs in {repo.gha_url()}")
 
 
@@ -1095,20 +1091,44 @@ def inspect(ctx, vendor, instance, accelerator_count, threads, dbaas_instance_ke
     logging.info("Updating the git repo")
     # we must clone the repo before writing anything to it
     repo_path = ctx.parent.params["repo_path"]
+    instance_root = None
+    variant_index = None
+    variant_id = None
     if dbaas_instance_key:
         sparse = (f"dbaas/{vendor}/{dbaas_instance_key}",)
         data_dir = os.path.join(repo_path, "dbaas", vendor, dbaas_instance_key)
     else:
         sparse = (f"data/{vendor}/{instance}",)
-        data_dir = os.path.join(repo_path, "data", vendor, instance)
+        instance_root = os.path.join(repo_path, "data", vendor, instance)
+        data_dir = instance_root
     repo.get_repo(sparse_paths=sparse)
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
+    if instance_root is not None:
+        try:
+            variant_index, data_dir, variant_id = lib.select_or_create_variant(instance_root)
+        except Exception:
+            # No variant root to finalize into; boot placeholders stay in schedule/
+            # for cleanup timeout and the stale-start retry.
+            logging.exception("Hardware variant detection failed")
+            raise
+        lib.prepare_variant_timing(instance_root, data_dir, variant_index, variant_id)
+        logging.info(
+            "Selected hardware variant %s (id=%s) under %s",
+            variant_index,
+            variant_id,
+            data_dir,
+        )
     lib.record_timing_inspector_start(data_dir)
-    try:
-        repo.push_path(lib.timing_dir(data_dir), f"Inspector started from {repo.gha_url()}")
-    except Exception:
-        logging.exception("Failed to push inspector timing")
+    # Server runs push the whole variant root here so variant.json lands with the timing.
+    start_push = [data_dir] if instance_root is not None else [lib.timing_dir(data_dir)]
+    if instance_root is not None:
+        start_push.append(lib.timing_dir(lib.schedule_root(instance_root)))
+    for path in start_push:
+        try:
+            repo.push_path(path, f"Inspector started from {repo.gha_url()}")
+        except Exception:
+            logging.exception("Failed to push inspector timing")
     if dbaas_instance_key:
         from postgres_dbaas import wait_db_ready
 
@@ -1120,6 +1140,7 @@ def inspect(ctx, vendor, instance, accelerator_count, threads, dbaas_instance_ke
             instance=instance,
             accelerator_count=accelerator_count,
             nthreads=threads,
+            instance_root=instance_root,
         )
     finally:
         lib.finalize_task_metas(
@@ -1127,7 +1148,16 @@ def inspect(ctx, vendor, instance, accelerator_count, threads, dbaas_instance_ke
             data_dir,
             instance,
             accelerator_count=accelerator_count,
+            instance_root=instance_root,
         )
+        if instance_root is not None:
+            # The start job usually pushes api_start/api_end after the VM cloned
+            # the repo; pull and copy them into the variant run dir again.
+            try:
+                repo.pull()
+                lib.prepare_variant_timing(instance_root, data_dir, variant_index, variant_id)
+            except Exception:
+                logging.exception("Failed to refresh start timing into variant")
         lib.record_timing_inspector_end(data_dir)
         try:
             import s3_runs
@@ -1135,10 +1165,14 @@ def inspect(ctx, vendor, instance, accelerator_count, threads, dbaas_instance_ke
             s3_runs.upload_task_logs_to_s3(data_dir)
         except Exception:
             logging.exception("Failed to upload task logs to S3")
-        try:
-            repo.push_path(lib.timing_dir(data_dir), f"Inspector finished from {repo.gha_url()}")
-        except Exception:
-            logging.exception("Failed to push inspector timing")
+        end_push = [lib.timing_dir(data_dir)]
+        if instance_root is not None:
+            end_push.append(lib.schedule_root(instance_root))
+        for path in end_push:
+            try:
+                repo.push_path(path, f"Inspector finished from {repo.gha_url()}")
+            except Exception:
+                logging.exception("Failed to push inspector timing")
 
 
 @cli.command()
