@@ -364,67 +364,91 @@ def run_git_command(args, cwd):
         raise
 
 @synchronized
-def push_path(path: str | os.PathLike, msg: str):
-    logging.info(f"push_path called for path: {path}, message: {msg}")
-    # Only push if we have authentication (GITHUB_TOKEN or SSH URL)
+def push_paths(paths: list[str | os.PathLike], msg: str):
+    """Commit and squash-push every dirty path in one round.
+
+    Callers that update both a variant root and ``schedule/`` must use this (or
+    a single ``push_path`` covering both) rather than sequential ``push_path``
+    calls: each squash does ``reset --hard origin/main``, which would wipe
+    sibling dirty trees that were not part of the first commit.
+    """
+    path_list = [os.path.abspath(str(p)) for p in paths]
+    logging.info(f"push_paths called for paths: {path_list}, message: {msg}")
+    if not path_list:
+        return
     if not should_push():
         has_token = bool(os.environ.get("GITHUB_TOKEN"))
         repo_url = os.environ.get("REPO_URL", REPO_URL)
         is_ssh = is_ssh_url(repo_url)
-        logging.warning(f"Skipping push: no authentication available (GITHUB_TOKEN={has_token}, SSH_URL={is_ssh}, REPO_URL={repo_url})")
+        logging.warning(
+            f"Skipping push: no authentication available "
+            f"(GITHUB_TOKEN={has_token}, SSH_URL={is_ssh}, REPO_URL={repo_url})"
+        )
         return
-    repo_root = _repo_root(path)
+    repo_root = _repo_root(path_list[0])
     logging.info(f"Using repo root: {repo_root}")
     try:
-        get_repo()
-        if path_has_changes(repo_root, path):
-            rel_path = os.path.relpath(path, repo_root)
-            _assert_path_in_sparse(rel_path)
-            logging.info("Staging changes...")
-            run_git_command(["add", rel_path], cwd=repo_root)
-            logging.info("Committing changes...")
-            run_git_command(["commit", "-m", msg], cwd=repo_root)
-            # Snapshot the exact files + result commit BEFORE fetching/reset.
-            # origin/main still points to our base, so this diff is stable.
-            # saved_head must outlive retries: a failed squash does reset --hard
-            # to origin/main, and re-reading HEAD then would lose the results.
-            changed_files = _changed_files_under(repo_root, rel_path)
-            if not changed_files:
-                logging.info("Commit created but no file-level diff vs origin/main")
-                return
-            saved_head = run_git_command(["rev-parse", "HEAD"], cwd=repo_root).strip()
-            # Retry push with exponential backoff (many inspectors push concurrently)
-            deadline = time.monotonic() + 10 * 60  # 10 minutes total
-            wait_sec = 5  # initial backoff in seconds
-            max_wait_per_round = 2 * 60  # cap 2 minutes per round
-            attempt = 0
-            while True:
-                try:
-                    if attempt > 0:
-                        sleep_sec = min(wait_sec, max_wait_per_round) + random.uniform(0, 2)
-                        logging.info(
-                            f"Retry attempt {attempt}: waiting {sleep_sec:.1f}s then fetch/squash/push"
-                        )
-                        time.sleep(sleep_sec)
-                        wait_sec = min(wait_sec * 2, max_wait_per_round)
-                    logging.info("Fetching origin/main and squashing push...")
-                    _fetch_origin_main(repo_root)
-                    _squash_commit_and_push(
-                        repo_root, rel_path, msg, changed_files, saved_head
-                    )
-                    logging.info(f"Successfully pushed changes to git: {msg}")
-                    break
-                except subprocess.CalledProcessError as e:
-                    attempt += 1
-                    if time.monotonic() >= deadline:
-                        logging.error("Push failed after retries (10 min deadline)")
-                        raise
-                    logging.warning(f"Push failed (attempt {attempt}), will retry with backoff: {e}")
-        else:
+        # Pass repo_path explicitly: get_repo's default is bound at import time.
+        get_repo(repo_path=repo_root)
+        dirty = [p for p in dict.fromkeys(path_list) if path_has_changes(repo_root, p)]
+        if not dirty:
             logging.info("No changes detected, skipping git operations")
+            return
+        rel_paths = [os.path.relpath(p, repo_root) for p in dirty]
+        for rel_path in rel_paths:
+            _assert_path_in_sparse(rel_path)
+        logging.info("Staging changes under %s...", rel_paths)
+        run_git_command(["add", "--"] + rel_paths, cwd=repo_root)
+        logging.info("Committing changes...")
+        run_git_command(["commit", "-m", msg], cwd=repo_root)
+        # Snapshot the exact files + result commit BEFORE fetching/reset.
+        # origin/main still points to our base, so this diff is stable.
+        # saved_head must outlive retries: a failed squash does reset --hard
+        # to origin/main, and re-reading HEAD then would lose the results.
+        changed_files: list[str] = []
+        for rel_path in rel_paths:
+            changed_files.extend(_changed_files_under(repo_root, rel_path))
+        changed_files = list(dict.fromkeys(changed_files))
+        if not changed_files:
+            logging.info("Commit created but no file-level diff vs origin/main")
+            return
+        saved_head = run_git_command(["rev-parse", "HEAD"], cwd=repo_root).strip()
+        rel_label = ",".join(rel_paths)
+        # Retry push with exponential backoff (many inspectors push concurrently)
+        deadline = time.monotonic() + 10 * 60  # 10 minutes total
+        wait_sec = 5  # initial backoff in seconds
+        max_wait_per_round = 2 * 60  # cap 2 minutes per round
+        attempt = 0
+        while True:
+            try:
+                if attempt > 0:
+                    sleep_sec = min(wait_sec, max_wait_per_round) + random.uniform(0, 2)
+                    logging.info(
+                        f"Retry attempt {attempt}: waiting {sleep_sec:.1f}s then fetch/squash/push"
+                    )
+                    time.sleep(sleep_sec)
+                    wait_sec = min(wait_sec * 2, max_wait_per_round)
+                logging.info("Fetching origin/main and squashing push...")
+                _fetch_origin_main(repo_root)
+                _squash_commit_and_push(
+                    repo_root, rel_label, msg, changed_files, saved_head
+                )
+                logging.info(f"Successfully pushed changes to git: {msg}")
+                break
+            except subprocess.CalledProcessError as e:
+                attempt += 1
+                if time.monotonic() >= deadline:
+                    logging.error("Push failed after retries (10 min deadline)")
+                    raise
+                logging.warning(f"Push failed (attempt {attempt}), will retry with backoff: {e}")
     except Exception as e:
-        logging.error(f"Failed to push path {path}: {e}", exc_info=True)
+        logging.error(f"Failed to push paths {path_list}: {e}", exc_info=True)
         raise
+
+
+def push_path(path: str | os.PathLike, msg: str):
+    """Push a single path; see ``push_paths`` for multi-root updates."""
+    push_paths([path], msg)
 
 
 @synchronized

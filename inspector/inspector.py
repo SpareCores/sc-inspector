@@ -1060,8 +1060,10 @@ def parse(ctx):
         tasks = list(lib.get_tasks(vendor))
         if not tasks:
             continue
-        for data_dir in lib.parse_variant_outputs(instance_root, tasks):
-            repo.push_path(data_dir, f"Parsed outputs in {repo.gha_url()}")
+        repo.push_paths(
+            lib.parse_variant_outputs(instance_root, tasks),
+            f"Parsed outputs in {repo.gha_url()}",
+        )
 
 
 @cli.command()
@@ -1124,11 +1126,10 @@ def inspect(ctx, vendor, instance, accelerator_count, threads, dbaas_instance_ke
     start_push = [data_dir] if instance_root is not None else [lib.timing_dir(data_dir)]
     if instance_root is not None:
         start_push.append(lib.timing_dir(lib.schedule_root(instance_root)))
-    for path in start_push:
-        try:
-            repo.push_path(path, f"Inspector started from {repo.gha_url()}")
-        except Exception:
-            logging.exception("Failed to push inspector timing")
+    try:
+        repo.push_paths(start_push, f"Inspector started from {repo.gha_url()}")
+    except Exception:
+        logging.exception("Failed to push inspector timing")
     if dbaas_instance_key:
         from postgres_dbaas import wait_db_ready
 
@@ -1168,11 +1169,10 @@ def inspect(ctx, vendor, instance, accelerator_count, threads, dbaas_instance_ke
         end_push = [lib.timing_dir(data_dir)]
         if instance_root is not None:
             end_push.append(lib.schedule_root(instance_root))
-        for path in end_push:
-            try:
-                repo.push_path(path, f"Inspector finished from {repo.gha_url()}")
-            except Exception:
-                logging.exception("Failed to push inspector timing")
+        try:
+            repo.push_paths(end_push, f"Inspector finished from {repo.gha_url()}")
+        except Exception:
+            logging.exception("Failed to push inspector timing")
 
 
 @cli.command()

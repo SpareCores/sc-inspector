@@ -1781,15 +1781,20 @@ def _finalize_multi_vm_band_if_done(
 
 
 def _push_data_dirs(data_dirs: list[str | os.PathLike], message: str) -> None:
-    for data_dir in dict.fromkeys(data_dirs):
-        for i in range(3):
-            try:
-                repo.push_path(data_dir, message)
-                break
-            except Exception:
-                logger.exception("push failed")
-                if i < 2:
-                    time.sleep(random.randint(1, 10))
+    # One squash-push for every dirty root. Sequential push_path calls would
+    # reset --hard after the first and wipe sibling dirty trees (e.g. schedule/
+    # after pushing 0/ on "Starting <task>").
+    roots = list(dict.fromkeys(data_dirs))
+    if not roots:
+        return
+    for i in range(3):
+        try:
+            repo.push_paths(roots, message)
+            break
+        except Exception:
+            logger.exception("push failed")
+            if i < 2:
+                time.sleep(random.randint(1, 10))
 
 
 def run_tasks(

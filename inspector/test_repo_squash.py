@@ -4,6 +4,9 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
+import lib
 import repo
 
 
@@ -112,3 +115,42 @@ def test_squash_retry_uses_saved_head_after_hard_reset(tmp_path: Path):
     )
     assert not (task_dir / "stdout").exists()
     assert '"done":1' in (task_dir / "meta.json").read_text()
+
+
+def test_push_paths_publishes_variant_and_schedule(tmp_path: Path, monkeypatch):
+    """Starting-task dual-write must land 0/ and schedule/ in one squash push."""
+    bare, work = _init_bare_and_clone(tmp_path)
+    monkeypatch.setattr(repo, "REPO_PATH", str(work))
+    monkeypatch.setattr(repo, "should_push", lambda: True)
+
+    zero_meta = work / "data" / "vendor" / "inst" / "0" / "task" / "meta.json"
+    sched_meta = work / "data" / "vendor" / "inst" / "schedule" / "task" / "meta.json"
+    payload = '{"start":"real","end":null,"exit_code":null}\n'
+    zero_meta.write_text(payload)
+    sched_meta.write_text(payload)
+
+    repo.push_paths(
+        [
+            work / "data" / "vendor" / "inst" / "0",
+            work / "data" / "vendor" / "inst" / "schedule",
+        ],
+        "Starting task",
+    )
+
+    tip = tmp_path / "verify-multi"
+    _git(tmp_path, "clone", str(bare), str(tip))
+    assert (tip / "data/vendor/inst/0/task/meta.json").read_text() == payload
+    assert (tip / "data/vendor/inst/schedule/task/meta.json").read_text() == payload
+
+
+def test_push_data_dirs_pushes_all_roots_at_once(monkeypatch):
+    """Each squash resets --hard, so roots must never be pushed one by one."""
+    calls = []
+    monkeypatch.setattr(repo, "push_paths", lambda paths, msg: calls.append(list(paths)))
+    monkeypatch.setattr(
+        repo, "push_path", lambda *a, **kw: pytest.fail("per-root push_path call")
+    )
+
+    lib._push_data_dirs(["/d/inst/0", "/d/inst/schedule", "/d/inst/0"], "Starting task")
+
+    assert calls == [["/d/inst/0", "/d/inst/schedule"]]
