@@ -39,7 +39,6 @@ timing = Task(
     priority=0,
     command="",
     timeout=timedelta(minutes=1),
-    start_with_instance=True,
     always_run=True,
 )
 
@@ -69,7 +68,6 @@ lsblk = DockerTask(
     version_command="lsblk -V",
     command="lsblk -O -Jdb",
     timeout=timedelta(minutes=1),
-    start_with_instance=True,
 )
 
 lsblk_discard = DockerTask(
@@ -79,7 +77,6 @@ lsblk_discard = DockerTask(
     version_command="lsblk -V",
     command="lsblk -DJdb",
     timeout=timedelta(minutes=1),
-    start_with_instance=True,
 )
 
 lsblk_topo = DockerTask(
@@ -89,7 +86,6 @@ lsblk_topo = DockerTask(
     version_command="lsblk -V",
     command="lsblk -tJdb",
     timeout=timedelta(minutes=1),
-    start_with_instance=True,
 )
 
 lscpu = DockerTask(
@@ -109,7 +105,6 @@ lstopo = DockerTask(
     version_command="lstopo --version",
     command="lstopo --of xml",
     parse_output=[parse.lstopo],
-    start_with_instance=True,
     timeout=timedelta(seconds=30),
 )
 
@@ -136,7 +131,7 @@ virtualization = DockerTask(
 
 # ---------------------------------------------------------------------------
 # Postgres — cached CPU-heavy RO (ro_cpu_* script), durable
-# Concurrency: {1, V/2, V, 2·V}. Piggybacks via start_with_instance.
+# Concurrency: {1, V/2, V, 2·V}.
 #
 # Single-VM: pgbench stresses the server only and barely touches its own
 # host's CPU (<1%, ~10 MB RSS observed driving an 8-vCPU server), so running
@@ -152,7 +147,6 @@ virtualization = DockerTask(
 
 pgbench_postgres_ro_durable = DockerTask(
     parallel=False,
-    start_with_instance=True,
     priority=1.02,
     image="ghcr.io/sparecores/benchmark-pgbench-postgres:main",
     timeout=timedelta(minutes=120),
@@ -197,7 +191,6 @@ stressng_benchmarks = DockerTask(
     version_command="-c \"stress-ng --version | awk '{print $3}'\"",
     command="-c 'nice -n -20 python3 /usr/local/bin/run_stressng_benchmarks.py'",
     timeout=timedelta(minutes=20),
-    start_with_instance=True,
 )
 
 openssl = DockerTask(
@@ -248,7 +241,6 @@ membench = DockerTask(
     docker_opts=DOCKER_OPTS | tracker_docker_opts("membench"),
     # run for 30 minutes max
     command="-Hv -t 1800",
-    start_with_instance=True,
     version_command="-V",
 )
 
@@ -331,7 +323,6 @@ vllm = VllmDockerTask(
     docker_opts=VLLM_DOCKER_OPTS | tracker_docker_opts("vllm"),
     command=None,
     version_command="--version",
-    start_with_instance=True,
 )
 
 ffmpeg = DockerTask(
@@ -342,7 +333,6 @@ ffmpeg = DockerTask(
     version_command="--version",
     command=None,
     timeout=timedelta(hours=2),
-    start_with_instance=True,
 )
 
 # Raw block-device fio benchmark. Default priority (inf) so it always runs
