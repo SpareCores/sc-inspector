@@ -15,7 +15,7 @@ from typing import Any, Mapping, Optional
 
 ID_VERSION = 1
 
-# Fields stored raw in variant.json for later id_version bumps.
+# Fields stored in variant.json for later id_version bumps.
 RECORDED_LSCPU_FIELDS = (
     "Architecture:",
     "Vendor ID:",
@@ -33,6 +33,20 @@ RECORDED_LSCPU_FIELDS = (
     "Socket(s):",
     "NUMA node(s):",
 )
+
+# Stored as JSON integers when the lscpu value is a bare integer (no floats);
+# otherwise kept as a string (e.g. ARM Stepping ``r3p1``). Cache sizes stay strings.
+_INTEGER_LSCPU_FIELDS = frozenset(
+    {
+        "CPU family:",
+        "Model:",
+        "Stepping:",
+        "CPU(s):",
+        "Socket(s):",
+        "NUMA node(s):",
+    }
+)
+_INTEGER_RE = re.compile(r"^-?\d+$")
 
 _TRADEMARK_RE = re.compile(r"\(R\)|®|™|©", re.IGNORECASE)
 _AT_GHZ_RE = re.compile(r"\s*@\s*[\d.]+\s*GHz\s*$", re.IGNORECASE)
@@ -135,6 +149,46 @@ def variant_id_from_lscpu_stdout(raw: Any) -> str:
     return variant_id_from_fields(parse_lscpu_stdout(raw))
 
 
+def _flags_to_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        tokens = [str(x).strip() for x in value]
+    else:
+        tokens = str(value).split()
+    return sorted({t for t in tokens if t})
+
+
+def _record_lscpu_value(key: str, value: Any) -> Any:
+    """JSON-friendly form of one recorded lscpu field."""
+    if key == "Flags:":
+        return _flags_to_list(value)
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    text = str(value)
+    if key in _INTEGER_LSCPU_FIELDS and _INTEGER_RE.match(text.strip()):
+        return int(text.strip())
+    return text
+
+
+def _fields_for_id(stored_lscpu: Mapping[str, Any]) -> dict[str, str]:
+    """Normalize stored variant.json lscpu values back to string fields for ids."""
+    out: dict[str, str] = {}
+    for key, value in stored_lscpu.items():
+        k = str(key)
+        if value is None:
+            out[k] = ""
+        elif k == "Flags:":
+            out[k] = " ".join(_flags_to_list(value))
+        else:
+            out[k] = str(value)
+    return out
+
+
 def build_variant_json(
     fields: Mapping[str, str],
     *,
@@ -142,10 +196,17 @@ def build_variant_json(
     first_seen: Optional[str] = None,
     lscpu_version: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Build a variant.json object from raw lscpu fields."""
+    """Build a variant.json object from raw lscpu fields.
+
+    Integer-looking id/count fields are stored as JSON numbers; ``Flags:`` as a
+    sorted unique string array. Cache sizes and other free text stay strings.
+    """
     if source not in ("backfill", "observed"):
         raise ValueError(f"invalid source: {source!r}")
-    recorded = {k: fields[k] for k in RECORDED_LSCPU_FIELDS if k in fields}
+    recorded: dict[str, Any] = {}
+    for key in RECORDED_LSCPU_FIELDS:
+        if key in fields:
+            recorded[key] = _record_lscpu_value(key, fields[key])
     # Always include id-driving fields even if empty/missing in source.
     for key in (
         "Architecture:",
@@ -155,7 +216,8 @@ def build_variant_json(
         "Stepping:",
         "Model name:",
     ):
-        recorded.setdefault(key, fields.get(key, ""))
+        if key not in recorded:
+            recorded[key] = _record_lscpu_value(key, fields.get(key, ""))
     return {
         "id_version": ID_VERSION,
         "id": variant_id_from_fields(fields),
@@ -175,7 +237,7 @@ def match_variant(
     if not isinstance(stored_lscpu, Mapping):
         return False
     return variant_id_from_fields(machine_fields) == variant_id_from_fields(
-        {str(k): "" if v is None else str(v) for k, v in stored_lscpu.items()}
+        _fields_for_id(stored_lscpu)
     )
 
 

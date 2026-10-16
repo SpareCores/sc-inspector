@@ -73,6 +73,34 @@ def test_match_variant_recomputes_from_stored_lscpu():
     assert not match_variant(X86_OTHER, stored)
 
 
+def test_variant_json_typed_lscpu_fields():
+    stored = build_variant_json(X86_FIELDS, source="observed", first_seen="t", lscpu_version="2.40")
+    lscpu = stored["lscpu"]
+    assert lscpu["CPU family:"] == 6
+    assert lscpu["Model:"] == 85
+    assert lscpu["Stepping:"] == 4
+    assert lscpu["CPU(s):"] == 2
+    assert lscpu["Socket(s):"] == 1
+    assert lscpu["NUMA node(s):"] == 1
+    assert lscpu["Flags:"] == ["avx", "avx2"]
+    assert lscpu["L3 cache:"] == "34603008 (1 instance)"
+    # unsorted / duplicate flags → unique sorted
+    messy = {**X86_FIELDS, "Flags:": "avx2 avx avx avx2"}
+    assert build_variant_json(messy, source="backfill")["lscpu"]["Flags:"] == ["avx", "avx2"]
+    # ARM stepping stays a string
+    arm = {
+        "Architecture:": "aarch64",
+        "Vendor ID:": "ARM",
+        "Model name:": "Neoverse-N1",
+        "Model:": "1",
+        "Stepping:": "r3p1",
+    }
+    arm_lscpu = build_variant_json(arm, source="backfill")["lscpu"]
+    assert arm_lscpu["Model:"] == 1
+    assert arm_lscpu["Stepping:"] == "r3p1"
+    assert match_variant(arm, build_variant_json(arm, source="backfill"))
+
+
 def test_select_or_create_claims_zero(tmp_path: Path):
     idx, root, vid = lib.select_or_create_variant(tmp_path, fields=X86_FIELDS)
     assert idx == 0
