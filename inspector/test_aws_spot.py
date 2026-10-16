@@ -92,6 +92,7 @@ def test_should_start_spot_self_heal(tmp_path):
         mock.patch.object(lib, "get_tasks", return_value=[task]),
         mock.patch.object(lib, "datetime", _DT()),
         mock.patch.object(lib, "force_ondemand_after_spot_timeout", return_value=True),
+        mock.patch.object(lib, "_task_matches_server_for_start", return_value=True),
     ):
         assert lib.should_start(task, tmp_path, srv)
 
@@ -111,7 +112,11 @@ def test_should_start_skips_recent_unfinished_spot(tmp_path):
         memory_amount=1024,
         vcpus=2,
     )
-    with mock.patch("lib.datetime") as dt:
+    with (
+        mock.patch("lib.datetime") as dt,
+        mock.patch.object(lib, "get_tasks", return_value=[task]),
+        mock.patch.object(lib, "_task_matches_server_for_start", return_value=True),
+    ):
         dt.now.return_value = NOW
         assert not lib.should_start(task, tmp_path, srv)
 
@@ -152,6 +157,7 @@ def test_should_start_spot_self_heal_for_start_with_instance_task(tmp_path):
         mock.patch.object(lib, "get_tasks", return_value=[task]),
         mock.patch.object(lib, "datetime", _DT()),
         mock.patch.object(lib, "force_ondemand_after_spot_timeout", return_value=True),
+        mock.patch.object(lib, "_task_matches_server_for_start", return_value=True),
     ):
         assert lib.should_start(task, tmp_path, srv)
         # and it must actually make it into the boot task list, not just should_start
