@@ -59,6 +59,10 @@ class ManagedDbTarget:
     storage_size_gib: int | None = None
     # Max additional GiB beyond ``storage_size_gib`` (``database.storage_extra_max``).
     storage_extra_max_gib: int | None = None
+    # UpCloud flexible (rdb.*) plan metadata from ``api_reference_object``.
+    plan_storage_step_gib: int | None = None
+    plan_storage_bands: tuple[tuple[int, int], ...] = ()
+    plan_backups: tuple[str, ...] = ()
 
     @property
     def instance_key(self) -> str:
@@ -119,6 +123,37 @@ def _parse_json_list(raw) -> list:
             return [raw]
         return parsed if isinstance(parsed, list) else [parsed]
     return list(raw)
+
+
+def _parse_json_object(raw) -> dict:
+    if raw is None:
+        return {}
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _upcloud_plan_fields(
+    api_reference_object: dict,
+) -> tuple[int | None, tuple[tuple[int, int], ...], tuple[str, ...]]:
+    """Extract plan_storage bands / plan_backups from sc-data api_reference_object."""
+    ps = api_reference_object.get("plan_storage") or {}
+    step_raw = ps.get("step_gib")
+    step = int(step_raw) if step_raw is not None else None
+    options = ps.get("options") or []
+    bands = tuple(
+        (int(option["base_gib"]), int(option["max_gib"]))
+        for option in options
+        if isinstance(option, dict) and "base_gib" in option and "max_gib" in option
+    )
+    backups = tuple(str(b) for b in (api_reference_object.get("plan_backups") or []))
+    return step, bands, backups
 
 
 def _sku_id(vendor_id: str, native_id: str, edition: str | None, engine_version: str) -> str:
@@ -193,7 +228,9 @@ def available_managed_dbs(
                     d.memory_amount,
                     d.engine_versions,
                     d.storage_size,
+                    d.storage_extra_min,
                     d.storage_extra_max,
+                    d.api_reference_object,
                     r.api_reference AS region_api,
                     MIN(dp.price) AS min_price
                 FROM database AS d
@@ -220,7 +257,9 @@ def available_managed_dbs(
                     d.memory_amount,
                     d.engine_versions,
                     d.storage_size,
+                    d.storage_extra_min,
                     d.storage_extra_max,
+                    d.api_reference_object,
                     r.api_reference
                 ORDER BY d.database_id, min_price, r.api_reference
                 """
@@ -253,7 +292,21 @@ def available_managed_dbs(
                     native_id = row["api_reference"] or db_id
                     edition = _edition_for_row(vendor_id, row["family"])
                     storage_size = row["storage_size"]
+                    storage_extra_min = row["storage_extra_min"]
                     storage_extra_max = row["storage_extra_max"]
+                    plan_step = None
+                    plan_bands: tuple[tuple[int, int], ...] = ()
+                    plan_backups: tuple[str, ...] = ()
+                    if vendor_id == "upcloud":
+                        plan_step, plan_bands, plan_backups = _upcloud_plan_fields(
+                            _parse_json_object(row["api_reference_object"])
+                        )
+                    # Flexible UpCloud (rdb.*) plans leave storage_size NULL;
+                    # use the first plan_storage band (GiB) as the floor.
+                    if storage_size is None and plan_bands:
+                        storage_size = plan_bands[0][0]
+                    elif storage_size is None and storage_extra_min is not None:
+                        storage_size = storage_extra_min
                     target = ManagedDbTarget(
                         vendor_id=vendor_id,
                         engine="postgres",
@@ -269,6 +322,9 @@ def available_managed_dbs(
                         storage_extra_max_gib=(
                             int(storage_extra_max) if storage_extra_max is not None else None
                         ),
+                        plan_storage_step_gib=plan_step,
+                        plan_storage_bands=plan_bands,
+                        plan_backups=plan_backups,
                     )
                     by_db[db_id] = {
                         "target": target,

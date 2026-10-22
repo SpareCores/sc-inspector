@@ -252,6 +252,7 @@ def _try_provision_dbaas_stack(
         storage_throughput_mb_s=provision.get("disk_throughput_mb_s"),
         admin_login=provision.get("admin_login", "scadmin"),
         database_name=provision.get("database_name", "bench"),
+        plan_backups=provision.get("plan_backups"),
     )
     stack_spec = DbaasStackSpec(
         managed_db=md_spec,

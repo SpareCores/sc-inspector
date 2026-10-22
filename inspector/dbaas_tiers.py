@@ -79,8 +79,64 @@ def _provision_spec_ovh(target: ManagedDbTarget, storage: dict[str, Any], schema
     }
 
 
+def _snap_upcloud_storage_gib(
+    storage_gib: int,
+    *,
+    step: int,
+    bands: tuple[tuple[int, int], ...],
+) -> int:
+    """Snap into UpCloud flexible-plan storage bands from sc-data."""
+    gib = max(step, int(storage_gib))
+    gib = -(-gib // step) * step
+    for lo, hi in bands:
+        if lo <= gib <= hi:
+            return gib
+    for lo, _hi in bands:
+        if gib < lo:
+            return lo
+    return bands[-1][1]
+
+
+def _pick_upcloud_plan_backups(target: ManagedDbTarget) -> str | None:
+    """Cheapest backup tier allowed for the compute shape (from sc-data)."""
+    for pref in ("mini", "regular", "extended"):
+        if pref in target.plan_backups:
+            return pref
+    return None
+
+
 def _provision_spec_upcloud(target: ManagedDbTarget, storage: dict[str, Any], schema_gib: float) -> dict[str, Any]:
-    return {
+    # Flexible (rdb.*) plans require plan_storage_gib within discontinuous bands
+    # from GET /1.3/database/plans (persisted on api_reference_object.plan_storage).
+    storage_gib = int(storage.get("storage_gib") or 0)
+    floor = int(target.storage_size_gib or 0)
+    if floor:
+        storage_gib = max(storage_gib, floor)
+    if target.native_id.startswith("rdb."):
+        if not target.plan_storage_bands:
+            raise ValueError(
+                f"UpCloud flexible plan {target.native_id!r} missing "
+                "api_reference_object.plan_storage bands in sc-data"
+            )
+        ceiling = target.plan_storage_bands[-1][1]
+        if ceiling > 0:
+            storage_gib = min(storage_gib, ceiling)
+        if floor:
+            storage_gib = max(storage_gib, floor)
+        if storage_gib:
+            step = int(target.plan_storage_step_gib or 10)
+            storage_gib = _snap_upcloud_storage_gib(
+                storage_gib, step=step, bands=target.plan_storage_bands
+            )
+    elif target.storage_extra_max_gib is not None:
+        extra_max = int(target.storage_extra_max_gib)
+        ceiling = floor + extra_max if floor else extra_max
+        if ceiling > 0:
+            storage_gib = min(storage_gib, ceiling)
+        if floor:
+            storage_gib = max(storage_gib, floor)
+    storage = {**storage, "storage_gib": storage_gib} if storage_gib else storage
+    spec = {
         **storage,
         "sku_name": target.native_id,
         "sku_tier": target.edition or "",
@@ -88,6 +144,10 @@ def _provision_spec_upcloud(target: ManagedDbTarget, storage: dict[str, Any], sc
         "admin_login": "scadmin",
         "database_name": "bench",
     }
+    plan_backups = _pick_upcloud_plan_backups(target)
+    if plan_backups:
+        spec["plan_backups"] = plan_backups
+    return spec
 
 
 def _provision_spec_vultr(target: ManagedDbTarget, storage: dict[str, Any], schema_gib: float) -> dict[str, Any]:
