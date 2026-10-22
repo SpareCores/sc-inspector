@@ -2083,6 +2083,22 @@ def max_server_runtime(vendor: str, server: str) -> timedelta:
     return runtime
 
 
+def shutdown_mins_for_inspect(vendor: str, server: str, timeout_mins: int) -> int:
+    """Wall-clock minutes for ``shutdown +N`` in user_data.
+
+    ``timeout_mins`` is the boot-set sum (tasks that triggered start, plus
+    co-started always_run / start_with_instance). That underestimates when
+    on-host work expands — e.g. a new hardware variant makes almost every
+    task ``should_run``. Floor at full-catalog ``max_server_runtime`` plus
+    ``CLEANUP_BOOT_SLACK`` (same bound cleanup uses for active scans).
+    """
+    from_boot = timeout_mins + 30  # setup / user-data headroom
+    from_catalog = int(
+        (max_server_runtime(vendor, server) + CLEANUP_BOOT_SLACK).total_seconds() / 60
+    )
+    return max(from_boot, from_catalog)
+
+
 @cache
 def get_last_start(data_dir, vendor, server):
     tasks = list(get_tasks(vendor))
@@ -2338,7 +2354,7 @@ def inspector_user_data_replacements(
         "REGION": region or "",
         "ZONE": zone or "",
         "ACCELERATOR_COUNT": srv_data.accelerator_count,
-        "SHUTDOWN_MINS": timeout_mins + 30,  # give enough time to set up the machine
+        "SHUTDOWN_MINS": shutdown_mins_for_inspect(vendor, server, timeout_mins),
         "HOST_TIMING_DIR": host_timing_dir(vendor, server, github_run_id()),
         "LOG_UPLOAD_URL": log_url,
         "RUN_UPLOAD_URL": run_url,
@@ -3088,7 +3104,12 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
             sum_timeout += task.timeout
         repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
     timeout_mins = int(sum_timeout.total_seconds()/60)
-    logger.info(f"Starting {vendor}/{server} with {timeout_mins}m timeout")
+    shutdown_mins = shutdown_mins_for_inspect(vendor, server, timeout_mins)
+    logger.info(
+        f"Starting {vendor}/{server} with {timeout_mins}m task timeout, "
+        f"{shutdown_mins}m shutdown"
+        + (f" (catalog floor)" if shutdown_mins > timeout_mins + 30 else "")
+    )
     # Construct SSH repo URL from GitHub Actions context, or use fallback
     github_repo = os.environ.get("GITHUB_REPOSITORY", "SpareCores/sc-inspector-data")
     repo_url_ssh = f"git@github.com:{github_repo}.git"
