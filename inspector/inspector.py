@@ -122,6 +122,12 @@ def cli(repo_path):
 @click.pass_context
 @click.option("--exclude", type=(str, str), multiple=True, help="Exclude $vendor $instance (operator override)")
 @click.option("--start-only", type=(str, str), multiple=True, help="Start only $vendor $instance")
+@click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Bypass keeper task eligibility. Requires --start-only.",
+)
 @click.option("--vendor", type=str, default=None, help="Only start instances for the specified vendor")
 @click.option(
     "--limit",
@@ -129,7 +135,7 @@ def cli(repo_path):
     default=None,
     help="Max hosts to start this round (default: START_LIMIT env or 8)",
 )
-def start(ctx, exclude, start_only, vendor, limit):
+def start(ctx, exclude, start_only, force, vendor, limit):
     from sc_runner.resources import supported_vendors
     import concurrent.futures
     import threading
@@ -142,13 +148,22 @@ def start(ctx, exclude, start_only, vendor, limit):
         limit = int(os.environ.get("START_LIMIT", "8"))
     if limit < 1:
         raise click.ClickException("--limit must be >= 1")
+    if force and not start_only:
+        raise click.ClickException("--force requires --start-only")
 
     # Empty vendor string yields every task (no vendors_only filters match as exclusive).
     task_names = [t.name for t in lib.get_tasks("")]
-    try:
-        servers_block = keeper_client.servers_task_block_reasons(task_names)
-    except keeper_client.KeeperUnavailable as e:
-        raise click.ClickException(f"Keeper unavailable (fail-closed): {e}") from e
+    if force:
+        logging.info(
+            "Ignoring keeper task eligibility (--force) for --start-only %s",
+            start_only,
+        )
+        servers_block = None
+    else:
+        try:
+            servers_block = keeper_client.servers_task_block_reasons(task_names)
+        except keeper_client.KeeperUnavailable as e:
+            raise click.ClickException(f"Keeper unavailable (fail-closed): {e}") from e
 
     futures = {}
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1024)
@@ -174,7 +189,8 @@ def start(ctx, exclude, start_only, vendor, limit):
         instance_root = os.path.join(ctx.parent.params["repo_path"], "data", vnd, server)
         # Start/cleanup read and write only schedule/ metas and timing.
         data_dir = lib.schedule_root(instance_root)
-        block_reasons = servers_block.get(vnd, {}).get(server)
+        # Empty dict => every task allowed; None would fall back to live keeper calls.
+        block_reasons = {} if force else servers_block.get(vnd, {}).get(server)
         try:
             tasks = lib.tasks_to_start(
                 vnd, data_dir, srv_data, block_reasons=block_reasons
@@ -254,12 +270,18 @@ def start(ctx, exclude, start_only, vendor, limit):
     ),
 )
 @click.option(
+    "--force",
+    is_flag=True,
+    default=False,
+    help="Bypass keeper task eligibility. Requires --instance-key.",
+)
+@click.option(
     "--limit",
     type=int,
     default=None,
     help="Max DBaaS stacks to start this round (default: DBAAS_START_LIMIT or 4)",
 )
-def start_dbaas(ctx, vendor, instance_key, limit):
+def start_dbaas(ctx, vendor, instance_key, force, limit):
     """Start managed Postgres benchmark stacks, advancing through the catalog over rounds."""
     from dbaas_catalog import available_managed_dbs
     from dbaas_selector import dbaas_data_dir
@@ -272,14 +294,23 @@ def start_dbaas(ctx, vendor, instance_key, limit):
         limit = int(os.environ.get("DBAAS_START_LIMIT", "4"))
     if limit < 1:
         raise click.ClickException("--limit must be >= 1")
+    if force and not instance_key:
+        raise click.ClickException("--force requires --instance-key")
 
     task_names = [t.name for t in lib.get_tasks("") if isinstance(t, lib.DbaasDbTask)]
     if not task_names:
         task_names = ["pgbench_postgres_dbaas_ro_durable"]
-    try:
-        databases_block = keeper_client.databases_task_block_reasons(task_names)
-    except keeper_client.KeeperUnavailable as e:
-        raise click.ClickException(f"Keeper unavailable (fail-closed): {e}") from e
+    if force:
+        logging.info(
+            "Ignoring keeper task eligibility (--force) for --instance-key %s",
+            instance_key,
+        )
+        databases_block = None
+    else:
+        try:
+            databases_block = keeper_client.databases_task_block_reasons(task_names)
+        except keeper_client.KeeperUnavailable as e:
+            raise click.ClickException(f"Keeper unavailable (fail-closed): {e}") from e
 
     threading.current_thread().name = "main"
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=max(8, limit))
@@ -293,7 +324,8 @@ def start_dbaas(ctx, vendor, instance_key, limit):
         if instance_key and not instance_key_matches:
             continue
         data_dir = dbaas_data_dir(ctx.parent.params["repo_path"], vnd, key)
-        block_reasons = databases_block.get(vnd, {}).get(target.native_id)
+        # Empty dict => every task allowed; None would fall back to live keeper calls.
+        block_reasons = {} if force else databases_block.get(vnd, {}).get(target.native_id)
         tasks = lib.tasks_to_start_dbaas(
             vnd, data_dir, target, block_reasons=block_reasons
         )

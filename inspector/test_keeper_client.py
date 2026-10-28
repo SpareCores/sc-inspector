@@ -112,6 +112,28 @@ def test_should_start_skips_when_keeper_blocks(tmp_path):
             lib.should_start(task, tmp_path, srv, block_reasons={"membench": []})
             is True
         )
+        # start/start-dbaas --force passes {} so every task is treated as allowed
+        assert lib.should_start(task, tmp_path, srv, block_reasons={}) is True
+
+
+def test_force_requires_explicit_target(tmp_path):
+    from click.testing import CliRunner
+    import inspector as inspector_mod
+
+    runner = CliRunner()
+    result = runner.invoke(
+        inspector_mod.cli,
+        ["--repo-path", str(tmp_path), "start", "--force", "--vendor", "azure"],
+    )
+    assert result.exit_code != 0
+    assert "--force requires --start-only" in result.output
+
+    result = runner.invoke(
+        inspector_mod.cli,
+        ["--repo-path", str(tmp_path), "start-dbaas", "--force", "--vendor", "azure"],
+    )
+    assert result.exit_code != 0
+    assert "--force requires --instance-key" in result.output
 
 
 def test_should_run_fail_closed_on_keeper_error(tmp_path):
