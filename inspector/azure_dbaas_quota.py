@@ -72,13 +72,42 @@ def _quota_family_from_catalog_family(catalog_family: str) -> str:
     return f"standard{catalog_family}Family"
 
 
+def _use_oidc() -> bool:
+    return os.getenv("ARM_USE_OIDC", "").lower() in ("1", "true", "yes")
+
+
+def _github_oidc_token() -> str:
+    """Exchange GitHub Actions OIDC JWT for Azure token audience."""
+    req_token = os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]
+    req_url = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"]
+    audience = os.getenv("ARM_OIDC_AUDIENCE", "api://AzureADTokenExchange")
+    sep = "&" if "?" in req_url else "?"
+    response = requests.get(
+        f"{req_url}{sep}audience={audience}",
+        headers={"Authorization": f"Bearer {req_token}"},
+        timeout=30,
+    )
+    response.raise_for_status()
+    return response.json()["value"]
+
+
 @lru_cache(maxsize=1)
 def _credential():
-    from azure.identity import ClientSecretCredential, DefaultAzureCredential
+    from azure.identity import (
+        ClientAssertionCredential,
+        ClientSecretCredential,
+        DefaultAzureCredential,
+    )
 
     client_id = os.getenv("ARM_CLIENT_ID") or os.getenv("AZURE_CLIENT_ID")
     client_secret = os.getenv("ARM_CLIENT_SECRET") or os.getenv("AZURE_CLIENT_SECRET")
     tenant_id = os.getenv("ARM_TENANT_ID") or os.getenv("AZURE_TENANT_ID")
+    if _use_oidc() and client_id and tenant_id:
+        return ClientAssertionCredential(
+            tenant_id=tenant_id,
+            client_id=client_id,
+            func=_github_oidc_token,
+        )
     if client_id and client_secret and tenant_id:
         return ClientSecretCredential(
             tenant_id=tenant_id,
