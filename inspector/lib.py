@@ -3348,6 +3348,14 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         image_sku = "server"
         if "arm" in (srv_data.cpu_architecture or "").lower():
             image_sku = "server-arm64"
+        # Confidential VM sizes (DCas/DCes/ECas/…): sc-runner rewrites the image to a
+        # ConfidentialVmSupported URN and sets securityProfile; gen1 images are invalid.
+        try:
+            from sc_runner.resources.azure import _azure_confidential_kind
+
+            azure_cvm = _azure_confidential_kind(server) is not None
+        except Exception:
+            azure_cvm = False
         done = False
         for region in candidate_regions(vendor, server, regions):
             logger.info(f"Trying {region}")
@@ -3374,8 +3382,8 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                     instance_started = True
                     break
                 except Exception:
-                    if image_sku.endswith("-gen1"):
-                        # we already know it's a gen1 instance, don't try to create twice with the same options
+                    if image_sku.endswith("-gen1") or azure_cvm:
+                        # gen1 already tried, or CVM sizes must stay on Gen2 CVM images
                         break
                     # The selected VM size 'Standard_A0' cannot boot Hypervisor Generation '2'. If this was a
                     # Create operation please check that the Hypervisor Generation of the Image matches the

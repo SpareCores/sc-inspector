@@ -326,19 +326,25 @@ def try_start_dbaas_inspect(
     instance_logger,
     instance_timing,
     error_msgs,
-) -> bool:
-    """Provision managed DB + client VM for the pending DBaaS task set."""
+) -> tuple[bool, bool]:
+    """Provision managed DB + client VM for the pending DBaaS task set.
+
+    Returns ``(started, attempted_provision)``. When every region is skipped by
+    pre-flight checks (SKU not offered, quota, no client), ``attempted_provision``
+    is False so the caller can soft-skip without failing the job.
+    """
     from lib import DbaasDbTask
 
     dbaas_tasks = [t for t in tasks if isinstance(t, DbaasDbTask)]
     if not dbaas_tasks:
-        return False
+        return False, False
 
     provision = provision_spec(target)
     # Fixed, DB-size-independent sizing (see DbaasClientRequirements) — no need
     # to merge per-task requirements the way multi-VM's companion sizing does.
     client_req = dbaas_client_req()
     slug = stack_slug(target)
+    attempted_provision = False
 
     for kind, location in _dbaas_location_candidates(
         vendor, target, regions, zones, zone_to_region
@@ -386,6 +392,7 @@ def try_start_dbaas_inspect(
             continue
 
         for client in clients:
+            attempted_provision = True
             success, region_fatal = _try_provision_dbaas_stack(
                 vendor,
                 target,
@@ -402,7 +409,7 @@ def try_start_dbaas_inspect(
                 error_msgs,
             )
             if success:
-                return True
+                return True, True
             if region_fatal:
                 logging.info(
                     "Region-level resource limit in %s/%s; skipping remaining "
@@ -411,7 +418,7 @@ def try_start_dbaas_inspect(
                     location,
                 )
                 break
-    return False
+    return False, attempted_provision
 
 
 def start_dbaas_inspect(
@@ -462,7 +469,7 @@ def start_dbaas_inspect(
         base64.b64encode(ssh_deploy_key.encode("utf-8")).decode("ascii") if ssh_deploy_key else ""
     )
 
-    started = try_start_dbaas_inspect(
+    started, attempted_provision = try_start_dbaas_inspect(
         executor,
         lock,
         data_dir,
@@ -486,6 +493,16 @@ def start_dbaas_inspect(
             repo.push_path(data_dir, f"DBaaS creation timing from {repo.gha_url()}")
     if not started:
         record_instance_start_failure(lock, data_dir, dbaas_tasks, error_msgs)
+        # Pre-flight only (SKU not offered / quota / no client in any region):
+        # record the failure for cooldown, but do not fail the workflow — same
+        # posture as VM start when capacity is exhausted everywhere.
+        if not attempted_provision:
+            logging.warning(
+                "DBaaS %s/%s: no region with SKU/quota/client availability; skipping",
+                vendor,
+                target.instance_key,
+            )
+            return
         raise RuntimeError(
             error_msgs[0] if error_msgs else "DBaaS stack was not provisioned in any region"
         )
