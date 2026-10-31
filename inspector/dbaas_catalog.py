@@ -156,6 +156,40 @@ def _upcloud_plan_fields(
     return step, bands, backups
 
 
+# Azure Flexible Server Sku.Tier values (azure-native SkuTier / ARM).
+# sc-data stores the classic combined sku as api_reference_object.sku_name
+# (e.g. GP_Standard_D4ads_v5); database.family is the *series* (Dadsv5), not the tier.
+_AZURE_SKU_PREFIX_TO_TIER = {
+    "B": "Burstable",
+    "GP": "GeneralPurpose",
+    "MO": "MemoryOptimized",
+}
+_AZURE_SKU_TIERS = frozenset(_AZURE_SKU_PREFIX_TO_TIER.values())
+
+
+def _azure_edition_from_api_object(api_reference_object: dict) -> str | None:
+    """Map crawler ``GP_/MO_/B_`` sku_name prefix to Flexible Server Sku.Tier."""
+    sku = str(api_reference_object.get("sku_name") or "")
+    prefix, sep, rest = sku.partition("_")
+    if not sep or prefix not in _AZURE_SKU_PREFIX_TO_TIER:
+        return None
+    # Require a compute size after the prefix (Standard_* / Basic_*).
+    if not (rest.startswith("Standard_") or rest.startswith("Basic_")):
+        return None
+    return _AZURE_SKU_PREFIX_TO_TIER[prefix]
+
+
+def _azure_edition_from_native_id(native_id: str) -> str:
+    """Last-resort tier guess from compute size letter (B/E/EC → Burstable/MO)."""
+    bare = native_id.removeprefix("Standard_").removeprefix("Basic_")
+    if bare.startswith("B"):
+        return "Burstable"
+    # Memory Optimized Flexible Server sizes are E* / EC* (MO_* sku_name).
+    if bare.startswith(("E", "M")):
+        return "MemoryOptimized"
+    return "GeneralPurpose"
+
+
 def _sku_id(vendor_id: str, native_id: str, edition: str | None, engine_version: str) -> str:
     if vendor_id == "azure":
         edition_part = edition or "GeneralPurpose"
@@ -165,9 +199,21 @@ def _sku_id(vendor_id: str, native_id: str, edition: str | None, engine_version:
     return f"{native_id}:{engine_version}"
 
 
-def _edition_for_row(vendor_id: str, family: str | None) -> str | None:
+def _edition_for_row(
+    vendor_id: str,
+    family: str | None,
+    *,
+    native_id: str | None = None,
+    api_reference_object: dict | None = None,
+) -> str | None:
     if vendor_id == "azure":
-        return family or "GeneralPurpose"
+        # Prefer GP_/MO_/B_ from api_reference_object; never use family (series).
+        from_obj = _azure_edition_from_api_object(api_reference_object or {})
+        if from_obj:
+            return from_obj
+        if family in _AZURE_SKU_TIERS:
+            return family
+        return _azure_edition_from_native_id(native_id or "")
     if vendor_id == "gcp":
         if family and (
             "perf-optimized" in family
@@ -290,7 +336,13 @@ def available_managed_dbs(
                     if not eng_ver:
                         continue
                     native_id = row["api_reference"] or db_id
-                    edition = _edition_for_row(vendor_id, row["family"])
+                    api_obj = _parse_json_object(row["api_reference_object"])
+                    edition = _edition_for_row(
+                        vendor_id,
+                        row["family"],
+                        native_id=native_id,
+                        api_reference_object=api_obj,
+                    )
                     storage_size = row["storage_size"]
                     storage_extra_min = row["storage_extra_min"]
                     storage_extra_max = row["storage_extra_max"]
@@ -298,9 +350,7 @@ def available_managed_dbs(
                     plan_bands: tuple[tuple[int, int], ...] = ()
                     plan_backups: tuple[str, ...] = ()
                     if vendor_id == "upcloud":
-                        plan_step, plan_bands, plan_backups = _upcloud_plan_fields(
-                            _parse_json_object(row["api_reference_object"])
-                        )
+                        plan_step, plan_bands, plan_backups = _upcloud_plan_fields(api_obj)
                     # Flexible UpCloud (rdb.*) plans leave storage_size NULL;
                     # use the first plan_storage band (GiB) as the floor.
                     if storage_size is None and plan_bands:
