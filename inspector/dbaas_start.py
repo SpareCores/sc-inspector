@@ -278,6 +278,8 @@ def _try_provision_dbaas_stack(
         stack_spec=stack_spec,
     )
     _destroy_dbaas_stack(vendor, resource_opts, instance_logger, error_msgs)
+    # error_msgs accumulates across regions; judge this attempt only on its own errors.
+    attempt_start = len(error_msgs)
     pulumi_output = []
     stack_opts = pulumi_stack_opts(
         error_msgs, pulumi_output, instance_logger, instance_timing, client.api_reference
@@ -303,9 +305,9 @@ def _try_provision_dbaas_stack(
             region,
             client.api_reference,
         )
-        if not error_msgs:
+        if len(error_msgs) == attempt_start:
             error_msgs.append(str(exc))
-        region_fatal = is_region_fatal_error(exc, error_msgs)
+        region_fatal = is_region_fatal_error(exc, error_msgs[attempt_start:])
         _destroy_dbaas_stack(vendor, resource_opts, instance_logger, error_msgs)
         return False, region_fatal
 
@@ -412,7 +414,7 @@ def try_start_dbaas_inspect(
                 return True, True
             if region_fatal:
                 logging.info(
-                    "Region-level resource limit in %s/%s; skipping remaining "
+                    "Region-level failure in %s/%s; skipping remaining "
                     "client candidates, trying next region",
                     vendor,
                     location,

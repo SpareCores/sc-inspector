@@ -139,6 +139,9 @@ REGION_FATAL_ERROR_MARKERS = (
     "RouteTableLimitExceeded",
     "SecurityGroupLimitExceeded",
     "AddressLimitExceeded",
+    # Azure ARM opaque failure; seen on Flexible Server DC*ads_v5 creates in
+    # northeurope for every size while westeurope succeeds.
+    'Code="InternalServerError"',
 )
 # Same-location Pulumi retries (retry_locked): only errors that may clear in seconds.
 # Capacity shortages should fail over to the next region/zone immediately.
