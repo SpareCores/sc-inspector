@@ -142,6 +142,14 @@ REGION_FATAL_ERROR_MARKERS = (
     # Azure ARM opaque failure; seen on Flexible Server DC*ads_v5 creates in
     # northeurope for every size while westeurope succeeds.
     'Code="InternalServerError"',
+    # Azure DBaaS RG name is per region+slug; another client SKU cannot recreate it.
+    "cannot create already existing resource",
+    # Azure regional VM core cap blocks every companion size in that location.
+    "exceeding approved Total Regional Cores quota",
+)
+# SKU/tier mismatches that will fail in every region — stop the DBaaS location walk.
+SKU_FATAL_ERROR_MARKERS = (
+    "CannotProvisionComputeNameOnComputeTier",
 )
 # Same-location Pulumi retries (retry_locked): only errors that may clear in seconds.
 # Capacity shortages should fail over to the next region/zone immediately.
@@ -2735,6 +2743,12 @@ def is_retryable_pulumi_error(exc: BaseException, error_msgs: list[str] | None =
 def is_region_fatal_error(exc: BaseException, error_msgs: list[str] | None = None) -> bool:
     text = pulumi_error_text(exc, error_msgs)
     return any(marker in text for marker in REGION_FATAL_ERROR_MARKERS)
+
+
+def is_sku_fatal_error(exc: BaseException, error_msgs: list[str] | None = None) -> bool:
+    """True when the managed-DB SKU/tier cannot succeed in any region."""
+    text = pulumi_error_text(exc, error_msgs)
+    return any(marker in text for marker in SKU_FATAL_ERROR_MARKERS)
 
 
 def is_gcp_host_maintenance_policy_error(error_text: str) -> bool:

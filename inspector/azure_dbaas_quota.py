@@ -465,6 +465,21 @@ def check_dbaas_postgres_quota(
     )
 
 
+def vm_regional_cores_available(region: str) -> int:
+    """Available Microsoft.Compute regional cores in ``region`` (0 if unknown)."""
+    if _skip_quota_check():
+        return 0
+    sub = _subscription_id()
+    if not sub:
+        return 0
+    try:
+        cores = _quota_lookup(_vm_quotas(sub, region), "cores")
+    except Exception as exc:
+        logging.warning("DBaaS VM cores lookup failed for %s: %s", region, exc)
+        return 0
+    return cores.available if cores is not None else 0
+
+
 def filter_clients_by_vm_quota(vendor: str, region: str, clients) -> list:
     """Return ranked clients that pass VM quota and SKU restriction checks."""
     if _skip_quota_check() or vendor != "azure" or not clients:

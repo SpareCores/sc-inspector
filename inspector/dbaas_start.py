@@ -20,6 +20,7 @@ from lib import (
     boot_meta_for_task,
     inspector_user_data_replacements,
     is_region_fatal_error,
+    is_sku_fatal_error,
     pulumi_stack_opts,
     record_instance_start_failure,
     record_timing_api,
@@ -151,6 +152,32 @@ def _dbaas_client_location(vendor: str, region: str) -> str:
     return region
 
 
+def _prefer_azure_regions_with_quota(
+    regions: list[str],
+    *,
+    pg_sku: str,
+    pg_vcpus: int,
+    prices: dict[str, float],
+) -> list[str]:
+    """Reorder Azure regions: Flexible Server offer+quota first, then VM core headroom, then price.
+
+    Recent start-dbaas runs (e.g. 41428276071) succeeded in quota-bearing regions such as
+    eastus2 / uaenorth, while pure price order spent hours on offer-restricted or
+    SKU-not-offered locations (eastus, …) and then piled companions into a 10-core eastus2.
+    """
+    from azure_dbaas_quota import vm_regional_cores_available
+
+    def sort_key(region: str) -> tuple:
+        ok, _reason = check_dbaas_postgres_quota(
+            "azure", region, pg_sku, pg_vcpus
+        )
+        cores = vm_regional_cores_available(region) if ok else -1
+        price = prices.get(region, float("inf"))
+        return (0 if ok else 1, -cores, price, region)
+
+    return sorted(regions, key=sort_key)
+
+
 def _dbaas_location_candidates(
     vendor: str,
     target: ManagedDbTarget,
@@ -174,6 +201,14 @@ def _dbaas_location_candidates(
         return [("zone", z) for z in ordered_zones]
 
     ordered = sc_data.sort_by_price(list(regions), prices)
+    if vendor == "azure":
+        provision = provision_spec(target)
+        ordered = _prefer_azure_regions_with_quota(
+            ordered,
+            pg_sku=provision["sku_name"],
+            pg_vcpus=int(target.cpu_count),
+            prices=prices,
+        )
     logging.info("DBaaS region order for %s/%s: %s", vendor, target.native_id, ordered)
     return [("region", r) for r in ordered]
 
@@ -214,9 +249,12 @@ def _try_provision_dbaas_stack(
     instance_logger,
     instance_timing,
     error_msgs,
-) -> tuple[bool, bool]:
-    """Returns (success, region_fatal). region_fatal means don't bother
-    trying another client candidate in this same region/zone."""
+) -> tuple[bool, bool, bool]:
+    """Returns (success, region_fatal, sku_fatal).
+
+    region_fatal: skip remaining clients in this region/zone.
+    sku_fatal: managed-DB SKU cannot succeed in any region — abort the walk.
+    """
     logging.info(
         "DBaaS: %s/%s + client %s in %s",
         vendor,
@@ -298,7 +336,7 @@ def _try_provision_dbaas_stack(
             instance_timing=instance_timing,
             error_msgs=error_msgs,
         )
-        return True, False
+        return True, False, False
     except Exception as exc:
         logging.exception(
             "DBaaS create failed for %s with client %s",
@@ -307,9 +345,11 @@ def _try_provision_dbaas_stack(
         )
         if len(error_msgs) == attempt_start:
             error_msgs.append(str(exc))
-        region_fatal = is_region_fatal_error(exc, error_msgs[attempt_start:])
+        attempt_errors = error_msgs[attempt_start:]
+        sku_fatal = is_sku_fatal_error(exc, attempt_errors)
+        region_fatal = sku_fatal or is_region_fatal_error(exc, attempt_errors)
         _destroy_dbaas_stack(vendor, resource_opts, instance_logger, error_msgs)
-        return False, region_fatal
+        return False, region_fatal, sku_fatal
 
 
 def try_start_dbaas_inspect(
@@ -395,7 +435,7 @@ def try_start_dbaas_inspect(
 
         for client in clients:
             attempted_provision = True
-            success, region_fatal = _try_provision_dbaas_stack(
+            success, region_fatal, sku_fatal = _try_provision_dbaas_stack(
                 vendor,
                 target,
                 client,
@@ -412,6 +452,13 @@ def try_start_dbaas_inspect(
             )
             if success:
                 return True, True
+            if sku_fatal:
+                logging.info(
+                    "SKU-level failure for %s/%s; not trying other regions",
+                    vendor,
+                    target.instance_key,
+                )
+                return False, True
             if region_fatal:
                 logging.info(
                     "Region-level failure in %s/%s; skipping remaining "
