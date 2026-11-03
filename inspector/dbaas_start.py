@@ -58,6 +58,7 @@ def _dbaas_user_data_replacements(
         repo_url_ssh,
         role="dbaas_client",
         include_run_upload=True,
+        dbaas_instance_key=target.instance_key,
     )
     repl.update(
         {

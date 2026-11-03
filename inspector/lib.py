@@ -2110,6 +2110,24 @@ def shutdown_mins_for_inspect(vendor: str, server: str, timeout_mins: int) -> in
     return max(from_boot, from_catalog)
 
 
+def shutdown_mins_for_dbaas_client(vendor: str, instance_key: str, timeout_mins: int) -> int:
+    """Wall-clock minutes for ``shutdown +N`` on a DBaaS client VM.
+
+    Mirrors ``shutdown_mins_for_inspect``, but floors on ``max_dbaas_runtime`` (the
+    managed-DB ``instance_key``'s own DbaasDbTask set, e.g. ~2h for the
+    pgbench-only DBaaS benchmark) instead of ``max_server_runtime`` (the client
+    VM's *full* multi-VM/companion task catalog, which can include hours-long
+    unrelated benchmarks the DBaaS client never runs). Using the wrong floor left
+    DBaaS clients scheduled to self-destruct ~44h out instead of ~2h, with no
+    other absolute backstop if the benchmark's own commit/shutdown never ran.
+    """
+    from_boot = timeout_mins + 30  # setup / user-data headroom
+    from_catalog = int(
+        (max_dbaas_runtime(vendor, instance_key) + CLEANUP_BOOT_SLACK).total_seconds() / 60
+    )
+    return max(from_boot, from_catalog)
+
+
 @cache
 def get_last_start(data_dir, vendor, server):
     tasks = list(get_tasks(vendor))
@@ -2161,6 +2179,23 @@ def get_last_end_dbaas(data_dir, vendor, instance_key):
     if not meta_ends:
         return None
     return max(meta_ends)
+
+
+def dbaas_instance_task_metas(
+    vendor: str,
+    instance_key: str,
+    data_dir: str | os.PathLike,
+) -> list[tuple[Task, Meta]]:
+    """Applicable (task, meta) pairs for a managed-DB instance_key (cleanup decisions).
+
+    Catalog-independent twin of ``instance_task_metas``: driven only by the task
+    defs for ``vendor`` and the ``instance_key`` string, so it still works when
+    ``available_managed_dbs`` has 0 ACTIVE rows for the vendor (e.g. a temporary
+    sc-data gap) and when no S3 run record was ever written (e.g. a boot failure
+    before the benchmark container started).
+    """
+    tasks = _applicable_dbaas_tasks(vendor, instance_key)
+    return [(task, load_task_meta(task, data_dir=data_dir)) for task in tasks]
 
 
 def _as_utc(dt: datetime | None) -> datetime | None:
@@ -2337,6 +2372,7 @@ def inspector_user_data_replacements(
     db_disk_iops: str = "",
     db_disk_throughput: str = "",
     include_run_upload: bool | None = None,
+    dbaas_instance_key: str = "",
 ) -> dict[str, str]:
     import s3_runs
 
@@ -2365,7 +2401,11 @@ def inspector_user_data_replacements(
         "REGION": region or "",
         "ZONE": zone or "",
         "ACCELERATOR_COUNT": srv_data.accelerator_count,
-        "SHUTDOWN_MINS": shutdown_mins_for_inspect(vendor, server, timeout_mins),
+        "SHUTDOWN_MINS": (
+            shutdown_mins_for_dbaas_client(vendor, dbaas_instance_key, timeout_mins)
+            if role == "dbaas_client" and dbaas_instance_key
+            else shutdown_mins_for_inspect(vendor, server, timeout_mins)
+        ),
         "HOST_TIMING_DIR": host_timing_dir(vendor, server, github_run_id()),
         "LOG_UPLOAD_URL": log_url,
         "RUN_UPLOAD_URL": run_url,

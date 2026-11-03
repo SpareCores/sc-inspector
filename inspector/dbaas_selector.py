@@ -39,6 +39,17 @@ def stack_slug(target: ManagedDbTarget) -> str:
     return f"{native}-pg{target.engine_version}"
 
 
+def stack_slug_for_instance_key(instance_key: str) -> str:
+    """Stack slug derived from an ``instance_key`` string alone, no catalog target needed.
+
+    Mirrors the fixed shape of ``ManagedDbTarget.instance_key``:
+    ``"{native_id}/postgres/{engine_version}/{ha_mode}"``. Lets cleanup find/destroy
+    a stack for a SKU/region the catalog no longer (or not yet) lists.
+    """
+    native_id, _engine, engine_version, _ha_mode = instance_key.split("/")
+    return stack_slug(SimpleNamespace(native_id=native_id, engine_version=engine_version))
+
+
 def target_sizing_stub(target: ManagedDbTarget) -> SimpleNamespace:
     """Sizing object compatible with benchmark_tiers client/disk helpers."""
     return SimpleNamespace(

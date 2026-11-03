@@ -375,7 +375,7 @@ def start_dbaas(ctx, vendor, instance_key, force, limit):
 @click.option("--threads", type=int, default=32, show_default=True)
 @click.option("--vendor", type=str, default=None, help="Vendor to clean up DBaaS stacks for")
 def cleanup_dbaas(ctx, threads, vendor):
-    """S3 run-record driven cleanup for DBaaS stacks."""
+    """S3 run-record driven cleanup for DBaaS stacks, plus an absolute-timeout safety net."""
     from sc_runner.resources import supported_vendors
 
     repo_path = ctx.parent.params["repo_path"]
@@ -384,12 +384,17 @@ def cleanup_dbaas(ctx, threads, vendor):
     records = _dbaas_run_records_for_catalog(catalog)
     if not records:
         logging.info("No completed DBaaS run records for catalog%s", f" vendor={vendor}" if vendor else "")
-        return
-    try:
-        _run_dbaas_s3_cleanup(repo_path, records, threads=threads)
-    except Exception:
-        logging.exception("DBaaS cleanup failed")
-        raise
+    else:
+        try:
+            _run_dbaas_s3_cleanup(repo_path, records, threads=threads)
+        except Exception:
+            logging.exception("DBaaS cleanup failed")
+            raise
+
+    # Catalog/S3-record independent: catches stacks whose benchmark never ran far
+    # enough to write either (e.g. a hung/failed client boot), on this job's
+    # frequent (every 15 min) schedule rather than waiting for cleanup-sweep.
+    _run_dbaas_absolute_timeout_cleanup(repo_path, vendor, threads=threads)
 
 
 def cleanup_task(vendor, server, data_dir, regions=[], zones=[], force=False):
@@ -766,6 +771,108 @@ def _destroy_dbaas_stack_by_name(vendor: str, stack_name: str) -> None:
             logging.warning("Destroy for stack %s is locked; will retry next sweep", stack_name)
 
 
+def _dbaas_instance_keys_on_disk(repo_dbaas: str, vendor: str) -> set[str]:
+    """Discover DBaaS ``instance_key``s purely from ``meta.json`` files on disk.
+
+    Independent of the current catalog (``available_managed_dbs``): a stack for a
+    SKU/region the catalog no longer (or not yet) offers is still found this way -
+    e.g. when sc-data temporarily has zero ACTIVE ``database`` rows for a vendor,
+    as happened for Azure (see ``dbaas/<vendor>/<instance_key>/<task_name>/meta.json``
+    layout from ``dbaas_selector.dbaas_data_dir``).
+    """
+    vendor_root = os.path.join(repo_dbaas, vendor)
+    keys: set[str] = set()
+    if not os.path.isdir(vendor_root):
+        return keys
+    for dirpath, _dirnames, filenames in os.walk(vendor_root):
+        if lib.META_NAME not in filenames:
+            continue
+        instance_dir = os.path.dirname(dirpath)
+        instance_key = os.path.relpath(instance_dir, vendor_root).replace(os.sep, "/")
+        if instance_key and instance_key != ".":
+            keys.add(instance_key)
+    return keys
+
+
+def _run_dbaas_absolute_timeout_cleanup(
+    repo_path: str,
+    vendor: str | None,
+    *,
+    threads: int,
+    force: bool = False,
+) -> None:
+    """Meta-driven absolute-timeout destroy for DBaaS stacks (safety net).
+
+    Unlike ``_run_dbaas_s3_cleanup`` (only *completed* S3 run records) and
+    ``_run_dbaas_meta_cleanup_for_vendor`` (only catalog-listed SKUs), this scans
+    every managed-DB ``instance_key`` with data on disk and destroys once its own
+    task timeouts (e.g. ~2h total for the pgbench-only DBaaS benchmark) plus
+    ``DESTROY_AFTER`` have elapsed with no end time recorded - regardless of
+    whether the catalog currently lists the SKU or an S3 run record was ever
+    written. This is what catches a stack whose client VM boot/user_data hung or
+    failed before the benchmark container (and thus any S3 record) ever ran:
+    previously such a stack could sit running indefinitely.
+    """
+    from datetime import datetime
+
+    from dbaas_selector import stack_slug_for_instance_key
+    from sc_runner.resources import supported_vendors
+    import concurrent.futures
+    import pulumi_backend
+
+    repo_dbaas = os.path.join(repo_path, "dbaas")
+    dbaas_vendors = [vendor] if vendor else sorted({"aws", "azure", "gcp", "ovh", "upcloud", "vultr"})
+
+    now = datetime.now()
+    to_destroy: list[tuple[str, str, str]] = []  # (vendor, instance_key, reason)
+    for vnd in dbaas_vendors:
+        if vnd not in supported_vendors:
+            continue
+        for instance_key in sorted(_dbaas_instance_keys_on_disk(repo_dbaas, vnd)):
+            instance_data_dir = os.path.join(repo_dbaas, vnd, instance_key)
+            task_metas = lib.dbaas_instance_task_metas(vnd, instance_key, instance_data_dir)
+            if not task_metas:
+                continue
+            reason = lib.cleanup_destroy_reason(task_metas, now, force=force)
+            if reason:
+                to_destroy.append((vnd, instance_key, reason))
+
+    if not to_destroy:
+        return
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=threads) as executor:
+        futures = []
+        for vnd, instance_key, reason in to_destroy:
+            slug = stack_slug_for_instance_key(instance_key)
+            stack_names = pulumi_backend.stack_names_ending_with(vnd, {slug})
+            if not stack_names:
+                logging.info(
+                    "DBaaS absolute timeout for %s/%s (%s) but no matching Pulumi stack found",
+                    vnd,
+                    instance_key,
+                    reason,
+                )
+                continue
+            for name in stack_names:
+                logging.info(
+                    "Destroying DBaaS stack %s for %s/%s: %s",
+                    name,
+                    vnd,
+                    instance_key,
+                    reason,
+                )
+                futures.append((vnd, name, executor.submit(_destroy_dbaas_stack_by_name, vnd, name)))
+        failures = False
+        for vnd, name, future in futures:
+            try:
+                future.result()
+            except Exception:
+                logging.exception("DBaaS absolute-timeout cleanup failed for %s/%s", vnd, name)
+                failures = True
+        if failures:
+            raise Exception("Errors occurred during DBaaS absolute-timeout cleanup")
+
+
 def _run_dbaas_meta_cleanup_for_vendor(
     repo_path: str,
     vendor: str | None,
@@ -1000,6 +1107,11 @@ def cleanup_sweep(ctx, threads, force, all_regions, lookback_mins, data_only, ve
         data_only=data_only,
         force=force,
     )
+
+    # Catalog/S3-record independent absolute timeout: scans every DBaaS
+    # instance_key with data on disk (not just ones the current catalog lists)
+    # and destroys once its own task timeouts + DESTROY_AFTER have elapsed.
+    _run_dbaas_absolute_timeout_cleanup(repo_path, vendor, threads=threads, force=force)
 
 
 @cli.command()
