@@ -230,26 +230,14 @@ def start(ctx, exclude, start_only, force, vendor, limit):
     repo.push_path(os.path.join(ctx.parent.params["repo_path"], "data"), f"Start finished {repo.gha_url()}")
     logging.info("Git push successful")
 
-    # Print all active non-daemon threads and their stack traces
-    non_daemon_threads = []
+    # main() exits without joining these; log them so leaks stay diagnosable.
     for thread in threading.enumerate():
         if thread == threading.current_thread() or thread.daemon:
-            # skip main thread and daemon threads
             continue
         logging.info(f"Thread {thread.name} (daemon={thread.daemon})")
         stack = traceback.format_stack(sys._current_frames()[thread.ident])
         for line in stack:
             logging.info(f"  {line.strip()}")
-        non_daemon_threads.append(thread)
-
-    if non_daemon_threads:
-        # possibly running into this: https://github.com/pulumi/pulumi/issues/16095, do a forceful exit
-        # without waiting for non-daemon threads to finish
-        logging.info(f"Force exiting due to {len(non_daemon_threads)} non-daemon threads still running")
-        if exception:
-            os._exit(1)
-        else:
-            os._exit(0)
 
     if exception:
         # fail if an exception was raised in should_start
@@ -1425,5 +1413,56 @@ def companion(vendor, instance, listen_port):
     run_companion(vendor, instance, listen_port)
 
 
+def _exit_now(code: int):
+    """Flush output and exit without interpreter teardown.
+
+    After heavy Pulumi/gRPC use, teardown can block forever with no Python
+    thread left to blame (https://github.com/pulumi/pulumi/issues/16095), and
+    in CI nothing kills the process until the job is cancelled.
+    """
+    import faulthandler
+
+    # If flushing itself blocks, dump every thread's stack and exit anyway.
+    faulthandler.dump_traceback_later(60, exit=True)
+    sentry_sdk = sys.modules.get("sentry_sdk")
+    if sentry_sdk is not None:
+        try:
+            sentry_sdk.flush(timeout=5)
+        except Exception:
+            pass
+    for handler in logging.getLogger().handlers:
+        try:
+            handler.flush()
+        except Exception:
+            pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    os._exit(code)
+
+
+def main(args=None):
+    try:
+        # Standalone mode always ends in SystemExit, including on success.
+        cli.main(args=args)
+        code = 0
+    except SystemExit as e:
+        if e.code is None:
+            code = 0
+        elif isinstance(e.code, int):
+            code = e.code
+        else:
+            print(e.code, file=sys.stderr)
+            code = 1
+    except BaseException:
+        import traceback
+
+        traceback.print_exc()
+        code = 1
+    _exit_now(code)
+
+
 if __name__ == "__main__":
-    cli()
+    main()
