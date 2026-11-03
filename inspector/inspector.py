@@ -614,6 +614,7 @@ def _run_dbaas_s3_cleanup(repo_path: str, records: list, *, threads: int) -> Non
 def cleanup_s3_stack(vendor: str, records: list, *, data_dir: str | None = None) -> None:
     """Clean up one Pulumi stack; delete S3 markers only after the instance is gone."""
     from sc_runner import runner
+    from sc_runner.runner import PendingOperationsError
     import s3_runs
     import tempfile
 
@@ -693,6 +694,7 @@ def cleanup_s3_stack(vendor: str, records: list, *, data_dir: str | None = None)
             len(keys),
             record.key,
         )
+        stack_name = getattr(stack, "name", f"{vendor}/{record.instance}/{location}")
         try:
             lib.retry_locked_cleanup(
                 lambda: runner.destroy_stack(
@@ -712,9 +714,79 @@ def cleanup_s3_stack(vendor: str, records: list, *, data_dir: str | None = None)
                 len(keys),
             )
             return
+        except PendingOperationsError as exc:
+            logging.warning(
+                "Destroy of %s/%s in %s left pending operations; clearing empty-stack "
+                "pending state and removing. Confirm no orphaned cloud resources remain: %s",
+                vendor,
+                record.instance,
+                location,
+                exc,
+            )
+            try:
+                stack = lib.retry_locked_cleanup(
+                    lambda: runner.get_stack(vendor, pulumi_opts, resource_opts),
+                    cancel_func=cancel_lock,
+                )
+            except lib.StackLockedError:
+                logging.warning(
+                    "Stack %s/%s in %s locked while clearing pending ops; retaining "
+                    "%d run record(s) until cleanup succeeds",
+                    vendor,
+                    record.instance,
+                    location,
+                    len(keys),
+                )
+                return
+            _clear_pending_ops_and_remove_stack(stack, stack_name)
 
     for key in keys:
         s3_runs.delete_run_record(key)
+
+
+def _clear_pending_ops_and_remove_stack(stack, stack_name: str) -> None:
+    """Clear pending_operations from an otherwise-empty stack and remove it.
+
+    Compat / safety net for stacks whose Create was interrupted before the
+    provider confirmed anything: ``pulumi destroy`` leaves the pending CREATE
+    (nothing confirmed to delete), and older sc-runner then refused
+    ``remove_stack``, failing every cleanup pass forever. Only clears when no
+    confirmed custom resources remain.
+    """
+    import copy
+
+    from pulumi.automation import Deployment
+
+    exported = stack.export_stack()
+    deployment = copy.deepcopy(exported.deployment or {})
+    resources = deployment.get("resources", [])
+    custom = [
+        res
+        for res in resources
+        if res.get("urn")
+        and res.get("type") != "pulumi:pulumi:Stack"
+        and res.get("custom", True)
+    ]
+    pending = (
+        deployment.pop("pending_operations", None)
+        or deployment.pop("pendingOperations", None)
+        or []
+    )
+    if custom:
+        raise RuntimeError(
+            f"Refusing to clear pending ops on {stack_name}: {len(custom)} confirmed "
+            f"custom resource(s) remain alongside {len(pending)} pending operation(s)"
+        )
+    if pending:
+        logging.warning(
+            "Clearing %d pending operation(s) from empty stack %s and removing it. "
+            "Confirm no orphaned cloud resources remain: %s",
+            len(pending),
+            stack_name,
+            pending,
+        )
+        stack.import_stack(Deployment(version=exported.version, deployment=deployment))
+    stack.workspace.remove_stack(stack.name, force=True)
 
 
 def _destroy_dbaas_stack_by_name(vendor: str, stack_name: str) -> None:
@@ -728,6 +800,7 @@ def _destroy_dbaas_stack_by_name(vendor: str, stack_name: str) -> None:
     skips that (and doesn't require reconstructing a valid resource_opts).
     """
     from sc_runner import runner
+    from sc_runner.runner import PendingOperationsError
     import tempfile
 
     with tempfile.TemporaryDirectory() as tempdir:
@@ -769,6 +842,28 @@ def _destroy_dbaas_stack_by_name(vendor: str, stack_name: str) -> None:
             )
         except lib.StackLockedError:
             logging.warning("Destroy for stack %s is locked; will retry next sweep", stack_name)
+        except PendingOperationsError as exc:
+            # sc-runner <0.0.90 refused remove_stack when pending CREATEs remained
+            # on an otherwise empty stack (e.g. azure ... d2sv3-pg18). Clear and
+            # remove so absolute-timeout / meta cleanup can finish the batch.
+            logging.warning(
+                "Destroy of %s left pending operations; clearing empty-stack pending "
+                "state and removing. Confirm no orphaned cloud resources remain: %s",
+                stack_name,
+                exc,
+            )
+            try:
+                stack = lib.retry_locked_cleanup(
+                    lambda: runner.get_stack(vendor, pulumi_opts, {}),
+                    cancel_func=cancel_lock,
+                )
+            except lib.StackLockedError:
+                logging.warning(
+                    "Stack %s locked while clearing pending ops; will retry next sweep",
+                    stack_name,
+                )
+                return
+            _clear_pending_ops_and_remove_stack(stack, stack_name)
 
 
 def _dbaas_instance_keys_on_disk(repo_dbaas: str, vendor: str) -> set[str]:
