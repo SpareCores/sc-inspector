@@ -14,6 +14,7 @@ from pathlib import Path
 
 import docker
 
+import docker_util
 from companion_protocol import BenchmarkResult, Ping, Pong, RunBenchmark, Shutdown
 from lib import DB_DOCKER_OPTS
 from resource_tracker import RESOURCE_TRACKER_OUTPUT_FILENAME, uses_resource_tracker
@@ -114,7 +115,7 @@ def _docker_run(msg: RunBenchmark) -> BenchmarkResult:
     try:
         d = docker.from_env(timeout=msg.timeout_sec + 120)
         try:
-            image = d.images.pull(msg.image)
+            image = docker_util.pull_image(d, msg.image)
             env["TRACKER_CONTAINER_IMAGE"] = next(
                 iter(image.attrs.get("RepoDigests") or []),
                 msg.image,
@@ -138,9 +139,9 @@ def _docker_run(msg: RunBenchmark) -> BenchmarkResult:
                 break
             time.sleep(0.5)
         else:
-            container.stop(timeout=10)
+            docker_util.stop_container(container)
 
-        res = container.wait(timeout=60)
+        res = docker_util.wait_container(container)
         exit_code = int(res.get("StatusCode", 1))
         stdout = container.logs(stdout=True, stderr=False).decode("utf-8", errors="replace")
         stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")

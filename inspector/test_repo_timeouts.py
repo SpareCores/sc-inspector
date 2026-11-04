@@ -34,9 +34,11 @@ def test_network_and_local_commands_get_different_timeouts():
     assert repo.git_timeout(["push", "origin", "HEAD:main"]) == repo.GIT_NETWORK_TIMEOUT_SEC
     assert repo.git_timeout(["ls-remote", "--heads", "origin", "main"]) == repo.GIT_NETWORK_TIMEOUT_SEC
     assert repo.git_timeout(["clone", "--depth", "1", "url", "path"]) == repo.GIT_CLONE_TIMEOUT_SEC
-    assert repo.git_timeout(["status", "--porcelain"]) == repo.GIT_LOCAL_TIMEOUT_SEC
-    assert repo.git_timeout(["config", "--global", "gc.auto", "0"]) == repo.GIT_LOCAL_TIMEOUT_SEC
-    assert repo.GIT_NETWORK_TIMEOUT_SEC < repo.GIT_LOCAL_TIMEOUT_SEC
+    assert repo.git_timeout(["status", "--porcelain"]) == repo.GIT_CMD_TIMEOUT_SEC
+    assert repo.git_timeout(["rev-parse", "HEAD"]) == repo.GIT_CMD_TIMEOUT_SEC
+    assert repo.git_timeout(["config", "--global", "gc.auto", "0"]) == repo.GIT_CONFIG_TIMEOUT_SEC
+    # defaults from main (c583123): network ops get the longer budget
+    assert repo.GIT_CMD_TIMEOUT_SEC < repo.GIT_NETWORK_TIMEOUT_SEC < repo.GIT_CLONE_TIMEOUT_SEC
 
 
 def test_hanging_git_is_killed_and_reported_as_failed_command(hanging_git, tmp_path):
@@ -437,4 +439,40 @@ def test_checkout_after_clone_uses_the_long_checkout_timeout(tmp_path, monkeypat
     monkeypatch.setattr(repo, "_git_low_memory_configured", True)
     repo._clone_repo("https://example.invalid/repo.git", str(tmp_path / "c"), ("data/x",))
     assert seen == {"sparse-checkout": repo.GIT_CHECKOUT_TIMEOUT_SEC, "checkout": repo.GIT_CHECKOUT_TIMEOUT_SEC}
-    assert repo.GIT_CHECKOUT_TIMEOUT_SEC > repo.GIT_LOCAL_TIMEOUT_SEC
+    assert repo.GIT_CHECKOUT_TIMEOUT_SEC > repo.GIT_CMD_TIMEOUT_SEC
+
+
+# Ported from main (c583123): those tests mocked subprocess.run, which git no
+# longer goes through (see _run_git); same intent, checked on Popen.
+def _record_popen(monkeypatch):
+    seen = {}
+    real_popen = subprocess.Popen
+
+    class RecordingPopen(real_popen):
+        def communicate(self, input=None, timeout=None):
+            seen["timeout"] = timeout
+            return super().communicate(input=input, timeout=timeout)
+
+    monkeypatch.setattr(subprocess, "Popen", RecordingPopen)
+    return seen
+
+
+def test_run_git_command_passes_local_timeout(tmp_path, monkeypatch):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    seen = _record_popen(monkeypatch)
+    repo.run_git_command(["status", "--porcelain"], cwd=tmp_path)
+    assert seen["timeout"] == repo.GIT_CMD_TIMEOUT_SEC
+
+
+def test_run_git_command_passes_network_timeout(tmp_path, monkeypatch):
+    _fake_git(tmp_path, monkeypatch, "exit 0\n")
+    seen = _record_popen(monkeypatch)
+    repo.run_git_command(["fetch", "origin"], cwd=tmp_path)
+    assert seen["timeout"] == repo.GIT_NETWORK_TIMEOUT_SEC
+
+
+def test_run_git_command_timeout_propagates_as_failed_command(hanging_git, tmp_path):
+    # main raised subprocess.TimeoutExpired here; this branch raises
+    # CalledProcessError so every existing retry path handles it
+    with pytest.raises(subprocess.CalledProcessError):
+        repo.run_git_command(["fetch", "origin"], cwd=tmp_path, timeout=0.5)

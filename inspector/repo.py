@@ -42,9 +42,11 @@ _git_low_memory_configured = False
 # pushed concurrently) blocked forever while holding the push_paths lock, so no
 # later result was ever pushed and cleanup eventually destroyed the VM.
 GIT_NETWORK_COMMANDS = frozenset({"clone", "fetch", "pull", "push", "ls-remote"})
-GIT_NETWORK_TIMEOUT_SEC = float(os.environ.get("GIT_NETWORK_TIMEOUT_SEC", 300))
-GIT_LOCAL_TIMEOUT_SEC = float(os.environ.get("GIT_LOCAL_TIMEOUT_SEC", 600))
-GIT_CLONE_TIMEOUT_SEC = float(os.environ.get("GIT_CLONE_TIMEOUT_SEC", 900))
+# Defaults as introduced on main (c583123); overridable via the environment.
+GIT_CMD_TIMEOUT_SEC = float(os.environ.get("GIT_CMD_TIMEOUT_SEC", 2 * 60))  # local commands
+GIT_NETWORK_TIMEOUT_SEC = float(os.environ.get("GIT_NETWORK_TIMEOUT_SEC", 10 * 60))
+GIT_CONFIG_TIMEOUT_SEC = float(os.environ.get("GIT_CONFIG_TIMEOUT_SEC", 30))
+GIT_CLONE_TIMEOUT_SEC = float(os.environ.get("GIT_CLONE_TIMEOUT_SEC", 15 * 60))
 # Checkout right after a clone writes the whole working tree (non-sparse clones
 # on slow machines can take long); it is local disk work, not a network hang.
 GIT_CHECKOUT_TIMEOUT_SEC = float(os.environ.get("GIT_CHECKOUT_TIMEOUT_SEC", 3600))
@@ -82,7 +84,9 @@ def git_timeout(args: list[str]) -> float:
         return GIT_CLONE_TIMEOUT_SEC
     if subcommand in GIT_NETWORK_COMMANDS:
         return GIT_NETWORK_TIMEOUT_SEC
-    return GIT_LOCAL_TIMEOUT_SEC
+    if subcommand == "config":
+        return GIT_CONFIG_TIMEOUT_SEC
+    return GIT_CMD_TIMEOUT_SEC
 
 
 # Transport-level timeouts: detect a dead/stalled connection within ~1 minute
@@ -154,7 +158,7 @@ _TOP_LEVEL_GIT_LOCKS = ("index.lock", "shallow.lock", "packed-refs.lock", "HEAD.
 
 def stale_git_lock_age_sec() -> float:
     """Every git this process starts ends within its timeout + 2 grace periods; older locks are orphans."""
-    longest = max(GIT_NETWORK_TIMEOUT_SEC, GIT_LOCAL_TIMEOUT_SEC, GIT_CLONE_TIMEOUT_SEC, GIT_CHECKOUT_TIMEOUT_SEC)
+    longest = max(GIT_NETWORK_TIMEOUT_SEC, GIT_CMD_TIMEOUT_SEC, GIT_CLONE_TIMEOUT_SEC, GIT_CHECKOUT_TIMEOUT_SEC)
     return longest + 2 * GIT_TERM_GRACE_SEC + 60
 
 
@@ -616,7 +620,7 @@ def get_repo(repo_url=REPO_URL, repo_path=REPO_PATH, sparse_paths: tuple[str, ..
             raise
 
 
-def run_git_command(args, cwd, timeout: float | None = None):
+def run_git_command(args, cwd, *, timeout: float | None = None):
     """Helper function to run git commands using subprocess.
 
     Every call has a hard timeout (see ``git_timeout``): a git process that hangs
