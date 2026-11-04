@@ -235,3 +235,31 @@ def test_failed_clone_keeps_a_directory_that_existed_before(tmp_path, monkeypatc
     with pytest.raises(subprocess.CalledProcessError):
         repo._clone_repo("https://example.invalid/repo.git", str(target), None)
     assert (target / "keep.txt").exists()
+
+
+def test_deadline_caps_a_command_with_a_longer_default_timeout(hanging_git, tmp_path):
+    # push's own timeout is 300s; the deadline 0.5s away must win
+    started = time.monotonic()
+    with repo.git_deadline(time.monotonic() + 0.5):
+        with pytest.raises(subprocess.CalledProcessError) as exc:
+            repo.run_git_command(["push", "origin", "HEAD:main"], cwd=tmp_path)
+    assert time.monotonic() - started < 10
+    assert "timed out" in exc.value.stderr
+
+
+def test_passed_deadline_does_not_start_git(tmp_path, monkeypatch):
+    marker = tmp_path / "git-ran"
+    _fake_git(tmp_path, monkeypatch, f"touch {marker}\n")
+    with repo.git_deadline(time.monotonic() - 1):
+        with pytest.raises(subprocess.CalledProcessError) as exc:
+            repo.run_git_command(["fetch", "origin"], cwd=tmp_path)
+    assert "deadline already passed" in exc.value.stderr
+    assert not marker.exists()
+
+
+def test_nested_deadlines_keep_the_earliest_and_restore():
+    with repo.git_deadline(100.0):
+        with repo.git_deadline(200.0):
+            assert repo._git_deadline_state.deadline == 100.0
+        assert repo._git_deadline_state.deadline == 100.0
+    assert getattr(repo._git_deadline_state, "deadline", None) is None

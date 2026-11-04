@@ -6,7 +6,9 @@ import random
 import shutil
 import signal
 import subprocess
+import threading
 import time
+from contextlib import contextmanager
 from urllib.parse import urlparse, urlunparse
 from wrapt import synchronized
 
@@ -138,6 +140,25 @@ def _as_text(value) -> str:
     return value
 
 
+_git_deadline_state = threading.local()
+
+
+@contextmanager
+def git_deadline(deadline: float):
+    """Cap every git command run by this thread inside the block at ``deadline`` (monotonic).
+
+    push_paths' retry deadline used to be checked only between attempts, so one
+    attempt (fetch + ls-remote + fetch + push, each with its own timeout) could
+    overrun it by ~20 minutes. Nested deadlines keep the earliest.
+    """
+    previous = getattr(_git_deadline_state, "deadline", None)
+    _git_deadline_state.deadline = deadline if previous is None else min(previous, deadline)
+    try:
+        yield
+    finally:
+        _git_deadline_state.deadline = previous
+
+
 def _run_git(
     args: list[str],
     *,
@@ -158,6 +179,16 @@ def _run_git(
       command. git's partial output is kept in the exception.
     """
     timeout = git_timeout(args) if timeout is None else timeout
+    deadline = getattr(_git_deadline_state, "deadline", None)
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.CalledProcessError(
+                returncode=-1,
+                cmd=["git", *args],
+                stderr="git not started: push deadline already passed",
+            )
+        timeout = min(timeout, remaining)
     pipe = subprocess.PIPE if capture_output else None
     proc = subprocess.Popen(
         ["git", *args],
@@ -579,8 +610,9 @@ def push_paths(paths: list[str | os.PathLike], msg: str):
         saved_head = run_git_command(["rev-parse", "HEAD"], cwd=repo_root).strip()
         rel_label = ",".join(rel_paths)
         # Retry push with exponential backoff (many inspectors push concurrently).
-        # With git timeouts every attempt is bounded, so the deadline is reached
-        # even when git hangs instead of failing.
+        # Each git command of an attempt is capped at the deadline, so the whole
+        # loop ends within PUSH_DEADLINE_SEC (+ the SIGTERM grace period) even
+        # when git hangs instead of failing.
         deadline = time.monotonic() + PUSH_DEADLINE_SEC
         wait_sec = PUSH_INITIAL_BACKOFF_SEC
         max_wait_per_round = PUSH_MAX_BACKOFF_SEC
@@ -589,16 +621,19 @@ def push_paths(paths: list[str | os.PathLike], msg: str):
             try:
                 if attempt > 0:
                     sleep_sec = min(wait_sec, max_wait_per_round) + random.uniform(0, 2)
+                    sleep_sec = max(0.0, min(sleep_sec, deadline - time.monotonic()))
                     logging.info(
                         f"Retry attempt {attempt}: waiting {sleep_sec:.1f}s then fetch/squash/push"
                     )
                     time.sleep(sleep_sec)
                     wait_sec = min(wait_sec * 2, max_wait_per_round)
                 logging.info("Fetching origin/main and squashing push...")
-                _fetch_origin_main(repo_root)
-                _squash_commit_and_push(
-                    repo_root, rel_label, msg, changed_files, saved_head
-                )
+                # every git command of the attempt is capped at the deadline
+                with git_deadline(deadline):
+                    _fetch_origin_main(repo_root)
+                    _squash_commit_and_push(
+                        repo_root, rel_label, msg, changed_files, saved_head
+                    )
                 logging.info(f"Successfully pushed changes to git: {msg}")
                 break
             except subprocess.CalledProcessError as e:
