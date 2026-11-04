@@ -146,6 +146,11 @@ REGION_FATAL_ERROR_MARKERS = (
     "cannot create already existing resource",
     # Azure regional VM core cap blocks every companion size in that location.
     "exceeding approved Total Regional Cores quota",
+    # Azure per-region public IP caps (Basic SKU and all SKUs): every client size
+    # needs one public IP, so trying further client SKUs in the region only burns
+    # ~90s per attempt (seen walking 10+ clients on 2026-11-04).
+    "IPv4BasicSkuPublicIpCountLimitReached",
+    "PublicIPCountLimitReached",
 )
 # SKU/tier mismatches that will fail in every region — stop the DBaaS location walk.
 SKU_FATAL_ERROR_MARKERS = (
