@@ -45,6 +45,9 @@ GIT_NETWORK_COMMANDS = frozenset({"clone", "fetch", "pull", "push", "ls-remote"}
 GIT_NETWORK_TIMEOUT_SEC = float(os.environ.get("GIT_NETWORK_TIMEOUT_SEC", 300))
 GIT_LOCAL_TIMEOUT_SEC = float(os.environ.get("GIT_LOCAL_TIMEOUT_SEC", 600))
 GIT_CLONE_TIMEOUT_SEC = float(os.environ.get("GIT_CLONE_TIMEOUT_SEC", 900))
+# Checkout right after a clone writes the whole working tree (non-sparse clones
+# on slow machines can take long); it is local disk work, not a network hang.
+GIT_CHECKOUT_TIMEOUT_SEC = float(os.environ.get("GIT_CHECKOUT_TIMEOUT_SEC", 3600))
 
 # push_paths retry loop (unchanged values, module-level so tests can shrink them)
 PUSH_DEADLINE_SEC = 10 * 60
@@ -151,7 +154,7 @@ _TOP_LEVEL_GIT_LOCKS = ("index.lock", "shallow.lock", "packed-refs.lock", "HEAD.
 
 def stale_git_lock_age_sec() -> float:
     """Every git this process starts ends within its timeout + 2 grace periods; older locks are orphans."""
-    longest = max(GIT_NETWORK_TIMEOUT_SEC, GIT_LOCAL_TIMEOUT_SEC, GIT_CLONE_TIMEOUT_SEC)
+    longest = max(GIT_NETWORK_TIMEOUT_SEC, GIT_LOCAL_TIMEOUT_SEC, GIT_CLONE_TIMEOUT_SEC, GIT_CHECKOUT_TIMEOUT_SEC)
     return longest + 2 * GIT_TERM_GRACE_SEC + 60
 
 
@@ -350,6 +353,8 @@ def _clone_repo(repo_url: str, repo_path: str, sparse_paths: tuple[str, ...] | N
         os.makedirs(parent, exist_ok=True)
     logging.info(f"Cloning from {repo_url} to {repo_path} (sparse={sparse_paths})")
     created = not os.path.exists(repo_path)
+    # e.g. a volume mount: existed, but has nothing of ours to keep
+    was_empty_dir = os.path.isdir(repo_path) and not os.listdir(repo_path)
     try:
         _run_git(
             [
@@ -362,16 +367,24 @@ def _clone_repo(repo_url: str, repo_path: str, sparse_paths: tuple[str, ...] | N
             text=True,
         )
         if sparse_paths:
-            run_git_command(["sparse-checkout", "init", "--cone"], cwd=repo_path)
-            run_git_command(["sparse-checkout", "set", *sparse_paths], cwd=repo_path)
-        run_git_command(["checkout", "-f", "main"], cwd=repo_path)
-    except Exception:
+            run_git_command(["sparse-checkout", "init", "--cone"], cwd=repo_path, timeout=GIT_CHECKOUT_TIMEOUT_SEC)
+            run_git_command(["sparse-checkout", "set", *sparse_paths], cwd=repo_path, timeout=GIT_CHECKOUT_TIMEOUT_SEC)
+        run_git_command(["checkout", "-f", "main"], cwd=repo_path, timeout=GIT_CHECKOUT_TIMEOUT_SEC)
+    except BaseException:
         # A half-written clone (git SIGKILLed after the timeout grace period, or
         # a failed sparse/checkout step) would later be opened as a broken repo
         # or make the next clone fail with "destination path already exists".
         if created and os.path.exists(repo_path):
             logging.warning("Removing incomplete clone at %s", repo_path)
             shutil.rmtree(repo_path, ignore_errors=True)
+        elif was_empty_dir:
+            logging.warning("Emptying %s again after a failed clone", repo_path)
+            for entry in os.listdir(repo_path):
+                path = os.path.join(repo_path, entry)
+                if os.path.isdir(path) and not os.path.islink(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    os.remove(path)
         raise
     logging.info(f"Successfully cloned repo to {repo_path}")
 

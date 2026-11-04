@@ -425,3 +425,31 @@ def test_origin_main_race_is_retried(tmp_path, monkeypatch):
     tip = tmp_path / "verify-race"
     subprocess.run(["git", "clone", "-q", str(bare), str(tip)], check=True)
     assert (tip / "data/vendor/inst/0/task/meta.json").read_text() == '{"start":"race"}\n'
+
+
+def test_failed_clone_into_preexisting_empty_dir_empties_it_again(tmp_path, monkeypatch):
+    target = tmp_path / "mount"
+    target.mkdir()  # e.g. a volume mount point
+    _fake_git(tmp_path, monkeypatch,
+              'for last in "$@"; do :; done\n'
+              'mkdir -p "$last/.git/objects"\n'
+              "exit 128\n")
+    monkeypatch.setattr(repo, "_git_low_memory_configured", True)
+    with pytest.raises(subprocess.CalledProcessError):
+        repo._clone_repo("https://example.invalid/repo.git", str(target), None)
+    assert target.is_dir() and not any(target.iterdir())
+
+
+def test_checkout_after_clone_uses_the_long_checkout_timeout(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run_git_command(args, cwd, timeout=None):
+        seen[args[0]] = timeout
+        return ""
+
+    monkeypatch.setattr(repo, "_run_git", lambda *a, **kw: subprocess.CompletedProcess(a, 0, "", ""))
+    monkeypatch.setattr(repo, "run_git_command", fake_run_git_command)
+    monkeypatch.setattr(repo, "_git_low_memory_configured", True)
+    repo._clone_repo("https://example.invalid/repo.git", str(tmp_path / "c"), ("data/x",))
+    assert seen == {"sparse-checkout": repo.GIT_CHECKOUT_TIMEOUT_SEC, "checkout": repo.GIT_CHECKOUT_TIMEOUT_SEC}
+    assert repo.GIT_CHECKOUT_TIMEOUT_SEC > repo.GIT_LOCAL_TIMEOUT_SEC
