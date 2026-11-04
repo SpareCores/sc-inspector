@@ -215,3 +215,19 @@ def test_parallel_planning_never_oversubscribes(fake_azure):
     assert placed["centralus"] == 12
     assert placed["swedencentral"] == 4
     assert placed[None] == 14
+
+
+def test_unknown_vcpus_keeps_price_order(fake_azure):
+    plan = avr.order_regions(SKU, 0, PRICE_ORDER)
+    assert plan.regions == PRICE_ORDER and plan.held is None
+
+
+def test_public_ip_lookup_failure_only_skips_the_ip_check(fake_azure, monkeypatch):
+    def boom(sub, region):
+        raise RuntimeError("403 Microsoft.Network/locations/usages/read")
+
+    monkeypatch.setattr(avr, "_network_quotas", boom)
+    plan = avr.order_regions(SKU, 16, PRICE_ORDER)
+    # northeurope (no Basic IP left) becomes eligible as IPs are unknown; vCPU checks still apply
+    assert set(plan.regions[:3]) == {"centralus", "swedencentral", "northeurope"}
+    assert plan.regions[3:] == ["eastus", "westeurope", "uksouth", "canadacentral"]

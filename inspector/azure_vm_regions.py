@@ -61,6 +61,15 @@ def _disabled() -> bool:
     return os.environ.get("AZURE_SKIP_VM_QUOTA_CHECK", "").lower() in ("1", "true", "yes")
 
 
+def _network_quotas_or_empty(subscription_id: str, region: str) -> dict[str, QuotaEntry]:
+    """Public IP usage, or {} (= unknown, not checked) if it cannot be read."""
+    try:
+        return _network_quotas(subscription_id, region)
+    except Exception as exc:
+        logger.warning("Azure public IP usage lookup failed for %s, not checking IPs: %s", region, exc)
+        return {}
+
+
 @lru_cache(maxsize=64)
 def _network_quotas(subscription_id: str, region: str) -> dict[str, QuotaEntry]:
     url = (
@@ -247,7 +256,7 @@ def order_regions(
     so threads planning at the same moment see each other's first choice; use
     ``plan.reserve(region)`` before each attempt and ``release()`` on failure.
     """
-    if _disabled() or not price_ordered:
+    if _disabled() or not price_ordered or vcpus < 1:
         return RegionPlan(list(price_ordered), vcpus=vcpus)
     sub = subscription_id or _subscription_id()
     if not sub:
@@ -259,7 +268,7 @@ def order_regions(
             region: (
                 _region_compute_sku_index(sub, region),
                 _vm_quotas(sub, region),
-                _network_quotas(sub, region),
+                _network_quotas_or_empty(sub, region),
             )
             for region in price_ordered
         }
