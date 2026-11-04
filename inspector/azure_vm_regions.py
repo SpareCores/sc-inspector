@@ -34,7 +34,7 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any
 
@@ -164,6 +164,12 @@ class RegionPlan:
     family: str | None = None
     vcpus: int = 0
     held: Reservation | None = None
+    # quota family actually checked per region (the catalog may not know the
+    # SKU, then it comes from the region's SKU index)
+    families: dict[str, str | None] = field(default_factory=dict)
+
+    def family_for(self, region: str) -> str | None:
+        return self.families.get(region) or self.family
 
     def reserve(self, region: str) -> Reservation:
         """Reservation for attempting ``region`` (reuses the one taken while planning)."""
@@ -173,7 +179,7 @@ class RegionPlan:
                 return held
             release(held)
         with _ledger_lock:
-            return _hold(region, self.family, self.vcpus)
+            return _hold(region, self.family_for(region), self.vcpus)
 
 
 @dataclass(frozen=True)
@@ -182,6 +188,7 @@ class RegionCheck:
     ok: bool
     reason: str = ""
     fits: int = 0  # how many more such VMs the family quota could take
+    family: str | None = None  # quota family the check used (and a reservation must use)
 
 
 def _free(quotas: dict[str, QuotaEntry], region: str, key: str) -> int | None:
@@ -211,19 +218,19 @@ def check_region(
     family = family or sku_info.family
     cores = _free(vm_quotas, region, REGIONAL_CORES)
     if cores is None or cores < vcpus:
-        return RegionCheck(region, False, f"regional vCPUs: need {vcpus}, free {cores}")
+        return RegionCheck(region, False, f"regional vCPUs: need {vcpus}, free {cores}", family=family)
     fits = cores // vcpus
     if family:
         fam_free = _free(vm_quotas, region, family)
         if fam_free is not None:
             if fam_free < vcpus:
-                return RegionCheck(region, False, f"{family}: need {vcpus}, free {fam_free}")
+                return RegionCheck(region, False, f"{family}: need {vcpus}, free {fam_free}", family=family)
             fits = min(fits, fam_free // vcpus)
     for key in PUBLIC_IP_QUOTAS:
         ip_free = _free(network_quotas, region, key)
         if ip_free is not None and ip_free < 1:
-            return RegionCheck(region, False, f"{key}: none free")
-    return RegionCheck(region, True, fits=max(fits, 1))
+            return RegionCheck(region, False, f"{key}: none free", family=family)
+    return RegionCheck(region, True, fits=max(fits, 1), family=family)
 
 
 def public_ips_free(region: str, subscription_id: str | None = None) -> int | None:
@@ -398,7 +405,8 @@ def order_regions(
         eligible = [c for c in checks if c.ok]
         rest = [c.region for c in checks if not c.ok]
         ordered = weighted_shuffle(eligible, rng or random) + rest
-        held = _hold(ordered[0], family, vcpus) if eligible else None
+        families = {c.region: c.family or family for c in checks}
+        held = _hold(ordered[0], families[ordered[0]], vcpus) if eligible else None
     logger.info(
         "Azure quota-aware region order for %s (%d vCPU, %s): eligible %s; fallback %d region(s)",
         sku,
@@ -410,4 +418,4 @@ def order_regions(
     for check in checks:
         if not check.ok:
             logger.debug("Azure region %s skipped for %s: %s", check.region, sku, check.reason)
-    return RegionPlan(ordered, family=family, vcpus=vcpus, held=held)
+    return RegionPlan(ordered, family=family, vcpus=vcpus, held=held, families=families)

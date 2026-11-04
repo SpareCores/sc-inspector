@@ -293,3 +293,28 @@ def test_failed_region_is_not_refetched_within_ttl(fake_azure, monkeypatch):
     monkeypatch.setattr(avr, "REGION_DATA_ERROR_TTL_SEC", 0)
     avr.order_regions(SKU, 16, PRICE_ORDER)
     assert calls == {region: 2 for region in PRICE_ORDER}
+
+
+def test_family_from_sku_index_is_reserved_when_catalog_has_none(fake_azure, monkeypatch):
+    # SKU missing from the sc-data catalog: the family comes from each region's SKU index
+    monkeypatch.setattr(avr, "sku_family_quota_name", lambda sku: None)
+    plan = avr.order_regions(SKU, 16, PRICE_ORDER)
+    first = plan.regions[0]
+    assert plan.family is None and plan.family_for(first) == FAMILY
+    assert avr.reserved(first, FAMILY) == 16
+    other = next(r for r in plan.regions[1:] if r in ("centralus", "swedencentral"))
+    plan.reserve(first)
+    plan.reserve(other)
+    assert avr.reserved(other, FAMILY) == 16
+
+
+def test_family_quota_not_oversubscribed_without_catalog_family(fake_azure, monkeypatch):
+    from collections import Counter
+
+    monkeypatch.setattr(avr, "sku_family_quota_name", lambda sku: None)
+    placed = Counter()
+    for _ in range(20):
+        plan = avr.order_regions(SKU, 16, PRICE_ORDER)
+        placed[plan.held.region if plan.held else None] += 1
+    # family quota limits: centralus 192/16 = 12, swedencentral 64/16 = 4
+    assert placed == {"centralus": 12, "swedencentral": 4, None: 4}
