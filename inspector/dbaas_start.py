@@ -153,30 +153,95 @@ def _dbaas_client_location(vendor: str, region: str) -> str:
     return region
 
 
+def _azure_client_ips_exhausted(region: str) -> bool:
+    """True when the region's public IP caps are known to be used up.
+
+    Net of this job's own reservations, so parallel DBaaS stacks don't all try
+    the region that looked free in the cached usage snapshot.
+    """
+    from azure_vm_regions import public_ips_free
+
+    free = public_ips_free(region)
+    return free is not None and free < 1
+
+
+def _reserve_azure_client(vendor: str, region: str, client):
+    """Hold the client VM's vCPUs and public IP in the job-wide ledger (Azure only)."""
+    if vendor != "azure":
+        return None
+    from azure_vm_regions import reserve, vm_family
+
+    return reserve(region, vm_family(client.api_reference, region), int(client.vcpus))
+
+
 def _prefer_azure_regions_with_quota(
     regions: list[str],
     *,
     pg_sku: str,
     pg_vcpus: int,
     prices: dict[str, float],
+    rng=None,
 ) -> list[str]:
-    """Reorder Azure regions: Flexible Server offer+quota first, then VM core headroom, then price.
+    """Reorder Azure regions: ready regions in weighted random order, then the rest by price.
+
+    A region is ready when Flexible Server offers the SKU with quota headroom AND it
+    can host the client VM: free regional vCPUs for the largest client size
+    (DBAAS_CLIENT_MAX_VCPUS) and a free public IP. Both counts are net of this
+    job's own reservations. Ready regions are shuffled with weights by client
+    capacity (capped, see azure_vm_regions.weighted_shuffle) so parallel stacks
+    spread out instead of all landing in the region with the most VM cores.
+
+    Then, each by price: regions with PG quota whose client capacity is unknown
+    (lookup failed or checks disabled — a transient error must not push the only
+    region with PG quota down), regions with PG quota but no client headroom,
+    and regions without PG quota.
 
     Recent start-dbaas runs (e.g. 41428276071) succeeded in quota-bearing regions such as
     eastus2 / uaenorth, while pure price order spent hours on offer-restricted or
     SKU-not-offered locations (eastus, …) and then piled companions into a 10-core eastus2.
+    On 2026-11-04 the old "most VM cores first" order sent every stack to centralus
+    (22k cores) until its 20 Basic public IPs ran out.
     """
-    from azure_dbaas_quota import vm_regional_cores_available
+    import random
 
-    def sort_key(region: str) -> tuple:
-        ok, _reason = check_dbaas_postgres_quota(
-            "azure", region, pg_sku, pg_vcpus
-        )
-        cores = vm_regional_cores_available(region) if ok else -1
-        price = prices.get(region, float("inf"))
-        return (0 if ok else 1, -cores, price, region)
+    import azure_vm_regions
+    from azure_dbaas_quota import _skip_quota_check
+    from azure_vm_regions import RegionCheck, weighted_shuffle
+    from benchmark_tiers import DBAAS_CLIENT_MAX_VCPUS
 
-    return sorted(regions, key=sort_key)
+    def price_key(region: str) -> tuple:
+        return (prices.get(region, float("inf")), region)
+
+    skip = _skip_quota_check()
+    if not skip:
+        azure_vm_regions.prefetch(regions)
+    ready: list[RegionCheck] = []
+    unknown: list[str] = []
+    no_client: list[str] = []
+    no_pg: list[str] = []
+    for region in regions:
+        ok, _reason = check_dbaas_postgres_quota("azure", region, pg_sku, pg_vcpus)
+        if not ok:
+            no_pg.append(region)
+            continue
+        cores = None if skip else azure_vm_regions.regional_cores_free(region)
+        ips = None if skip else azure_vm_regions.public_ips_free(region)
+        if (cores is not None and cores < DBAAS_CLIENT_MAX_VCPUS) or (ips is not None and ips < 1):
+            no_client.append(region)
+            continue
+        if cores is None:
+            unknown.append(region)
+            continue
+        fits = cores // DBAAS_CLIENT_MAX_VCPUS
+        if ips is not None:
+            fits = min(fits, ips)
+        ready.append(RegionCheck(region, True, fits=fits))
+    return (
+        weighted_shuffle(ready, rng or random)
+        + sorted(unknown, key=price_key)
+        + sorted(no_client, key=price_key)
+        + sorted(no_pg, key=price_key)
+    )
 
 
 def _dbaas_location_candidates(
@@ -435,22 +500,39 @@ def try_start_dbaas_inspect(
             continue
 
         for client in clients:
+            client_location = _dbaas_client_location(vendor, region)
+            if vendor == "azure" and _azure_client_ips_exhausted(client_location):
+                msg = (
+                    f"Skipping DBaaS {vendor}/{location}: no free public IP for the client "
+                    "(incl. this job's other stacks)"
+                )
+                logging.info(msg)
+                error_msgs.append(msg)
+                break
             attempted_provision = True
-            success, region_fatal, sku_fatal = _try_provision_dbaas_stack(
-                vendor,
-                target,
-                client,
-                region,
-                zone,
-                provision,
-                slug,
-                timeout_mins,
-                ssh_deploy_key_b64,
-                repo_url_ssh,
-                instance_logger,
-                instance_timing,
-                error_msgs,
-            )
+            reservation = _reserve_azure_client(vendor, client_location, client)
+            success = False
+            try:
+                success, region_fatal, sku_fatal = _try_provision_dbaas_stack(
+                    vendor,
+                    target,
+                    client,
+                    region,
+                    zone,
+                    provision,
+                    slug,
+                    timeout_mins,
+                    ssh_deploy_key_b64,
+                    repo_url_ssh,
+                    instance_logger,
+                    instance_timing,
+                    error_msgs,
+                )
+            finally:
+                if not success and reservation is not None:
+                    from azure_vm_regions import release
+
+                    release(reservation)
             if success:
                 return True, True
             if sku_fatal:
