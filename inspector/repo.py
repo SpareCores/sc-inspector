@@ -53,6 +53,47 @@ def git_timeout(args: list[str]) -> float:
     return GIT_LOCAL_TIMEOUT_SEC
 
 
+_TOP_LEVEL_GIT_LOCKS = ("index.lock", "shallow.lock", "packed-refs.lock", "HEAD.lock", "config.lock", "FETCH_HEAD.lock")
+
+
+def _git_dir(cwd) -> str | None:
+    """The .git directory of the repo containing ``cwd`` (None if not found)."""
+    path = os.path.abspath(cwd or os.getcwd())
+    while True:
+        candidate = os.path.join(path, ".git")
+        if os.path.isdir(candidate):
+            return candidate
+        parent = os.path.dirname(path)
+        if parent == path:
+            return None
+        path = parent
+
+
+def _remove_locks_left_by_killed_git(cwd, started: float) -> None:
+    """Delete *.lock files a killed git left behind (only ones created after ``started``).
+
+    A git killed mid-write keeps holding index.lock / shallow.lock / ref locks, and
+    every later command then fails with "Unable to create '...lock': File exists",
+    which would turn one timeout into a permanently wedged repo. Locks older than
+    the killed command belong to someone else and are left alone.
+    """
+    git_dir = _git_dir(cwd)
+    if git_dir is None:
+        return
+    candidates = [os.path.join(git_dir, name) for name in _TOP_LEVEL_GIT_LOCKS]
+    for root, _dirs, files in os.walk(os.path.join(git_dir, "refs")):
+        candidates.extend(os.path.join(root, f) for f in files if f.endswith(".lock"))
+    for lock in candidates:
+        try:
+            if os.path.getmtime(lock) >= started - 1:
+                os.remove(lock)
+                logging.warning("Removed git lock left by killed git process: %s", lock)
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            logging.warning("Could not remove git lock %s: %s", lock, e)
+
+
 def _run_git(args: list[str], *, cwd, timeout: float, **kwargs) -> subprocess.CompletedProcess:
     """subprocess.run(["git", *args]) that turns a timeout into CalledProcessError.
 
@@ -60,9 +101,11 @@ def _run_git(args: list[str], *, cwd, timeout: float, **kwargs) -> subprocess.Co
     TimeoutExpired) lets the existing ``except CalledProcessError`` retry paths
     handle a hang exactly like a failed command.
     """
+    started = time.time()
     try:
         return subprocess.run(["git", *args], cwd=cwd, timeout=timeout, **kwargs)
     except subprocess.TimeoutExpired as e:
+        _remove_locks_left_by_killed_git(cwd, started)
         raise subprocess.CalledProcessError(
             returncode=-9,
             cmd=e.cmd,

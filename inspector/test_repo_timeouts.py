@@ -54,3 +54,41 @@ def test_default_timeout_is_applied(hanging_git, tmp_path, monkeypatch):
 def test_fast_commands_unaffected(tmp_path):
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     assert repo.run_git_command(["status", "--porcelain"], cwd=tmp_path) == ""
+
+
+def test_locks_left_by_killed_git_are_removed_but_older_ones_kept(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    refs = work / ".git" / "refs" / "remotes" / "origin"
+    refs.mkdir(parents=True)
+    # a lock that existed before our command: not ours, must survive
+    old_lock = work / ".git" / "packed-refs.lock"
+    old_lock.write_text("")
+    past = time.time() - 3600
+    os.utime(old_lock, (past, past))
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "git"
+    # killed mid-fetch: holds the index lock and the remote-tracking ref lock
+    fake.write_text(
+        "#!/bin/sh\n"
+        "touch .git/index.lock .git/refs/remotes/origin/main.lock\n"
+        "sleep 30\n"
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+    with pytest.raises(subprocess.CalledProcessError):
+        repo.run_git_command(["fetch", "origin"], cwd=work, timeout=0.5)
+
+    assert not (work / ".git" / "index.lock").exists()
+    assert not (refs / "main.lock").exists()
+    assert old_lock.exists()
+
+
+def test_lock_cleanup_from_subdirectory_finds_repo_root(tmp_path):
+    sub = tmp_path / "work" / "data" / "x"
+    sub.mkdir(parents=True)
+    (tmp_path / "work" / ".git").mkdir()
+    assert repo._git_dir(sub) == str(tmp_path / "work" / ".git")
+    assert repo._git_dir(tmp_path) is None
