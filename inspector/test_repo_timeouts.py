@@ -263,3 +263,55 @@ def test_nested_deadlines_keep_the_earliest_and_restore():
             assert repo._git_deadline_state.deadline == 100.0
         assert repo._git_deadline_state.deadline == 100.0
     assert getattr(repo._git_deadline_state, "deadline", None) is None
+
+
+def _hang_push_wrapper(tmp_path, monkeypatch, marker):
+    """A `git` that delegates to the real one but hangs on `push` while ``marker`` exists."""
+    import shutil
+
+    real_git = shutil.which("git")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do case "$a" in -*) ;; *) sub="$a"; break;; esac; done\n'
+        f'if [ "$sub" = "push" ] && [ -e "{marker}" ]; then sleep 30; fi\n'
+        f'exec "{real_git}" "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return real_git
+
+
+def test_results_survive_a_push_that_gives_up(tmp_path, monkeypatch):
+    """Retry without rewriting anything (like _push_data_dirs) must still publish the results."""
+    from test_repo_squash import _init_bare_and_clone
+
+    bare, work = _init_bare_and_clone(tmp_path)
+    marker = tmp_path / "hang-push"
+    marker.write_text("")
+    real_git = _hang_push_wrapper(tmp_path, monkeypatch, marker)
+    monkeypatch.setattr(repo, "REPO_PATH", str(work))
+    monkeypatch.setattr(repo, "should_push", lambda: True)
+    monkeypatch.setattr(repo, "PUSH_DEADLINE_SEC", 3)
+    monkeypatch.setattr(repo, "PUSH_INITIAL_BACKOFF_SEC", 0.1)
+
+    variant = work / "data" / "vendor" / "inst" / "0"
+    (variant / "task" / "meta.json").write_text('{"start":"result"}\n')
+    (variant / "task" / "stdout").unlink()  # a deletion must survive too
+
+    with pytest.raises(subprocess.CalledProcessError):
+        repo.push_paths([variant], "result")
+    # results are back as uncommitted changes, so the retry has something to push
+    assert repo.path_has_changes(str(work), variant)
+    assert (variant / "task" / "meta.json").read_text() == '{"start":"result"}\n'
+
+    marker.unlink()
+    repo.push_paths([variant], "result (retry)")  # nothing rewritten in between
+
+    tip = tmp_path / "verify-retry"
+    subprocess.run([real_git, "clone", "-q", str(bare), str(tip)], check=True)
+    assert (tip / "data/vendor/inst/0/task/meta.json").read_text() == '{"start":"result"}\n'
+    assert not (tip / "data/vendor/inst/0/task/stdout").exists()
+    assert (tip / "data/vendor/inst/0/task/keep.txt").exists()

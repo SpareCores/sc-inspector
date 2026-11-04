@@ -558,6 +558,64 @@ def run_git_command(args, cwd, timeout: float | None = None):
         logging.error(error_msg)
         raise
 
+def _push_with_retries(
+    repo_root: str, rel_label: str, msg: str, changed_files: list[str], saved_head: str
+) -> None:
+    """fetch + squash + push with exponential backoff until PUSH_DEADLINE_SEC."""
+    # Retry push with exponential backoff (many inspectors push concurrently).
+    # Each git command of an attempt is capped at the deadline, so the whole
+    # loop ends within PUSH_DEADLINE_SEC (+ the SIGTERM grace period) even
+    # when git hangs instead of failing.
+    deadline = time.monotonic() + PUSH_DEADLINE_SEC
+    wait_sec = PUSH_INITIAL_BACKOFF_SEC
+    max_wait_per_round = PUSH_MAX_BACKOFF_SEC
+    attempt = 0
+    while True:
+        try:
+            if attempt > 0:
+                sleep_sec = min(wait_sec, max_wait_per_round) + random.uniform(0, 2)
+                sleep_sec = max(0.0, min(sleep_sec, deadline - time.monotonic()))
+                logging.info(
+                    f"Retry attempt {attempt}: waiting {sleep_sec:.1f}s then fetch/squash/push"
+                )
+                time.sleep(sleep_sec)
+                wait_sec = min(wait_sec * 2, max_wait_per_round)
+            logging.info("Fetching origin/main and squashing push...")
+            # every git command of the attempt is capped at the deadline
+            with git_deadline(deadline):
+                _fetch_origin_main(repo_root)
+                _squash_commit_and_push(
+                    repo_root, rel_label, msg, changed_files, saved_head
+                )
+            logging.info(f"Successfully pushed changes to git: {msg}")
+            break
+        except subprocess.CalledProcessError as e:
+            attempt += 1
+            if time.monotonic() >= deadline:
+                logging.error(f"Push failed after retries ({PUSH_DEADLINE_SEC:.0f}s deadline)")
+                raise
+            logging.warning(f"Push failed (attempt {attempt}), will retry with backoff: {e}")
+
+
+def _restore_unpushed_results(repo_root: str, start_head: str, saved_head: str) -> None:
+    """Leave unpushed results as staged changes on top of ``start_head``.
+
+    When push_paths gives up, HEAD is our local result commit or the squash
+    commit and the working tree is clean, so a retry (e.g. _push_data_dirs)
+    saw "No changes detected", reported success, and the next
+    ``reset --hard origin/main`` silently dropped the results. Resetting hard
+    to the result commit restores the files (a squash may have been cut off
+    after its reset), and the soft reset back to the starting HEAD leaves them
+    staged, exactly what the next push_paths call picks up.
+    """
+    try:
+        run_git_command(["reset", "--hard", saved_head], cwd=repo_root)
+        run_git_command(["reset", "--soft", start_head], cwd=repo_root)
+        logging.warning("Push gave up; unpushed results kept as staged changes for the next push")
+    except Exception as e:
+        logging.error(f"Could not restore unpushed results from {saved_head[:8]}: {e}")
+
+
 @synchronized
 def push_paths(paths: list[str | os.PathLike], msg: str):
     """Commit and squash-push every dirty path in one round.
@@ -592,6 +650,8 @@ def push_paths(paths: list[str | os.PathLike], msg: str):
         rel_paths = [os.path.relpath(p, repo_root) for p in dirty]
         for rel_path in rel_paths:
             _assert_path_in_sparse(rel_path)
+        # HEAD before our result commit: restored (with results staged) if the push gives up
+        start_head = run_git_command(["rev-parse", "HEAD"], cwd=repo_root).strip()
         logging.info("Staging changes under %s...", rel_paths)
         run_git_command(["add", "--"] + rel_paths, cwd=repo_root)
         logging.info("Committing changes...")
@@ -609,39 +669,11 @@ def push_paths(paths: list[str | os.PathLike], msg: str):
             return
         saved_head = run_git_command(["rev-parse", "HEAD"], cwd=repo_root).strip()
         rel_label = ",".join(rel_paths)
-        # Retry push with exponential backoff (many inspectors push concurrently).
-        # Each git command of an attempt is capped at the deadline, so the whole
-        # loop ends within PUSH_DEADLINE_SEC (+ the SIGTERM grace period) even
-        # when git hangs instead of failing.
-        deadline = time.monotonic() + PUSH_DEADLINE_SEC
-        wait_sec = PUSH_INITIAL_BACKOFF_SEC
-        max_wait_per_round = PUSH_MAX_BACKOFF_SEC
-        attempt = 0
-        while True:
-            try:
-                if attempt > 0:
-                    sleep_sec = min(wait_sec, max_wait_per_round) + random.uniform(0, 2)
-                    sleep_sec = max(0.0, min(sleep_sec, deadline - time.monotonic()))
-                    logging.info(
-                        f"Retry attempt {attempt}: waiting {sleep_sec:.1f}s then fetch/squash/push"
-                    )
-                    time.sleep(sleep_sec)
-                    wait_sec = min(wait_sec * 2, max_wait_per_round)
-                logging.info("Fetching origin/main and squashing push...")
-                # every git command of the attempt is capped at the deadline
-                with git_deadline(deadline):
-                    _fetch_origin_main(repo_root)
-                    _squash_commit_and_push(
-                        repo_root, rel_label, msg, changed_files, saved_head
-                    )
-                logging.info(f"Successfully pushed changes to git: {msg}")
-                break
-            except subprocess.CalledProcessError as e:
-                attempt += 1
-                if time.monotonic() >= deadline:
-                    logging.error(f"Push failed after retries ({PUSH_DEADLINE_SEC:.0f}s deadline)")
-                    raise
-                logging.warning(f"Push failed (attempt {attempt}), will retry with backoff: {e}")
+        try:
+            _push_with_retries(repo_root, rel_label, msg, changed_files, saved_head)
+        except BaseException:
+            _restore_unpushed_results(repo_root, start_head, saved_head)
+            raise
     except Exception as e:
         logging.error(f"Failed to push paths {path_list}: {e}", exc_info=True)
         raise
