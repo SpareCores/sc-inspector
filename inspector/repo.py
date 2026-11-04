@@ -432,6 +432,14 @@ def _assert_path_in_sparse(rel_path: str) -> None:
     )
 
 
+class OriginMainStaleError(RuntimeError):
+    """origin/main moved again between ls-remote and fetch (another inspector pushed).
+
+    Expected during bursts of concurrent pushes; push_paths retries it like a
+    failed git command instead of giving up.
+    """
+
+
 def _fetch_origin_main(repo_root: str) -> None:
     """Update origin/main to the remote tip without altering full-clone history."""
     fetch_args = ["fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"]
@@ -457,7 +465,7 @@ def _fetch_origin_main(repo_root: str) -> None:
     run_git_command(retry_args, cwd=repo_root)
     local_sha = _origin_main_sha(repo_root)
     if remote_sha != local_sha:
-        raise RuntimeError(
+        raise OriginMainStaleError(
             f"Could not sync origin/main to {remote_sha[:8]} (still at {local_sha[:8]})"
         )
 
@@ -651,7 +659,7 @@ def _push_with_retries(
                 )
             logging.info(f"Successfully pushed changes to git: {msg}")
             break
-        except subprocess.CalledProcessError as e:
+        except (subprocess.CalledProcessError, OriginMainStaleError) as e:
             attempt += 1
             if time.monotonic() >= deadline:
                 logging.error(f"Push failed after retries ({PUSH_DEADLINE_SEC:.0f}s deadline)")

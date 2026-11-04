@@ -399,3 +399,29 @@ def test_only_locks_older_than_any_live_git_are_removed(tmp_path):
     repo._remove_stale_git_locks(str(tmp_path))
     assert not any(lock.exists() for lock in stale)
     assert live.exists()
+
+
+def test_origin_main_race_is_retried(tmp_path, monkeypatch):
+    """Another VM pushing between ls-remote and fetch must not end the retries."""
+    from test_repo_squash import _init_bare_and_clone
+
+    bare, work = _init_bare_and_clone(tmp_path)
+    monkeypatch.setattr(repo, "REPO_PATH", str(work))
+    monkeypatch.setattr(repo, "should_push", lambda: True)
+    monkeypatch.setattr(repo, "PUSH_INITIAL_BACKOFF_SEC", 0.1)
+    real_fetch = repo._fetch_origin_main
+    calls = []
+
+    def racing_fetch(repo_root):
+        calls.append(1)
+        if len(calls) == 1:
+            raise repo.OriginMainStaleError("Could not sync origin/main to abcd1234 (still at 0123abcd)")
+        return real_fetch(repo_root)
+
+    monkeypatch.setattr(repo, "_fetch_origin_main", racing_fetch)
+    (work / "data" / "vendor" / "inst" / "0" / "task" / "meta.json").write_text('{"start":"race"}\n')
+    repo.push_paths([work / "data" / "vendor" / "inst" / "0"], "race")
+    assert len(calls) == 2
+    tip = tmp_path / "verify-race"
+    subprocess.run(["git", "clone", "-q", str(bare), str(tip)], check=True)
+    assert (tip / "data/vendor/inst/0/task/meta.json").read_text() == '{"start":"race"}\n'
