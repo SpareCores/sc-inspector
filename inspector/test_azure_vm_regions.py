@@ -49,11 +49,15 @@ def fake_azure(monkeypatch):
     monkeypatch.setattr(avr, "_region_compute_sku_index", sku_index)
     monkeypatch.setattr(avr, "_vm_quotas", lambda sub, region: FAKE[region][1])
     monkeypatch.setattr(avr, "_network_quotas", lambda sub, region: FAKE[region][2])
+    avr.reset_ledger()
+    yield
+    avr.reset_ledger()
 
 
 def test_eligible_regions_first_then_price_ordered_fallback(fake_azure):
-    order, family = avr.order_regions(SKU, 16, PRICE_ORDER)
-    assert family == FAMILY
+    plan = avr.order_regions(SKU, 16, PRICE_ORDER)
+    order = plan.regions
+    assert plan.family == FAMILY
     assert set(order[:2]) == {"centralus", "swedencentral"}
     assert order[2:] == ["eastus", "westeurope", "northeurope", "uksouth", "canadacentral"]
 
@@ -76,7 +80,8 @@ def test_reasons(fake_azure):
 
 def test_disabled_keeps_price_order(fake_azure, monkeypatch):
     monkeypatch.setenv("AZURE_SKIP_VM_QUOTA_CHECK", "1")
-    assert avr.order_regions(SKU, 16, PRICE_ORDER) == (PRICE_ORDER, None)
+    plan = avr.order_regions(SKU, 16, PRICE_ORDER)
+    assert plan.regions == PRICE_ORDER and plan.held is None
 
 
 def test_lookup_failure_keeps_price_order(fake_azure, monkeypatch):
@@ -84,12 +89,14 @@ def test_lookup_failure_keeps_price_order(fake_azure, monkeypatch):
         raise RuntimeError("ARM down")
 
     monkeypatch.setattr(avr, "_vm_quotas", boom)
-    assert avr.order_regions(SKU, 16, PRICE_ORDER) == (PRICE_ORDER, None)
+    plan = avr.order_regions(SKU, 16, PRICE_ORDER)
+    assert plan.regions == PRICE_ORDER and plan.held is None
 
 
 def test_no_subscription_keeps_price_order(fake_azure, monkeypatch):
     monkeypatch.setattr(avr, "_subscription_id", lambda: None)
-    assert avr.order_regions(SKU, 16, PRICE_ORDER) == (PRICE_ORDER, None)
+    plan = avr.order_regions(SKU, 16, PRICE_ORDER)
+    assert plan.regions == PRICE_ORDER and plan.held is None
 
 
 def test_location_restriction_without_location_list_blocks_everywhere():
@@ -123,8 +130,88 @@ def test_weighted_shuffle_caps_weight():
 def test_order_is_randomized_but_fallback_stays_last(fake_azure):
     import random
 
-    firsts = {avr.order_regions(SKU, 16, PRICE_ORDER, rng=random.Random(seed))[0][0] for seed in range(200)}
+    firsts = set()
+    for seed in range(200):
+        plan = avr.order_regions(SKU, 16, PRICE_ORDER, rng=random.Random(seed))
+        firsts.add(plan.regions[0])
+        avr.release(plan.held)
     assert firsts == {"centralus", "swedencentral"}
     for seed in range(20):
-        order, _ = avr.order_regions(SKU, 16, PRICE_ORDER, rng=random.Random(seed))
-        assert order[2:] == ["eastus", "westeurope", "northeurope", "uksouth", "canadacentral"]
+        plan = avr.order_regions(SKU, 16, PRICE_ORDER, rng=random.Random(seed))
+        avr.release(plan.held)
+        assert plan.regions[2:] == ["eastus", "westeurope", "northeurope", "uksouth", "canadacentral"]
+
+
+def test_planning_reserves_first_choice(fake_azure):
+    plan = avr.order_regions(SKU, 16, PRICE_ORDER)
+    first = plan.regions[0]
+    assert plan.held is not None and plan.held.region == first
+    assert avr.reserved(first, FAMILY) == 16
+    assert avr.reserved(first, "cores") == 16
+    assert avr.reserved(first, "IPv4BasicSkuPublicIpAddresses") == 1
+    avr.release(plan.held)
+    avr.release(plan.held)  # idempotent
+    assert avr.reserved(first, FAMILY) == 0
+
+
+def test_regions_fill_up_then_fall_back_to_price_order(fake_azure):
+    from collections import Counter
+
+    # centralus fits 12 x 16 vCPU (192), swedencentral 4 (64): 16 starts in total
+    placed = Counter()
+    for _ in range(16):
+        plan = avr.order_regions(SKU, 16, PRICE_ORDER)
+        assert plan.held is not None
+        placed[plan.held.region] += 1
+    assert placed == {"centralus": 12, "swedencentral": 4}
+    # quota exhausted everywhere: nothing held, plain price order of all regions
+    plan = avr.order_regions(SKU, 16, PRICE_ORDER)
+    assert plan.held is None
+    assert plan.regions == PRICE_ORDER
+
+
+def test_release_after_failure_frees_capacity(fake_azure):
+    plans = [avr.order_regions(SKU, 16, PRICE_ORDER) for _ in range(16)]
+    assert avr.order_regions(SKU, 16, PRICE_ORDER).held is None
+    avr.release(plans[0].held)
+    again = avr.order_regions(SKU, 16, PRICE_ORDER)
+    assert again.held is not None and again.held.region == plans[0].held.region
+
+
+def test_plan_reserve_reuses_or_moves_the_held_reservation(fake_azure):
+    plan = avr.order_regions(SKU, 16, PRICE_ORDER)
+    first = plan.regions[0]
+    assert plan.reserve(first) is not None and avr.reserved(first, FAMILY) == 16  # reused, not doubled
+    other = plan.regions[1]
+    res = plan.reserve(other)  # held one already handed out: plain new hold
+    assert avr.reserved(other, FAMILY) == 16
+
+    plan2 = avr.order_regions(SKU, 16, PRICE_ORDER)
+    held_region = plan2.held.region
+    before = avr.reserved(held_region, FAMILY)
+    elsewhere = next(r for r in PRICE_ORDER if r != held_region)
+    plan2.reserve(elsewhere)  # skipped the planned region: its hold is released
+    assert avr.reserved(held_region, FAMILY) == before - 16
+    avr.release(res)
+
+
+def test_parallel_planning_never_oversubscribes(fake_azure):
+    import threading
+    from collections import Counter
+
+    placed = Counter()
+    lock = threading.Lock()
+
+    def start():
+        plan = avr.order_regions(SKU, 16, PRICE_ORDER)
+        with lock:
+            placed[plan.held.region if plan.held else None] += 1
+
+    threads = [threading.Thread(target=start) for _ in range(30)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert placed["centralus"] == 12
+    assert placed["swedencentral"] == 4
+    assert placed[None] == 14

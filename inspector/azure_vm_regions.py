@@ -16,6 +16,11 @@ instead of all piling into the cheapest one and saturating its quota and public
 IPs. The remaining regions follow in price order as a fallback, in case the
 quota data is stale or wrong.
 
+Azure usage numbers are cached per region for the whole job, so they don't see
+VMs this job starts. A process-wide reservation ledger tracks the capacity held
+by this job's own attempts (see ``RegionPlan.reserve`` / ``release``), so
+parallel threads steer each other away from regions that are already full.
+
 Any lookup failure falls back to the plain price order. Set
 ``AZURE_SKIP_VM_QUOTA_CHECK=1`` to disable the whole thing.
 """
@@ -25,6 +30,8 @@ from __future__ import annotations
 import logging
 import os
 import random
+import threading
+from collections import defaultdict
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
@@ -79,6 +86,85 @@ def location_restricted(sku_info: ComputeSkuInfo, region: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Reservation ledger: capacity held by this job's own in-flight attempts.
+#
+# Usage data is fetched once per region and job (lru_cache), so it never sees
+# the VMs this same job starts. Without a ledger, 20 parallel threads would all
+# compute the same order from the same snapshot.
+# ---------------------------------------------------------------------------
+
+_ledger_lock = threading.Lock()
+_reserved: dict[tuple[str, str], int] = defaultdict(int)
+
+
+@dataclass
+class Reservation:
+    region: str
+    amounts: dict[str, int]
+    released: bool = False
+
+
+def _amounts(family: str | None, vcpus: int) -> dict[str, int]:
+    amounts = {REGIONAL_CORES: vcpus}
+    if family:
+        amounts[family] = vcpus
+    for key in PUBLIC_IP_QUOTAS:
+        amounts[key] = 1
+    return amounts
+
+
+def _hold(region: str, family: str | None, vcpus: int) -> Reservation:
+    """Add a reservation to the ledger (caller holds ``_ledger_lock``)."""
+    amounts = _amounts(family, vcpus)
+    for key, amount in amounts.items():
+        _reserved[(region, key.lower())] += amount
+    return Reservation(region=region, amounts=amounts)
+
+
+def release(reservation: Reservation | None) -> None:
+    """Give a reservation back after a failed attempt (idempotent)."""
+    if reservation is None:
+        return
+    with _ledger_lock:
+        if reservation.released:
+            return
+        for key, amount in reservation.amounts.items():
+            _reserved[(reservation.region, key.lower())] -= amount
+        reservation.released = True
+
+
+def reserved(region: str, key: str) -> int:
+    with _ledger_lock:
+        return _reserved[(region, key.lower())]
+
+
+def reset_ledger() -> None:
+    """Forget all reservations (tests)."""
+    with _ledger_lock:
+        _reserved.clear()
+
+
+@dataclass
+class RegionPlan:
+    """Region order for one VM start, plus the reservation of its first choice."""
+
+    regions: list[str]
+    family: str | None = None
+    vcpus: int = 0
+    held: Reservation | None = None
+
+    def reserve(self, region: str) -> Reservation:
+        """Reservation for attempting ``region`` (reuses the one taken while planning)."""
+        if self.held is not None:
+            held, self.held = self.held, None
+            if held.region == region and not held.released:
+                return held
+            release(held)
+        with _ledger_lock:
+            return _hold(region, self.family, self.vcpus)
+
+
 @dataclass(frozen=True)
 class RegionCheck:
     region: str
@@ -88,11 +174,11 @@ class RegionCheck:
 
 
 def _free(quotas: dict[str, QuotaEntry], region: str, key: str) -> int | None:
-    """Free units for ``key``; None if Azure returned no such entry."""
+    """Free units for ``key`` minus this job's reservations; None if Azure has no such entry."""
     entry = _quota_lookup(quotas, key)
     if entry is None:
         return None
-    return entry.available
+    return entry.available - _reserved[(region, key.lower())]
 
 
 def check_region(
@@ -105,7 +191,7 @@ def check_region(
     vm_quotas: dict[str, QuotaEntry],
     network_quotas: dict[str, QuotaEntry],
 ) -> RegionCheck:
-    """Evaluate one region against cached Azure usage and SKU data."""
+    """Evaluate one region against cached Azure data and the ledger (caller holds the lock)."""
     sku_info = sku_index.get(sku)
     if sku_info is None:
         return RegionCheck(region, False, "size not offered")
@@ -153,17 +239,20 @@ def order_regions(
     *,
     rng: Any = None,
     subscription_id: str | None = None,
-) -> tuple[list[str], str | None]:
-    """Return (region order, quota family) for an Azure VM start.
+) -> RegionPlan:
+    """Plan the region order for an Azure VM start.
 
     ``price_ordered`` is the cheapest-first candidate list (the fallback order).
+    The first eligible region is reserved atomically with computing the order,
+    so threads planning at the same moment see each other's first choice; use
+    ``plan.reserve(region)`` before each attempt and ``release()`` on failure.
     """
     if _disabled() or not price_ordered:
-        return list(price_ordered), None
+        return RegionPlan(list(price_ordered), vcpus=vcpus)
     sub = subscription_id or _subscription_id()
     if not sub:
         logger.warning("Azure VM region quota check skipped: subscription id not configured")
-        return list(price_ordered), None
+        return RegionPlan(list(price_ordered), vcpus=vcpus)
     try:
         family = sku_family_quota_name(sku)
         data = {
@@ -176,23 +265,25 @@ def order_regions(
         }
     except Exception as exc:
         logger.warning("Azure VM region quota check failed for %s, using price order: %s", sku, exc)
-        return list(price_ordered), None
+        return RegionPlan(list(price_ordered), vcpus=vcpus)
 
-    checks = [
-        check_region(
-            region,
-            sku=sku,
-            vcpus=vcpus,
-            family=family,
-            sku_index=data[region][0],
-            vm_quotas=data[region][1],
-            network_quotas=data[region][2],
-        )
-        for region in price_ordered
-    ]
-    eligible = [c for c in checks if c.ok]
-    rest = [c.region for c in checks if not c.ok]
-    ordered = weighted_shuffle(eligible, rng or random) + rest
+    with _ledger_lock:
+        checks = [
+            check_region(
+                region,
+                sku=sku,
+                vcpus=vcpus,
+                family=family,
+                sku_index=data[region][0],
+                vm_quotas=data[region][1],
+                network_quotas=data[region][2],
+            )
+            for region in price_ordered
+        ]
+        eligible = [c for c in checks if c.ok]
+        rest = [c.region for c in checks if not c.ok]
+        ordered = weighted_shuffle(eligible, rng or random) + rest
+        held = _hold(ordered[0], family, vcpus) if eligible else None
     logger.info(
         "Azure quota-aware region order for %s (%d vCPU, %s): eligible %s; fallback %d region(s)",
         sku,
@@ -204,4 +295,4 @@ def order_regions(
     for check in checks:
         if not check.ok:
             logger.debug("Azure region %s skipped for %s: %s", check.region, sku, check.reason)
-    return ordered, family
+    return RegionPlan(ordered, family=family, vcpus=vcpus, held=held)
