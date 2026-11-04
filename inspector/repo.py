@@ -3,6 +3,7 @@ import logging
 import os
 import psutil
 import random
+import signal
 import subprocess
 import time
 from urllib.parse import urlparse, urlunparse
@@ -86,66 +87,84 @@ def _git_env(base: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
-_TOP_LEVEL_GIT_LOCKS = ("index.lock", "shallow.lock", "packed-refs.lock", "HEAD.lock", "config.lock", "FETCH_HEAD.lock")
+# After a timeout git gets SIGTERM first: it then removes its own lock files
+# (index.lock, ref locks, shallow.lock) and a half-written clone directory.
+# Only processes still alive after the grace period are SIGKILLed.
+GIT_TERM_GRACE_SEC = 5
 
 
-def _git_dir(cwd) -> str | None:
-    """The .git directory of the repo containing ``cwd`` (None if not found)."""
-    path = os.path.abspath(cwd or os.getcwd())
-    while True:
-        candidate = os.path.join(path, ".git")
-        if os.path.isdir(candidate):
-            return candidate
-        parent = os.path.dirname(path)
-        if parent == path:
-            return None
-        path = parent
-
-
-def _remove_locks_left_by_killed_git(cwd, started: float) -> None:
-    """Delete *.lock files a killed git left behind (only ones created after ``started``).
-
-    A git killed mid-write keeps holding index.lock / shallow.lock / ref locks, and
-    every later command then fails with "Unable to create '...lock': File exists",
-    which would turn one timeout into a permanently wedged repo. Locks older than
-    the killed command belong to someone else and are left alone.
-    """
-    git_dir = _git_dir(cwd)
-    if git_dir is None:
-        return
-    candidates = [os.path.join(git_dir, name) for name in _TOP_LEVEL_GIT_LOCKS]
-    for root, _dirs, files in os.walk(os.path.join(git_dir, "refs")):
-        candidates.extend(os.path.join(root, f) for f in files if f.endswith(".lock"))
-    for lock in candidates:
-        try:
-            if os.path.getmtime(lock) >= started - 1:
-                os.remove(lock)
-                logging.warning("Removed git lock left by killed git process: %s", lock)
-        except FileNotFoundError:
-            continue
-        except OSError as e:
-            logging.warning("Could not remove git lock %s: %s", lock, e)
-
-
-def _run_git(args: list[str], *, cwd, timeout: float, **kwargs) -> subprocess.CompletedProcess:
-    """subprocess.run(["git", *args]) that turns a timeout into CalledProcessError.
-
-    subprocess.run kills the child on timeout; raising CalledProcessError (not
-    TimeoutExpired) lets the existing ``except CalledProcessError`` retry paths
-    handle a hang exactly like a failed command.
-    """
-    started = time.time()
-    kwargs.setdefault("env", _git_env())
+def _terminate_process_group(proc: subprocess.Popen) -> None:
+    """SIGTERM git's whole process group (git + ssh/pack-objects children), then SIGKILL leftovers."""
     try:
-        return subprocess.run(["git", *args], cwd=cwd, timeout=timeout, **kwargs)
-    except subprocess.TimeoutExpired as e:
-        _remove_locks_left_by_killed_git(cwd, started)
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=GIT_TERM_GRACE_SEC)
+    except subprocess.TimeoutExpired:
+        logging.warning("git (pid %s) ignored SIGTERM for %ss, killing its process group", proc.pid, GIT_TERM_GRACE_SEC)
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _as_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _run_git(
+    args: list[str],
+    *,
+    cwd,
+    timeout: float | None = None,
+    check: bool = False,
+    capture_output: bool = False,
+    text: bool = False,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run ``git <args>`` like subprocess.run, with a hard timeout.
+
+    - ``timeout`` defaults to ``git_timeout(args)``.
+    - git runs in its own session, so on timeout the whole process group (git
+      and children such as ssh or pack-objects) is terminated, not just git.
+    - A timeout raises CalledProcessError (not TimeoutExpired), so the existing
+      ``except CalledProcessError`` retry paths treat a hang like a failed
+      command. git's partial output is kept in the exception.
+    """
+    timeout = git_timeout(args) if timeout is None else timeout
+    pipe = subprocess.PIPE if capture_output else None
+    proc = subprocess.Popen(
+        ["git", *args],
+        cwd=cwd,
+        stdout=pipe,
+        stderr=pipe,
+        text=text,
+        env=_git_env() if env is None else env,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_process_group(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=GIT_TERM_GRACE_SEC)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = None, None
+        note = f"git timed out after {timeout:.0f}s and was terminated"
         raise subprocess.CalledProcessError(
-            returncode=-9,
-            cmd=e.cmd,
-            output=e.output,
-            stderr=f"git timed out after {timeout:.0f}s and was killed",
-        ) from e
+            returncode=proc.returncode if proc.returncode is not None else -signal.SIGKILL,
+            cmd=proc.args,
+            output=stdout,
+            stderr=f"{_as_text(stderr).rstrip()}\n{note}".lstrip(),
+        ) from None
+    if check and proc.returncode:
+        raise subprocess.CalledProcessError(proc.returncode, proc.args, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
 
 def _small_memory_machine() -> bool:
@@ -159,7 +178,7 @@ def configure_git_low_memory() -> None:
         return
     for command in _LOW_MEMORY_GIT_CONFIG:
         try:
-            _run_git(command[1:], cwd=None, timeout=GIT_LOCAL_TIMEOUT_SEC, check=True)
+            _run_git(command[1:], cwd=None, check=True)
         except subprocess.CalledProcessError as e:
             logging.warning(f"git low-memory config failed: {command}: {e}")
     _git_low_memory_configured = True
@@ -233,7 +252,6 @@ def _clone_repo(repo_url: str, repo_path: str, sparse_paths: tuple[str, ...] | N
             "--no-checkout", repo_url, repo_path,
         ],
         cwd=None,
-        timeout=GIT_CLONE_TIMEOUT_SEC,
         check=True,
         capture_output=True,
         text=True,
@@ -353,7 +371,6 @@ def _path_in_commit(repo_root: str, commit: str, path: str) -> bool:
         _run_git(
             ["cat-file", "-e", f"{commit}:{path}"],
             cwd=repo_root,
-            timeout=GIT_LOCAL_TIMEOUT_SEC,
             capture_output=True,
         ).returncode
         == 0
@@ -408,7 +425,6 @@ def _squash_commit_and_push(
     no_staged_changes = _run_git(
         ["diff", "--cached", "--quiet"],
         cwd=repo_root,
-        timeout=GIT_LOCAL_TIMEOUT_SEC,
         capture_output=True,
     ).returncode == 0
     if no_staged_changes:
@@ -463,7 +479,6 @@ def run_git_command(args, cwd, timeout: float | None = None):
     command, so callers' retry logic runs instead of blocking forever.
     """
     command_str = ' '.join(['git'] + args)
-    timeout = git_timeout(args) if timeout is None else timeout
     logging.info(f"Running git command: {command_str} (cwd: {cwd})")
     try:
         result = _run_git(args, cwd=cwd, timeout=timeout, capture_output=True, text=True, check=True)

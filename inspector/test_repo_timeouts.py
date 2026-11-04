@@ -39,7 +39,7 @@ def test_hanging_git_is_killed_and_reported_as_failed_command(hanging_git, tmp_p
     with pytest.raises(subprocess.CalledProcessError) as exc:
         repo.run_git_command(["push", "origin", "HEAD:main"], cwd=tmp_path, timeout=0.5)
     assert time.monotonic() - started < 10
-    assert exc.value.returncode == -9
+    assert exc.value.returncode < 0  # terminated by a signal
     assert "timed out" in exc.value.stderr
 
 
@@ -56,42 +56,65 @@ def test_fast_commands_unaffected(tmp_path):
     assert repo.run_git_command(["status", "--porcelain"], cwd=tmp_path) == ""
 
 
-def test_locks_left_by_killed_git_are_removed_but_older_ones_kept(tmp_path, monkeypatch):
-    work = tmp_path / "work"
-    refs = work / ".git" / "refs" / "remotes" / "origin"
-    refs.mkdir(parents=True)
-    # a lock that existed before our command: not ours, must survive
-    old_lock = work / ".git" / "packed-refs.lock"
-    old_lock.write_text("")
-    past = time.time() - 3600
-    os.utime(old_lock, (past, past))
-
+def _fake_git(tmp_path, monkeypatch, script):
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
     fake = bin_dir / "git"
-    # killed mid-fetch: holds the index lock and the remote-tracking ref lock
-    fake.write_text(
-        "#!/bin/sh\n"
-        "touch .git/index.lock .git/refs/remotes/origin/main.lock\n"
-        "sleep 30\n"
-    )
+    fake.write_text("#!/bin/sh\n" + script)
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
+
+def test_timeout_sends_sigterm_so_git_can_remove_its_own_locks(tmp_path, monkeypatch):
+    work = tmp_path / "work"
+    (work / ".git").mkdir(parents=True)
+    # like git: holds index.lock while working and removes it when it gets SIGTERM
+    _fake_git(tmp_path, monkeypatch,
+              "touch .git/index.lock\n"
+              "trap 'rm -f .git/index.lock; exit 143' TERM\n"
+              "sleep 30 & wait\n")
     with pytest.raises(subprocess.CalledProcessError):
         repo.run_git_command(["fetch", "origin"], cwd=work, timeout=0.5)
-
     assert not (work / ".git" / "index.lock").exists()
-    assert not (refs / "main.lock").exists()
-    assert old_lock.exists()
 
 
-def test_lock_cleanup_from_subdirectory_finds_repo_root(tmp_path):
-    sub = tmp_path / "work" / "data" / "x"
-    sub.mkdir(parents=True)
-    (tmp_path / "work" / ".git").mkdir()
-    assert repo._git_dir(sub) == str(tmp_path / "work" / ".git")
-    assert repo._git_dir(tmp_path) is None
+def test_timeout_terminates_children_of_git(tmp_path, monkeypatch):
+    pidfile = tmp_path / "child.pid"
+    # a child (like ssh) that would otherwise outlive the killed git
+    _fake_git(tmp_path, monkeypatch, f"sleep 60 &\necho $! > {pidfile}\nsleep 60\n")
+    with pytest.raises(subprocess.CalledProcessError):
+        repo.run_git_command(["push", "origin", "HEAD:main"], cwd=tmp_path, timeout=0.5)
+    child = int(pidfile.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("git's child process survived the timeout")
+
+
+def test_timeout_keeps_partial_git_output_as_text(tmp_path, monkeypatch):
+    _fake_git(tmp_path, monkeypatch,
+              "echo 'Enumerating objects: 5, done.'\n"
+              "echo 'Writing objects: 40% (2/5)' >&2\n"
+              "sleep 30\n")
+    with pytest.raises(subprocess.CalledProcessError) as exc:
+        repo.run_git_command(["push", "origin", "HEAD:main"], cwd=tmp_path, timeout=0.5)
+    assert "Writing objects: 40% (2/5)" in exc.value.stderr
+    assert "timed out after" in exc.value.stderr
+    assert exc.value.stdout == "Enumerating objects: 5, done.\n"
+
+
+def test_sigterm_ignoring_git_is_killed(tmp_path, monkeypatch):
+    monkeypatch.setattr(repo, "GIT_TERM_GRACE_SEC", 0.5)
+    _fake_git(tmp_path, monkeypatch, "trap '' TERM\nsleep 30\n")
+    started = time.monotonic()
+    with pytest.raises(subprocess.CalledProcessError):
+        repo.run_git_command(["fetch", "origin"], cwd=tmp_path, timeout=0.5)
+    assert time.monotonic() - started < 10
 
 
 def test_git_env_adds_ssh_keepalives_and_http_stall_limit():
