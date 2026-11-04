@@ -116,20 +116,70 @@ def _git_env(base: dict[str, str] | None = None) -> dict[str, str]:
 GIT_TERM_GRACE_SEC = 5
 
 
-def _terminate_process_group(proc: subprocess.Popen) -> None:
-    """SIGTERM git's whole process group (git + ssh/pack-objects children), then SIGKILL leftovers."""
+def _stop_process_group(proc: subprocess.Popen):
+    """Stop git's whole process group (git + ssh/pack-objects children); return its remaining output.
+
+    SIGTERM first, so git can remove its lock files; while waiting the pipes are
+    drained (communicate, not wait), so git can't block on a full pipe. Anything
+    still alive after the grace period is SIGKILLed; a lock file left by that is
+    removed later by _remove_stale_git_locks.
+    """
     try:
         os.killpg(proc.pid, signal.SIGTERM)
     except ProcessLookupError:
-        return
-    try:
-        proc.wait(timeout=GIT_TERM_GRACE_SEC)
-    except subprocess.TimeoutExpired:
-        logging.warning("git (pid %s) ignored SIGTERM for %ss, killing its process group", proc.pid, GIT_TERM_GRACE_SEC)
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
         pass
+    try:
+        return proc.communicate(timeout=GIT_TERM_GRACE_SEC)
+    except subprocess.TimeoutExpired:
+        logging.warning(
+            "git (pid %s) ignored SIGTERM for %ss, killing its process group", proc.pid, GIT_TERM_GRACE_SEC
+        )
+    finally:
+        # also reaps children (e.g. ssh) that outlived git itself
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        return proc.communicate(timeout=GIT_TERM_GRACE_SEC)
+    except subprocess.TimeoutExpired:
+        return None, None
+
+
+_TOP_LEVEL_GIT_LOCKS = ("index.lock", "shallow.lock", "packed-refs.lock", "HEAD.lock", "config.lock")
+
+
+def stale_git_lock_age_sec() -> float:
+    """Every git this process starts ends within its timeout + 2 grace periods; older locks are orphans."""
+    longest = max(GIT_NETWORK_TIMEOUT_SEC, GIT_LOCAL_TIMEOUT_SEC, GIT_CLONE_TIMEOUT_SEC)
+    return longest + 2 * GIT_TERM_GRACE_SEC + 60
+
+
+def _remove_stale_git_locks(repo_root: str) -> None:
+    """Remove git lock files older than any git this process could still be running.
+
+    After a SIGKILL (git ignored SIGTERM), git leaves index.lock & co. behind and
+    every later command fails with "Unable to create '...lock': File exists".
+    Only locks older than ``stale_git_lock_age_sec()`` are removed: no git
+    started by this process can still own them, while a younger lock may belong
+    to a live git of another thread and is left alone.
+    """
+    git_dir = os.path.join(repo_root, ".git")
+    if not os.path.isdir(git_dir):
+        return
+    candidates = [os.path.join(git_dir, name) for name in _TOP_LEVEL_GIT_LOCKS]
+    for root, _dirs, files in os.walk(os.path.join(git_dir, "refs")):
+        candidates.extend(os.path.join(root, f) for f in files if f.endswith(".lock"))
+    cutoff = time.time() - stale_git_lock_age_sec()
+    for lock in candidates:
+        try:
+            if os.path.getmtime(lock) < cutoff:
+                os.remove(lock)
+                logging.warning("Removed stale git lock left by a killed git: %s", lock)
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            logging.warning("Could not remove stale git lock %s: %s", lock, e)
 
 
 def _as_text(value) -> str:
@@ -202,11 +252,7 @@ def _run_git(
     try:
         stdout, stderr = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        _terminate_process_group(proc)
-        try:
-            stdout, stderr = proc.communicate(timeout=GIT_TERM_GRACE_SEC)
-        except subprocess.TimeoutExpired:
-            stdout, stderr = None, None
+        stdout, stderr = _stop_process_group(proc)
         note = f"git timed out after {timeout:.0f}s and was terminated"
         raise subprocess.CalledProcessError(
             returncode=proc.returncode if proc.returncode is not None else -signal.SIGKILL,
@@ -214,6 +260,11 @@ def _run_git(
             output=stdout,
             stderr=f"{_as_text(stderr).rstrip()}\n{note}".lstrip(),
         ) from None
+    except BaseException:
+        # e.g. KeyboardInterrupt: git runs in its own session and didn't get the
+        # SIGINT, so stop it here rather than leave it racing later git commands
+        _stop_process_group(proc)
+        raise
     if check and proc.returncode:
         raise subprocess.CalledProcessError(proc.returncode, proc.args, output=stdout, stderr=stderr)
     return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
@@ -657,6 +708,7 @@ def push_paths(paths: list[str | os.PathLike], msg: str):
     try:
         # Pass repo_path explicitly: get_repo's default is bound at import time.
         get_repo(repo_path=repo_root)
+        _remove_stale_git_locks(repo_root)
         dirty = [p for p in dict.fromkeys(path_list) if path_has_changes(repo_root, p)]
         if not dirty:
             logging.info("No changes detected, skipping git operations")
@@ -702,6 +754,7 @@ def pull():
     repo_root = _repo_root()
     try:
         get_repo()
+        _remove_stale_git_locks(repo_root)
         run_git_command(["fetch", "origin"], cwd=repo_root)
         logging.info("Merging origin/main with 'theirs' strategy...")
         run_git_command(["merge", "-X", "theirs", "origin/main"], cwd=repo_root)

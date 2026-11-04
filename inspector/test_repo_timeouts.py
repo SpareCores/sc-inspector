@@ -344,3 +344,58 @@ def test_retry_after_give_up_does_not_revert_other_writers(tmp_path, monkeypatch
     subprocess.run([real_git, "clone", "-q", str(bare), str(tip)], check=True)
     assert (tip / "data/vendor/inst/0/task/meta.json").read_text() == '{"start":"ours"}\n'
     assert (tip / "data/vendor/inst/schedule/task/meta.json").read_text() == '{"start":"other-vm"}\n'
+
+
+def test_interrupt_stops_git_and_propagates(tmp_path, monkeypatch):
+    """Ctrl-C while waiting: git (in its own session, so no SIGINT) must be stopped."""
+    pidfile = tmp_path / "child.pid"
+    _fake_git(tmp_path, monkeypatch, f"sleep 60 &\necho $! > {pidfile}\nsleep 60\n")
+    real_communicate = subprocess.Popen.communicate
+    calls = []
+
+    def interrupted(self, *args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            time.sleep(0.3)  # let the fake git start its child
+            raise KeyboardInterrupt
+        return real_communicate(self, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        repo.run_git_command(["push", "origin", "HEAD:main"], cwd=tmp_path)
+    child = int(pidfile.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("git kept running after the interrupt")
+
+
+def test_output_written_during_termination_is_drained(tmp_path, monkeypatch):
+    """git writing a lot while shutting down must not block on a full pipe."""
+    _fake_git(tmp_path, monkeypatch,
+              "trap 'head -c 1000000 /dev/zero; exit 143' TERM\n"
+              "sleep 30 & wait\n")
+    with pytest.raises(subprocess.CalledProcessError) as exc:
+        repo.run_git_command(["fetch", "origin"], cwd=tmp_path, timeout=0.5)
+    # all of it was read: with wait() instead of communicate() git would block at 64 KiB
+    assert len(exc.value.stdout) == 1_000_000
+
+
+def test_only_locks_older_than_any_live_git_are_removed(tmp_path):
+    git_dir = tmp_path / ".git"
+    (git_dir / "refs" / "remotes" / "origin").mkdir(parents=True)
+    old = time.time() - repo.stale_git_lock_age_sec() - 60
+    stale = [git_dir / "index.lock", git_dir / "refs" / "remotes" / "origin" / "main.lock"]
+    for lock in stale:
+        lock.write_text("")
+        os.utime(lock, (old, old))
+    live = git_dir / "shallow.lock"  # e.g. another thread's running fetch
+    live.write_text("")
+    repo._remove_stale_git_locks(str(tmp_path))
+    assert not any(lock.exists() for lock in stale)
+    assert live.exists()
