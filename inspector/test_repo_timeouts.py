@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -11,17 +12,21 @@ import pytest
 import repo
 
 
-@pytest.fixture
-def hanging_git(tmp_path: Path, monkeypatch):
-    """Put a `git` on PATH that sleeps (like a stalled fetch/push)."""
+def _fake_git(tmp_path, monkeypatch, script):
+    """Put a fake `git` running ``script`` (sh) first on PATH."""
     bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
+    bin_dir.mkdir(exist_ok=True)
     fake = bin_dir / "git"
-    # like `git push` over SSH: a child process (ssh) inherits git's output pipes
-    fake.write_text("#!/bin/sh\nsleep 30 &\nsleep 30\n")
+    fake.write_text("#!/bin/sh\n" + script)
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     return fake
+
+
+@pytest.fixture
+def hanging_git(tmp_path: Path, monkeypatch):
+    """A `git` that hangs like a stalled fetch/push, with a child (like ssh) holding its pipes."""
+    return _fake_git(tmp_path, monkeypatch, "sleep 30 &\nsleep 30\n")
 
 
 def test_network_and_local_commands_get_different_timeouts():
@@ -54,15 +59,6 @@ def test_default_timeout_is_applied(hanging_git, tmp_path, monkeypatch):
 def test_fast_commands_unaffected(tmp_path):
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     assert repo.run_git_command(["status", "--porcelain"], cwd=tmp_path) == ""
-
-
-def _fake_git(tmp_path, monkeypatch, script):
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir(exist_ok=True)
-    fake = bin_dir / "git"
-    fake.write_text("#!/bin/sh\n" + script)
-    fake.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
 
 
 def test_timeout_sends_sigterm_so_git_can_remove_its_own_locks(tmp_path, monkeypatch):
@@ -141,12 +137,7 @@ def test_git_env_respects_existing_settings():
 
 
 def test_env_reaches_git_subprocess(tmp_path, monkeypatch):
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    fake = bin_dir / "git"
-    fake.write_text('#!/bin/sh\necho "$GIT_SSH_COMMAND|$GIT_HTTP_LOW_SPEED_LIMIT"\n')
-    fake.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    _fake_git(tmp_path, monkeypatch, 'echo "$GIT_SSH_COMMAND|$GIT_HTTP_LOW_SPEED_LIMIT"\n')
     monkeypatch.delenv("GIT_SSH_COMMAND", raising=False)
     monkeypatch.delenv("GIT_SSH", raising=False)
     monkeypatch.delenv("GIT_HTTP_LOW_SPEED_LIMIT", raising=False)
@@ -257,20 +248,14 @@ def test_nested_deadlines_keep_the_earliest_and_restore():
 
 def _hang_push_wrapper(tmp_path, monkeypatch, marker):
     """A `git` that delegates to the real one but hangs on `push` while ``marker`` exists."""
-    import shutil
-
     real_git = shutil.which("git")
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir(exist_ok=True)
-    wrapper = bin_dir / "git"
-    wrapper.write_text(
-        "#!/bin/sh\n"
+    _fake_git(
+        tmp_path,
+        monkeypatch,
         'for a in "$@"; do case "$a" in -*) ;; *) sub="$a"; break;; esac; done\n'
         f'if [ "$sub" = "push" ] && [ -e "{marker}" ]; then sleep 30; fi\n'
-        f'exec "{real_git}" "$@"\n'
+        f'exec "{real_git}" "$@"\n',
     )
-    wrapper.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     return real_git
 
 

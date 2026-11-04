@@ -650,19 +650,18 @@ def _push_with_retries(
     # loop ends within PUSH_DEADLINE_SEC (+ the SIGTERM grace period) even
     # when git hangs instead of failing.
     deadline = time.monotonic() + PUSH_DEADLINE_SEC
-    wait_sec = PUSH_INITIAL_BACKOFF_SEC
-    max_wait_per_round = PUSH_MAX_BACKOFF_SEC
+    wait_sec = min(PUSH_INITIAL_BACKOFF_SEC, PUSH_MAX_BACKOFF_SEC)
     attempt = 0
     while True:
         try:
             if attempt > 0:
-                sleep_sec = min(wait_sec, max_wait_per_round) + random.uniform(0, 2)
+                sleep_sec = wait_sec + random.uniform(0, 2)
                 sleep_sec = max(0.0, min(sleep_sec, deadline - time.monotonic()))
                 logging.info(
                     f"Retry attempt {attempt}: waiting {sleep_sec:.1f}s then fetch/squash/push"
                 )
                 time.sleep(sleep_sec)
-                wait_sec = min(wait_sec * 2, max_wait_per_round)
+                wait_sec = min(wait_sec * 2, PUSH_MAX_BACKOFF_SEC)
             logging.info("Fetching origin/main and squashing push...")
             # every git command of the attempt is capped at the deadline
             with git_deadline(deadline):
