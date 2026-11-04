@@ -126,6 +126,8 @@ RETRYABLE_START_ERROR_MARKERS = (
     # UpCloud: CPU core quota of N exceeded … (type=SERVER_CORE_LIMIT_REACHED)
     "SERVER_CORE_LIMIT_REACHED",
     "CPU core quota",
+    # retry_locked gave up because another run held the Pulumi stack lock
+    "Pulumi stack locked by a concurrent update",
 )
 # Region-level resource limits: unlike instance capacity, these block *every*
 # instance type in the region, not just the one being tried. No point trying
@@ -2928,16 +2930,23 @@ def retry_locked(
     error_msgs: list[str] | None = None,
     **kwargs,
 ):
-    """Retry a pulumi function with random backoff for locking and transient quota errors."""
+    """Retry a pulumi function with random backoff for locking and transient quota errors.
+
+    Raises StackLockedError when every attempt hit a concurrent stack lock:
+    falling off the loop used to return None, which callers took as a
+    successful create although nothing was provisioned.
+    """
     import pulumi
 
+    last_lock_error: Exception | None = None
     for i in range(3):
         if instance_timing is not None:
             instance_timing.reset()
         try:
             return func(*args, **kwargs)
-        except pulumi.automation.errors.ConcurrentUpdateError:
+        except pulumi.automation.errors.ConcurrentUpdateError as exc:
             logger.exception(f"ConcurrentUpdateError, retry #{i}")
+            last_lock_error = exc
             time.sleep(random.randint(1, 5))
         except Exception as exc:
             if is_retryable_pulumi_error(exc, error_msgs) and i < 2:
@@ -2945,6 +2954,10 @@ def retry_locked(
                 time.sleep(random.randint(1, 5))
                 continue
             raise
+    message = "Pulumi stack locked by a concurrent update (3 attempts)"
+    if error_msgs is not None:
+        error_msgs.append(message)
+    raise StackLockedError(message) from last_lock_error
 
 
 def _try_start_multi_vm_inspect(
