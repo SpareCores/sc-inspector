@@ -1,5 +1,7 @@
 """Quota-aware region order for Azure VM starts (no Azure calls: everything is faked)."""
 
+import time
+
 import pytest
 
 import azure_vm_regions as avr
@@ -50,8 +52,10 @@ def fake_azure(monkeypatch):
     monkeypatch.setattr(avr, "_vm_quotas", lambda sub, region: FAKE[region][1])
     monkeypatch.setattr(avr, "_network_quotas", lambda sub, region: FAKE[region][2])
     avr.reset_ledger()
+    avr.reset_region_cache()
     yield
     avr.reset_ledger()
+    avr.reset_region_cache()
 
 
 def test_eligible_regions_first_then_price_ordered_fallback(fake_azure):
@@ -231,3 +235,61 @@ def test_public_ip_lookup_failure_only_skips_the_ip_check(fake_azure, monkeypatc
     # northeurope (no Basic IP left) becomes eligible as IPs are unknown; vCPU checks still apply
     assert set(plan.regions[:3]) == {"centralus", "swedencentral", "northeurope"}
     assert plan.regions[3:] == ["eastus", "westeurope", "uksouth", "canadacentral"]
+
+
+def test_one_failing_region_only_moves_that_region_to_fallback(fake_azure, monkeypatch):
+    real = avr._vm_quotas
+
+    def flaky(sub, region):
+        if region == "centralus":
+            raise RuntimeError("429 Too Many Requests")
+        return real(sub, region)
+
+    monkeypatch.setattr(avr, "_vm_quotas", flaky)
+    plan = avr.order_regions(SKU, 16, PRICE_ORDER)
+    # swedencentral still planned quota-aware; centralus tried last-ish in the fallback
+    assert plan.regions[0] == "swedencentral"
+    assert plan.held is not None and plan.held.region == "swedencentral"
+    assert plan.regions[1:] == ["eastus", "centralus", "westeurope", "northeurope", "uksouth", "canadacentral"]
+
+
+def test_parallel_planning_fetches_each_region_once(fake_azure, monkeypatch):
+    import threading
+    from collections import Counter
+
+    calls = Counter()
+    lock = threading.Lock()
+    real = avr._vm_quotas
+
+    def counting(sub, region):
+        with lock:
+            calls[region] += 1
+        time.sleep(0.01)  # make the threads overlap
+        return real(sub, region)
+
+    monkeypatch.setattr(avr, "_vm_quotas", counting)
+    threads = [threading.Thread(target=avr.order_regions, args=(SKU, 16, PRICE_ORDER)) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert calls == {region: 1 for region in PRICE_ORDER}
+
+
+def test_failed_region_is_not_refetched_within_ttl(fake_azure, monkeypatch):
+    from collections import Counter
+
+    calls = Counter()
+
+    def failing(sub, region):
+        calls[region] += 1
+        raise RuntimeError("timeout")
+
+    monkeypatch.setattr(avr, "_vm_quotas", failing)
+    for _ in range(5):
+        avr.order_regions(SKU, 16, PRICE_ORDER)
+    assert calls == {region: 1 for region in PRICE_ORDER}
+
+    monkeypatch.setattr(avr, "REGION_DATA_ERROR_TTL_SEC", 0)
+    avr.order_regions(SKU, 16, PRICE_ORDER)
+    assert calls == {region: 2 for region in PRICE_ORDER}

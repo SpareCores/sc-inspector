@@ -31,7 +31,9 @@ import logging
 import os
 import random
 import threading
+import time
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
@@ -255,6 +257,84 @@ def weighted_shuffle(checks: list[RegionCheck], rng: Any = random) -> list[str]:
     return [region for _key, region in sorted(keyed, reverse=True)]
 
 
+# ---------------------------------------------------------------------------
+# Per-region Azure data, fetched once per job
+#
+# ~20 start threads plan at the same moment; with plain lru_caches they all
+# missed together and each fetched every region (~150 ARM GETs per thread),
+# which is slow and provokes ARM throttling. A per-region lock makes one thread
+# fetch while the others wait for its result; failures are cached briefly so a
+# throttled region is not hammered by every thread.
+# ---------------------------------------------------------------------------
+
+REGION_DATA_ERROR_TTL_SEC = 60
+PREFETCH_WORKERS = 8
+
+
+@dataclass(frozen=True)
+class RegionData:
+    sku_index: dict[str, ComputeSkuInfo]
+    vm_quotas: dict[str, QuotaEntry]
+    network_quotas: dict[str, QuotaEntry]
+
+
+_region_cache: dict[tuple[str, str], tuple[float, RegionData | Exception]] = {}
+_region_locks: dict[tuple[str, str], threading.Lock] = {}
+_region_locks_guard = threading.Lock()
+
+
+def _region_lock(key: tuple[str, str]) -> threading.Lock:
+    with _region_locks_guard:
+        return _region_locks.setdefault(key, threading.Lock())
+
+
+def region_data(subscription_id: str, region: str) -> RegionData:
+    """SKU index + VM usage + public IP usage for one region (cached; raises on failure)."""
+    key = (subscription_id, region)
+    with _region_lock(key):
+        cached = _region_cache.get(key)
+        if cached is not None:
+            fetched_at, value = cached
+            if not isinstance(value, Exception):
+                return value
+            if time.monotonic() - fetched_at < REGION_DATA_ERROR_TTL_SEC:
+                raise value
+        try:
+            value = RegionData(
+                sku_index=_region_compute_sku_index(subscription_id, region),
+                vm_quotas=_vm_quotas(subscription_id, region),
+                network_quotas=_network_quotas_or_empty(subscription_id, region),
+            )
+        except Exception as exc:
+            _region_cache[key] = (time.monotonic(), exc)
+            raise
+        _region_cache[key] = (time.monotonic(), value)
+        return value
+
+
+def prefetch_region_data(subscription_id: str, regions: list[str]) -> None:
+    """Fetch not-yet-cached regions in parallel (errors are cached, not raised)."""
+    missing = [r for r in regions if (subscription_id, r) not in _region_cache]
+    if len(missing) < 2:
+        return
+
+    def fetch(region: str) -> None:
+        try:
+            region_data(subscription_id, region)
+        except Exception:
+            pass
+
+    with ThreadPoolExecutor(max_workers=min(PREFETCH_WORKERS, len(missing))) as pool:
+        list(pool.map(fetch, missing))
+
+
+def reset_region_cache() -> None:
+    """Forget cached region data (tests)."""
+    with _region_locks_guard:
+        _region_cache.clear()
+        _region_locks.clear()
+
+
 def order_regions(
     sku: str,
     vcpus: int,
@@ -276,30 +356,42 @@ def order_regions(
     if not sub:
         logger.warning("Azure VM region quota check skipped: subscription id not configured")
         return RegionPlan(list(price_ordered), vcpus=vcpus)
+    family = None
     try:
         family = sku_family_quota_name(sku)
-        data = {
-            region: (
-                _region_compute_sku_index(sub, region),
-                _vm_quotas(sub, region),
-                _network_quotas_or_empty(sub, region),
-            )
-            for region in price_ordered
-        }
     except Exception as exc:
-        logger.warning("Azure VM region quota check failed for %s, using price order: %s", sku, exc)
-        return RegionPlan(list(price_ordered), vcpus=vcpus)
+        logger.warning("Azure quota family lookup failed for %s: %s", sku, exc)
+
+    # One region's lookup failing (4xx, throttling, timeout) only moves that
+    # region to the fallback list; the others keep their quota-aware order.
+    prefetch_region_data(sub, price_ordered)
+    data: dict[str, RegionData] = {}
+    failed: dict[str, str] = {}
+    for region in price_ordered:
+        try:
+            data[region] = region_data(sub, region)
+        except Exception as exc:
+            failed[region] = str(exc)
+    if failed:
+        logger.warning(
+            "Azure quota lookup failed for %d region(s) of %s, trying them last: %s",
+            len(failed),
+            sku,
+            {region: reason[:120] for region, reason in failed.items()},
+        )
 
     with _ledger_lock:
         checks = [
-            check_region(
+            RegionCheck(region, False, f"quota lookup failed: {failed[region][:120]}")
+            if region in failed
+            else check_region(
                 region,
                 sku=sku,
                 vcpus=vcpus,
                 family=family,
-                sku_index=data[region][0],
-                vm_quotas=data[region][1],
-                network_quotas=data[region][2],
+                sku_index=data[region].sku_index,
+                vm_quotas=data[region].vm_quotas,
+                network_quotas=data[region].network_quotas,
             )
             for region in price_ordered
         ]
