@@ -153,30 +153,64 @@ def _dbaas_client_location(vendor: str, region: str) -> str:
     return region
 
 
+# DBaaS client VMs are fixed 2-vCPU sizes (benchmark_tiers.dbaas_client_req).
+DBAAS_CLIENT_VCPUS = 2
+
+
 def _prefer_azure_regions_with_quota(
     regions: list[str],
     *,
     pg_sku: str,
     pg_vcpus: int,
     prices: dict[str, float],
+    rng=None,
 ) -> list[str]:
-    """Reorder Azure regions: Flexible Server offer+quota first, then VM core headroom, then price.
+    """Reorder Azure regions: ready regions in weighted random order, then the rest by price.
+
+    A region is ready when Flexible Server offers the SKU with quota headroom AND it
+    can host the client VM (2 free regional vCPUs and a free public IP, if known).
+    Ready regions are shuffled with weights by client capacity (capped, see
+    azure_vm_regions.weighted_shuffle) so parallel stacks spread out instead of all
+    landing in the region with the most VM cores. Regions with PG quota but no
+    client headroom come next, then regions without PG quota, each by price.
 
     Recent start-dbaas runs (e.g. 41428276071) succeeded in quota-bearing regions such as
     eastus2 / uaenorth, while pure price order spent hours on offer-restricted or
     SKU-not-offered locations (eastus, …) and then piled companions into a 10-core eastus2.
+    On 2026-11-04 the old "most VM cores first" order sent every stack to centralus
+    (22k cores) until its 20 Basic public IPs ran out.
     """
+    import random
+
     from azure_dbaas_quota import vm_regional_cores_available
+    from azure_vm_regions import RegionCheck, public_ips_free, weighted_shuffle
 
-    def sort_key(region: str) -> tuple:
-        ok, _reason = check_dbaas_postgres_quota(
-            "azure", region, pg_sku, pg_vcpus
-        )
-        cores = vm_regional_cores_available(region) if ok else -1
-        price = prices.get(region, float("inf"))
-        return (0 if ok else 1, -cores, price, region)
+    def price_key(region: str) -> tuple:
+        return (prices.get(region, float("inf")), region)
 
-    return sorted(regions, key=sort_key)
+    ready: list[RegionCheck] = []
+    no_client: list[str] = []
+    no_pg: list[str] = []
+    for region in regions:
+        ok, _reason = check_dbaas_postgres_quota("azure", region, pg_sku, pg_vcpus)
+        if not ok:
+            no_pg.append(region)
+            continue
+        cores = vm_regional_cores_available(region)
+        ips = public_ips_free(region)
+        if cores < DBAAS_CLIENT_VCPUS or (ips is not None and ips < 1):
+            no_client.append(region)
+            continue
+        fits = cores // DBAAS_CLIENT_VCPUS
+        if ips is not None:
+            fits = min(fits, ips)
+        ready.append(RegionCheck(region, True, fits=fits))
+    ready.sort(key=lambda check: price_key(check.region))
+    return (
+        weighted_shuffle(ready, rng or random)
+        + sorted(no_client, key=price_key)
+        + sorted(no_pg, key=price_key)
+    )
 
 
 def _dbaas_location_candidates(

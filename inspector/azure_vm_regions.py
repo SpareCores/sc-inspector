@@ -224,6 +224,20 @@ def check_region(
     return RegionCheck(region, True, fits=max(fits, 1))
 
 
+def public_ips_free(region: str, subscription_id: str | None = None) -> int | None:
+    """Fewest free public IPs across the caps a VM consumes; None if unknown."""
+    if _disabled():
+        return None
+    sub = subscription_id or _subscription_id()
+    if not sub:
+        return None
+    quotas = _network_quotas_or_empty(sub, region)
+    with _ledger_lock:
+        frees = [_free(quotas, region, key) for key in PUBLIC_IP_QUOTAS]
+    frees = [free for free in frees if free is not None]
+    return min(frees) if frees else None
+
+
 # Cap on a region's weight: a huge regional cap (e.g. 22k vCPUs) should not make
 # one region win almost every draw when a family quota entry is missing.
 MAX_WEIGHT = 20
