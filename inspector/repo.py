@@ -439,32 +439,24 @@ def _path_in_commit(repo_root: str, commit: str, path: str) -> bool:
     )
 
 
-def _squash_commit_and_push(
+def _stage_onto_origin_main(
     repo_root: str,
     rel_path: str,
-    msg: str,
     changed_files: list[str],
     saved_head: str,
-) -> None:
-    """
-    Publish *only* ``changed_files`` as a single commit on origin/main.
+) -> bool:
+    """Reset to origin/main and stage *only* ``changed_files`` from ``saved_head``.
 
-    The caller captures ``changed_files`` and ``saved_head`` once (before
-    fetching) so retries still restore from the inspector's result commit even
-    after a failed attempt's ``reset --hard origin/main``.  Present files are
-    checked out from ``saved_head``; paths deleted there (stale stdout/stderr)
-    are ``git rm``'d after the reset — ``git checkout saved_head -- deleted``
-    would pathspec-fail and wipe the working tree for good.
+    Present files are checked out from ``saved_head``; paths deleted there
+    (stale stdout/stderr) are ``git rm``'d after the reset — ``git checkout
+    saved_head -- deleted`` would pathspec-fail and wipe the working tree for
+    good. Returns True if anything differs from origin/main.
     """
-    if not changed_files:
-        logging.info("No changed files under %s to push", rel_path)
-        return
-
     origin = "origin/main"
     present = [f for f in changed_files if _path_in_commit(repo_root, saved_head, f)]
     deleted = [f for f in changed_files if f not in present]
     logging.info(
-        "Squashing %d files under %s onto %s from %s (%d present, %d deleted)",
+        "Staging %d files under %s onto %s from %s (%d present, %d deleted)",
         len(changed_files),
         rel_path,
         origin,
@@ -484,13 +476,32 @@ def _squash_commit_and_push(
     if to_remove:
         run_git_command(["rm", "-f", "--"] + to_remove, cwd=repo_root)
 
-    no_staged_changes = _run_git(
+    return _run_git(
         ["diff", "--cached", "--quiet"],
         cwd=repo_root,
         capture_output=True,
-    ).returncode == 0
-    if no_staged_changes:
-        logging.info("Already up to date with %s for %s after squash", origin, rel_path)
+    ).returncode != 0
+
+
+def _squash_commit_and_push(
+    repo_root: str,
+    rel_path: str,
+    msg: str,
+    changed_files: list[str],
+    saved_head: str,
+) -> None:
+    """
+    Publish *only* ``changed_files`` as a single commit on origin/main.
+
+    The caller captures ``changed_files`` and ``saved_head`` once (before
+    fetching) so retries still restore from the inspector's result commit even
+    after a failed attempt's ``reset --hard origin/main``.
+    """
+    if not changed_files:
+        logging.info("No changed files under %s to push", rel_path)
+        return
+    if not _stage_onto_origin_main(repo_root, rel_path, changed_files, saved_head):
+        logging.info("Already up to date with origin/main for %s after squash", rel_path)
         return
 
     run_git_command(["commit", "-m", msg], cwd=repo_root)
@@ -597,20 +608,23 @@ def _push_with_retries(
             logging.warning(f"Push failed (attempt {attempt}), will retry with backoff: {e}")
 
 
-def _restore_unpushed_results(repo_root: str, start_head: str, saved_head: str) -> None:
-    """Leave unpushed results as staged changes on top of ``start_head``.
+def _restore_unpushed_results(
+    repo_root: str, rel_label: str, changed_files: list[str], saved_head: str
+) -> None:
+    """Leave unpushed results as uncommitted changes on top of origin/main.
 
     When push_paths gives up, HEAD is our local result commit or the squash
     commit and the working tree is clean, so a retry (e.g. _push_data_dirs)
     saw "No changes detected", reported success, and the next
-    ``reset --hard origin/main`` silently dropped the results. Resetting hard
-    to the result commit restores the files (a squash may have been cut off
-    after its reset), and the soft reset back to the starting HEAD leaves them
-    staged, exactly what the next push_paths call picks up.
+    ``reset --hard origin/main`` silently dropped the results.
+
+    The results are staged onto the *current* origin/main (the squash steps
+    without the commit), not onto the commit push_paths started from: the
+    failed attempt's fetch may have moved origin/main past other writers'
+    changes, and a retry diffing from the old base would revert them.
     """
     try:
-        run_git_command(["reset", "--hard", saved_head], cwd=repo_root)
-        run_git_command(["reset", "--soft", start_head], cwd=repo_root)
+        _stage_onto_origin_main(repo_root, rel_label, changed_files, saved_head)
         logging.warning("Push gave up; unpushed results kept as staged changes for the next push")
     except Exception as e:
         logging.error(f"Could not restore unpushed results from {saved_head[:8]}: {e}")
@@ -650,8 +664,6 @@ def push_paths(paths: list[str | os.PathLike], msg: str):
         rel_paths = [os.path.relpath(p, repo_root) for p in dirty]
         for rel_path in rel_paths:
             _assert_path_in_sparse(rel_path)
-        # HEAD before our result commit: restored (with results staged) if the push gives up
-        start_head = run_git_command(["rev-parse", "HEAD"], cwd=repo_root).strip()
         logging.info("Staging changes under %s...", rel_paths)
         run_git_command(["add", "--"] + rel_paths, cwd=repo_root)
         logging.info("Committing changes...")
@@ -672,7 +684,7 @@ def push_paths(paths: list[str | os.PathLike], msg: str):
         try:
             _push_with_retries(repo_root, rel_label, msg, changed_files, saved_head)
         except BaseException:
-            _restore_unpushed_results(repo_root, start_head, saved_head)
+            _restore_unpushed_results(repo_root, rel_label, changed_files, saved_head)
             raise
     except Exception as e:
         logging.error(f"Failed to push paths {path_list}: {e}", exc_info=True)

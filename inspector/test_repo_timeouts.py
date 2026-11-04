@@ -305,3 +305,42 @@ def test_results_survive_a_push_that_gives_up(tmp_path, monkeypatch):
     assert (tip / "data/vendor/inst/0/task/meta.json").read_text() == '{"start":"result"}\n'
     assert not (tip / "data/vendor/inst/0/task/stdout").exists()
     assert (tip / "data/vendor/inst/0/task/keep.txt").exists()
+
+
+def test_retry_after_give_up_does_not_revert_other_writers(tmp_path, monkeypatch):
+    """Another VM pushes under the same path; our push gives up and is retried.
+
+    The retry must publish our result without reverting the other VM's change
+    (the GitHub Actions start job pushes the whole data/ directory).
+    """
+    from test_repo_squash import _git, _init_bare_and_clone
+
+    bare, work = _init_bare_and_clone(tmp_path)
+    other = tmp_path / "other-vm"
+    _git(tmp_path, "clone", str(bare), str(other))
+    _git(other, "config", "user.email", "o@example.com")
+    _git(other, "config", "user.name", "other")
+    other_meta = other / "data" / "vendor" / "inst" / "schedule" / "task" / "meta.json"
+    other_meta.write_text('{"start":"other-vm"}\n')
+    _git(other, "commit", "-am", "other VM result")
+    _git(other, "push", "origin", "HEAD:main")
+
+    marker = tmp_path / "hang-push"
+    marker.write_text("")
+    real_git = _hang_push_wrapper(tmp_path, monkeypatch, marker)
+    monkeypatch.setattr(repo, "REPO_PATH", str(work))
+    monkeypatch.setattr(repo, "should_push", lambda: True)
+    monkeypatch.setattr(repo, "PUSH_DEADLINE_SEC", 3)
+    monkeypatch.setattr(repo, "PUSH_INITIAL_BACKOFF_SEC", 0.1)
+
+    (work / "data" / "vendor" / "inst" / "0" / "task" / "meta.json").write_text('{"start":"ours"}\n')
+    with pytest.raises(subprocess.CalledProcessError):
+        repo.push_paths([work / "data"], "ours")
+
+    marker.unlink()
+    repo.push_paths([work / "data"], "ours (retry)")
+
+    tip = tmp_path / "verify-other"
+    subprocess.run([real_git, "clone", "-q", str(bare), str(tip)], check=True)
+    assert (tip / "data/vendor/inst/0/task/meta.json").read_text() == '{"start":"ours"}\n'
+    assert (tip / "data/vendor/inst/schedule/task/meta.json").read_text() == '{"start":"other-vm"}\n'
