@@ -3437,8 +3437,16 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         except Exception:
             azure_cvm = False
         done = False
-        for region in candidate_regions(vendor, server, regions):
+        import azure_vm_regions
+
+        # Regions with quota first, in weighted random order (see azure_vm_regions);
+        # the rest stay as a price-ordered fallback.
+        plan = azure_vm_regions.order_regions(
+            server, int(srv_data.vcpus or 0), candidate_regions(vendor, server, regions)
+        )
+        for region in plan.regions:
             logger.info(f"Trying {region}")
+            reservation = plan.reserve(region)
             resource_opts["region"] = region
             user_data, b64_user_data = build_inspector_user_data(
                 vendor, server, srv_data, region, None, timeout_mins, ssh_deploy_key_b64, repo_url_ssh
@@ -3481,6 +3489,8 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                     break
             if done:
                 break
+            # failed here: hand the reserved quota/IP back to the other start threads
+            azure_vm_regions.release(reservation)
 
     if vendor == "gcp":
         resource_opts = dict(instance=server, disk_size=VOLUME_SIZE)
