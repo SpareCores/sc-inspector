@@ -92,3 +92,40 @@ def test_lock_cleanup_from_subdirectory_finds_repo_root(tmp_path):
     (tmp_path / "work" / ".git").mkdir()
     assert repo._git_dir(sub) == str(tmp_path / "work" / ".git")
     assert repo._git_dir(tmp_path) is None
+
+
+def test_git_env_adds_ssh_keepalives_and_http_stall_limit():
+    env = repo._git_env({"PATH": "/usr/bin"})
+    assert env["GIT_SSH_COMMAND"].startswith("ssh ")
+    assert "ServerAliveInterval=15" in env["GIT_SSH_COMMAND"]
+    assert "ConnectTimeout=30" in env["GIT_SSH_COMMAND"]
+    assert env["GIT_HTTP_LOW_SPEED_LIMIT"] == "1000"
+    assert env["GIT_HTTP_LOW_SPEED_TIME"] == "60"
+    assert env["PATH"] == "/usr/bin"
+
+
+def test_git_env_respects_existing_settings():
+    custom = repo._git_env({"GIT_SSH_COMMAND": "ssh -i /k", "GIT_HTTP_LOW_SPEED_TIME": "300"})
+    assert custom["GIT_SSH_COMMAND"] == f"ssh -i /k {repo.GIT_SSH_TIMEOUT_OPTIONS}"
+    assert custom["GIT_HTTP_LOW_SPEED_TIME"] == "300"
+
+    already = repo._git_env({"GIT_SSH_COMMAND": "ssh -o ServerAliveInterval=5"})
+    assert already["GIT_SSH_COMMAND"] == "ssh -o ServerAliveInterval=5"
+
+    # a custom GIT_SSH program must not be overridden by GIT_SSH_COMMAND
+    wrapper = repo._git_env({"GIT_SSH": "/usr/local/bin/my-ssh"})
+    assert "GIT_SSH_COMMAND" not in wrapper
+
+
+def test_env_reaches_git_subprocess(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "git"
+    fake.write_text('#!/bin/sh\necho "$GIT_SSH_COMMAND|$GIT_HTTP_LOW_SPEED_LIMIT"\n')
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.delenv("GIT_SSH_COMMAND", raising=False)
+    monkeypatch.delenv("GIT_SSH", raising=False)
+    monkeypatch.delenv("GIT_HTTP_LOW_SPEED_LIMIT", raising=False)
+    out = repo.run_git_command(["fetch", "origin"], cwd=tmp_path).strip()
+    assert out == f"ssh {repo.GIT_SSH_TIMEOUT_OPTIONS}|1000"

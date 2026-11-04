@@ -53,6 +53,34 @@ def git_timeout(args: list[str]) -> float:
     return GIT_LOCAL_TIMEOUT_SEC
 
 
+# Transport-level timeouts: detect a dead/stalled connection within ~1 minute
+# instead of waiting for the hard subprocess timeout.
+GIT_SSH_TIMEOUT_OPTIONS = "-o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+GIT_HTTP_LOW_SPEED = {"GIT_HTTP_LOW_SPEED_LIMIT": "1000", "GIT_HTTP_LOW_SPEED_TIME": "60"}
+
+
+def _git_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment for git subprocesses with SSH keepalives and an HTTP stall limit.
+
+    - SSH (inspector VMs push via the deploy key): connect timeout and
+      ServerAlive probes, so a silently dropped connection fails in ~60s.
+      A custom GIT_SSH is left alone; an existing GIT_SSH_COMMAND gets the
+      options appended unless it already sets ServerAliveInterval.
+    - HTTPS (GitHub Actions with GITHUB_TOKEN): abort transfers slower than
+      1 KB/s for 60s, unless GIT_HTTP_LOW_SPEED_* are already set.
+    """
+    env = dict(os.environ if base is None else base)
+    ssh_command = env.get("GIT_SSH_COMMAND")
+    if ssh_command:
+        if "ServerAliveInterval" not in ssh_command:
+            env["GIT_SSH_COMMAND"] = f"{ssh_command} {GIT_SSH_TIMEOUT_OPTIONS}"
+    elif not env.get("GIT_SSH"):
+        env["GIT_SSH_COMMAND"] = f"ssh {GIT_SSH_TIMEOUT_OPTIONS}"
+    for key, value in GIT_HTTP_LOW_SPEED.items():
+        env.setdefault(key, value)
+    return env
+
+
 _TOP_LEVEL_GIT_LOCKS = ("index.lock", "shallow.lock", "packed-refs.lock", "HEAD.lock", "config.lock", "FETCH_HEAD.lock")
 
 
@@ -102,6 +130,7 @@ def _run_git(args: list[str], *, cwd, timeout: float, **kwargs) -> subprocess.Co
     handle a hang exactly like a failed command.
     """
     started = time.time()
+    kwargs.setdefault("env", _git_env())
     try:
         return subprocess.run(["git", *args], cwd=cwd, timeout=timeout, **kwargs)
     except subprocess.TimeoutExpired as e:
