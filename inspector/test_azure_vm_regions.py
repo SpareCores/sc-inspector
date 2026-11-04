@@ -95,3 +95,36 @@ def test_no_subscription_keeps_price_order(fake_azure, monkeypatch):
 def test_location_restriction_without_location_list_blocks_everywhere():
     info = ComputeSkuInfo(FAMILY, [{"type": "Location", "restrictionInfo": {}}])
     assert avr.location_restricted(info, "centralus")
+
+
+def test_weighted_shuffle_spreads_first_choice_by_capacity():
+    import random
+    from collections import Counter
+
+    rng = random.Random(42)
+    checks = [avr.RegionCheck("big", True, fits=12), avr.RegionCheck("small", True, fits=4)]
+    firsts = Counter(avr.weighted_shuffle(checks, rng)[0] for _ in range(4000))
+    # P(big first) = 12 / (12 + 4) = 0.75
+    assert 0.70 < firsts["big"] / 4000 < 0.80
+    assert firsts["small"] > 0
+
+
+def test_weighted_shuffle_caps_weight():
+    import random
+    from collections import Counter
+
+    rng = random.Random(7)
+    checks = [avr.RegionCheck("huge", True, fits=10_000), avr.RegionCheck("cap", True, fits=avr.MAX_WEIGHT)]
+    firsts = Counter(avr.weighted_shuffle(checks, rng)[0] for _ in range(4000))
+    # both capped to the same weight: roughly a coin flip
+    assert 0.45 < firsts["huge"] / 4000 < 0.55
+
+
+def test_order_is_randomized_but_fallback_stays_last(fake_azure):
+    import random
+
+    firsts = {avr.order_regions(SKU, 16, PRICE_ORDER, rng=random.Random(seed))[0][0] for seed in range(200)}
+    assert firsts == {"centralus", "swedencentral"}
+    for seed in range(20):
+        order, _ = avr.order_regions(SKU, 16, PRICE_ORDER, rng=random.Random(seed))
+        assert order[2:] == ["eastus", "westeurope", "northeurope", "uksouth", "canadacentral"]

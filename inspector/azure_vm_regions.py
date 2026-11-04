@@ -10,8 +10,11 @@ walking ~18 regions per SKU (1-2 minutes each). Here regions are split into:
   (Basic SKU and overall: sc-runner creates a Dynamic, i.e. Basic, IP);
 - everything else.
 
-Eligible regions are tried first; the remaining regions follow as a fallback,
-in case the quota data is stale or wrong. Both groups keep the price order.
+Eligible regions come first in a weighted random order (weight: how many such
+VMs still fit, capped), so parallel starts spread over every region with quota
+instead of all piling into the cheapest one and saturating its quota and public
+IPs. The remaining regions follow in price order as a fallback, in case the
+quota data is stale or wrong.
 
 Any lookup failure falls back to the plain price order. Set
 ``AZURE_SKIP_VM_QUOTA_CHECK=1`` to disable the whole thing.
@@ -21,8 +24,10 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Any
 
 from azure_dbaas_quota import (
     ARM_BASE,
@@ -124,9 +129,21 @@ def check_region(
     return RegionCheck(region, True, fits=max(fits, 1))
 
 
-def _arrange(eligible: list[RegionCheck]) -> list[str]:
-    """Order eligible regions (price order for now)."""
-    return [check.region for check in eligible]
+# Cap on a region's weight: a huge regional cap (e.g. 22k vCPUs) should not make
+# one region win almost every draw when a family quota entry is missing.
+MAX_WEIGHT = 20
+
+
+def weighted_shuffle(checks: list[RegionCheck], rng: Any = random) -> list[str]:
+    """Order eligible regions randomly; the more such VMs still fit, the likelier first.
+
+    Efraimidis-Spirakis weighted sampling without replacement (key = u ** (1/w)).
+    """
+    keyed = [
+        (rng.random() ** (1.0 / min(max(check.fits, 1), MAX_WEIGHT)), check.region)
+        for check in checks
+    ]
+    return [region for _key, region in sorted(keyed, reverse=True)]
 
 
 def order_regions(
@@ -134,6 +151,7 @@ def order_regions(
     vcpus: int,
     price_ordered: list[str],
     *,
+    rng: Any = None,
     subscription_id: str | None = None,
 ) -> tuple[list[str], str | None]:
     """Return (region order, quota family) for an Azure VM start.
@@ -174,7 +192,7 @@ def order_regions(
     ]
     eligible = [c for c in checks if c.ok]
     rest = [c.region for c in checks if not c.ok]
-    ordered = _arrange(eligible) + rest
+    ordered = weighted_shuffle(eligible, rng or random) + rest
     logger.info(
         "Azure quota-aware region order for %s (%d vCPU, %s): eligible %s; fallback %d region(s)",
         sku,
