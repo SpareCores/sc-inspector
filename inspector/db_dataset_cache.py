@@ -13,12 +13,15 @@ import json
 import logging
 import os
 import subprocess
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Callable
 
 CDN_PREFIX = "sc-inspector"
+# Align with _run()'s default; large pgbench dumps can take hours.
+STREAM_UPLOAD_TIMEOUT_SEC = int(os.environ.get("DATASET_STREAM_TIMEOUT_SEC", "14400"))
 
 
 @dataclass(frozen=True)
@@ -238,9 +241,29 @@ def stream_dump_to_cdn(
     )
     zstd.stdout.close()
 
-    curl_rc = curl.wait()
-    zstd_rc = zstd.wait()
-    pg_dump_rc = pg_dump.wait()
+    deadline = time.monotonic() + STREAM_UPLOAD_TIMEOUT_SEC
+
+    def _wait(proc: subprocess.Popen[bytes], name: str) -> int:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(
+                f"dataset stream upload exceeded {STREAM_UPLOAD_TIMEOUT_SEC}s waiting for {name}"
+            )
+        try:
+            return proc.wait(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            for p in (curl, zstd, pg_dump):
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+            raise TimeoutError(
+                f"dataset stream upload exceeded {STREAM_UPLOAD_TIMEOUT_SEC}s waiting for {name}"
+            ) from None
+
+    curl_rc = _wait(curl, "curl")
+    zstd_rc = _wait(zstd, "zstd")
+    pg_dump_rc = _wait(pg_dump, "pg_dump")
     if curl_rc != 0 or zstd_rc != 0 or pg_dump_rc != 0:
         detail = "\n".join(
             part

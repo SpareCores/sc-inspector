@@ -331,6 +331,7 @@ def lstopo(meta, task, task_dir) -> None:
         capture_output=True,
         text=True,
         check=True,
+        timeout=120,
     )
     
     # Write SVG output to task_dir

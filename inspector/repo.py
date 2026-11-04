@@ -16,6 +16,13 @@ REPO_PATH = os.environ.get("REPO_PATH")
 # Sparse checkout prefix(es) for this inspector run (e.g. data/vultr/vhf-6c-24gb).
 _sparse_paths: tuple[str, ...] | None = None
 
+# subprocess.run(timeout=): on expiry, CPython kills the child then re-raises
+# TimeoutExpired (Lib/subprocess.py). Network git ops get a longer budget.
+GIT_CMD_TIMEOUT_SEC = 2 * 60
+GIT_NETWORK_TIMEOUT_SEC = 10 * 60
+GIT_CONFIG_TIMEOUT_SEC = 30
+_GIT_NETWORK_SUBCMDS = frozenset({"clone", "fetch", "push", "pull", "ls-remote"})
+
 _LOW_MEMORY_GIT_CONFIG = [
     ["git", "config", "--global", "core.bigFileThreshold", "1"],
     ["git", "config", "--global", "core.deltaBaseCacheLimit", "0"],
@@ -39,13 +46,21 @@ def _small_memory_machine() -> bool:
     return psutil.virtual_memory().total < 4 * 1024 ** 3
 
 
+def _git_timeout_for(args: list[str]) -> int:
+    if args and args[0] in _GIT_NETWORK_SUBCMDS:
+        return GIT_NETWORK_TIMEOUT_SEC
+    return GIT_CMD_TIMEOUT_SEC
+
+
 def configure_git_low_memory() -> None:
     global _git_low_memory_configured
     if _git_low_memory_configured:
         return
     for command in _LOW_MEMORY_GIT_CONFIG:
         try:
-            subprocess.run(command, check=True)
+            subprocess.run(command, check=True, timeout=GIT_CONFIG_TIMEOUT_SEC)
+        except subprocess.TimeoutExpired as e:
+            logging.warning(f"git low-memory config timed out: {command}: {e}")
         except subprocess.CalledProcessError as e:
             logging.warning(f"git low-memory config failed: {command}: {e}")
     _git_low_memory_configured = True
@@ -121,6 +136,7 @@ def _clone_repo(repo_url: str, repo_path: str, sparse_paths: tuple[str, ...] | N
         check=True,
         capture_output=True,
         text=True,
+        timeout=GIT_NETWORK_TIMEOUT_SEC,
     )
     if sparse_paths:
         run_git_command(["sparse-checkout", "init", "--cone"], cwd=repo_path)
@@ -238,6 +254,7 @@ def _path_in_commit(repo_root: str, commit: str, path: str) -> bool:
             ["git", "cat-file", "-e", f"{commit}:{path}"],
             cwd=repo_root,
             capture_output=True,
+            timeout=GIT_CMD_TIMEOUT_SEC,
         ).returncode
         == 0
     )
@@ -292,6 +309,7 @@ def _squash_commit_and_push(
         ["git", "diff", "--cached", "--quiet"],
         cwd=repo_root,
         capture_output=True,
+        timeout=GIT_CMD_TIMEOUT_SEC,
     ).returncode == 0
     if no_staged_changes:
         logging.info("Already up to date with %s for %s after squash", origin, rel_path)
@@ -337,22 +355,34 @@ def get_repo(repo_url=REPO_URL, repo_path=REPO_PATH, sparse_paths: tuple[str, ..
             raise
 
 
-def run_git_command(args, cwd):
-    """Helper function to run git commands using subprocess."""
+def run_git_command(args, cwd, *, timeout: int | None = None):
+    """Helper function to run git commands using subprocess.
+
+    ``timeout`` defaults by subcommand (network vs local). On expiry the child
+    is killed and ``subprocess.TimeoutExpired`` is raised.
+    """
     command_str = ' '.join(['git'] + args)
-    logging.info(f"Running git command: {command_str} (cwd: {cwd})")
+    if timeout is None:
+        timeout = _git_timeout_for(args)
+    logging.info(f"Running git command: {command_str} (cwd: {cwd}, timeout={timeout}s)")
     try:
         result = subprocess.run(
             ['git'] + args,
             cwd=cwd,
             capture_output=True,
             text=True,
-            check=True
+            check=True,
+            timeout=timeout,
         )
         if result.stdout:
             logging.debug(f"Git command stdout: {result.stdout}")
         logging.info(f"Git command succeeded: {command_str}")
         return result.stdout
+    except subprocess.TimeoutExpired as e:
+        logging.error(
+            "Git command timed out after %ss: %s", timeout, command_str
+        )
+        raise
     except subprocess.CalledProcessError as e:
         error_msg = f"Git command failed: {command_str}\n"
         error_msg += f"Exit code: {e.returncode}\n"
@@ -435,7 +465,7 @@ def push_paths(paths: list[str | os.PathLike], msg: str):
                 )
                 logging.info(f"Successfully pushed changes to git: {msg}")
                 break
-            except subprocess.CalledProcessError as e:
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
                 attempt += 1
                 if time.monotonic() >= deadline:
                     logging.error("Push failed after retries (10 min deadline)")

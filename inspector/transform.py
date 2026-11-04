@@ -37,7 +37,8 @@ def fetch_geekbench_results(meta, task, task_dir, stdout, stderr) -> list[str]:
         )
         if not urls:
             return outputs
-        res = requests.get(urls[0])
+        # float timeout = connect+read budget (requests sessions.py / adapters)
+        res = requests.get(urls[0], timeout=60)
         assert 200 <= res.status_code < 300, f"Status code is {res.status_code}"
         results = geekbench_html_to_json(res.text)
     with open(os.path.join(task_dir, "results.json"), "w") as f:

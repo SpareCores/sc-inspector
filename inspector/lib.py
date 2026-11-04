@@ -24,6 +24,7 @@ from typing import Any, ClassVar, Literal
 from zlib import crc32
 
 import docker
+import docker_util
 import repo
 import transform
 import user_data as user_data_pack
@@ -899,6 +900,7 @@ def docker_prune_after_round() -> None:
     if os.environ.get("DOCKER_PRUNE", "1").lower() in ("0", "false", "no"):
         return
     try:
+        # Each prune HTTP call is bounded by the client timeout (120s).
         d = docker.from_env(timeout=120)
         containers = d.containers.prune()
         images = d.images.prune(filters={"dangling": False})
@@ -1082,7 +1084,8 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, accele
         c = None
         try:
             d = docker.from_env(timeout=1800)
-            image = d.images.pull(task.image)
+            # docker-py hardcodes pull timeout=None; bound with a wall-clock deadline.
+            image = docker_util.pull_image(d, task.image)
             # Prefer immutable image reference (repo@sha256:...) over tags like :main/:latest.
             image_ref = next(iter(image.attrs.get("RepoDigests") or []), task.image)
             env = dict(docker_opts.get("environment") or {})
@@ -1096,7 +1099,15 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, accele
                 version_env["HF_TOKEN"] = hf_token
             version_docker_opts["environment"] = version_env
             if task.version_command:
-                ver = d.containers.run(task.image, task.version_command, **version_docker_opts).strip().decode("utf-8").replace("\n", ", ")
+                # Attached containers.run has no timeout; detach+wait instead.
+                out, _err, _code = docker_util.run_attached(
+                    d,
+                    task.image,
+                    task.version_command,
+                    timeout_sec=docker_util.DOCKER_VERSION_TIMEOUT_SEC,
+                    **version_docker_opts,
+                )
+                ver = out.strip().decode("utf-8").replace("\n", ", ")
             docker_opts = configure_resource_tracker_docker_opts(docker_opts, data_dir)
             c = d.containers.run(task.image, command, **docker_opts)
         except Exception as e:
@@ -1116,7 +1127,10 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, accele
                 break
         else:
             # timed out, stop container, set error message
-            c.stop()
+            try:
+                docker_util.stop_container(c)
+            except Exception as e:
+                logger.warning("Failed to stop timed-out container: %s", e)
             meta.error_msg = f"Execution timed out after {task.timeout.total_seconds()}s"
             if is_gpu_attempt:
                 logger.info("GPU run timed out, retrying without GPU")
@@ -1126,8 +1140,8 @@ def run_docker(meta: Meta, task: DockerTask, data_dir: str | os.PathLike, accele
             
         meta.end = datetime.now()
         try:
-            # wait for container exit/get output with 60s of docker timeout
-            res = c.wait(timeout=60)
+            # wait() timeout is the HTTP request timeout for /containers/{id}/wait
+            res = docker_util.wait_container(c)
         except Exception as e:
             if is_gpu_attempt:
                 logger.info(f"GPU run failed during wait, retrying without GPU: {e!s}")
@@ -1332,26 +1346,22 @@ def probe_lscpu() -> tuple[dict[str, str], str | None, datetime]:
     """Run the lscpu task's image/command once; return (fields, lscpu version, end time)."""
     from variant_id import parse_lscpu_stdout
 
-    client = docker.from_env()
-    container = client.containers.run(
+    client = docker.from_env(timeout=120)
+    # pull can hang forever under docker-py (timeout=None); bound it.
+    docker_util.pull_image(client, "ghcr.io/sparecores/hwinfo:main")
+    stdout, stderr_b, status = docker_util.run_attached(
+        client,
         "ghcr.io/sparecores/hwinfo:main",
-        command=["bash", "-c", "lscpu --version | awk '{print $4}' >&2; lscpu -JB"],
+        ["bash", "-c", "lscpu --version | awk '{print $4}' >&2; lscpu -JB"],
+        timeout_sec=docker_util.DOCKER_VERSION_TIMEOUT_SEC,
         **DOCKER_OPTS,
     )
-    try:
-        result = container.wait()
-        end = datetime.now()
-        stdout = container.logs(stdout=True, stderr=False)
-        stderr = container.logs(stdout=False, stderr=True).decode("utf-8", errors="replace")
-        if result.get("StatusCode", 1) != 0:
-            raise RuntimeError(f"lscpu probe failed: {stderr[:500]}")
-        version = stderr.strip().splitlines()[-1].strip() if stderr.strip() else None
-        return parse_lscpu_stdout(stdout), version, end
-    finally:
-        try:
-            container.remove(force=True)
-        except Exception:
-            pass
+    end = datetime.now()
+    stderr = stderr_b.decode("utf-8", errors="replace")
+    if status != 0:
+        raise RuntimeError(f"lscpu probe failed: {stderr[:500]}")
+    version = stderr.strip().splitlines()[-1].strip() if stderr.strip() else None
+    return parse_lscpu_stdout(stdout), version, end
 
 
 def select_or_create_variant(
@@ -1857,7 +1867,14 @@ def run_tasks(
                     changed_dirs.append(task_dir_root)
                 continue
             if task.precheck_command and task.precheck_regex:
-                check_res = subprocess.run(task.precheck_command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                check_res = subprocess.run(
+                    task.precheck_command,
+                    shell=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=60,
+                )
                 if not re.search(task.precheck_regex, check_res.stdout, re.IGNORECASE):
                     logger.info("Task precheck_regex didn't match, skipping")
                     meta.end = datetime.now()

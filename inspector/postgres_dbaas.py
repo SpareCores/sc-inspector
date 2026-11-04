@@ -11,6 +11,7 @@ from typing import Any
 
 import docker
 
+import docker_util
 from benchmark_tiers import (
     CONCURRENCY_LADDER_MAX,
     DB_RUN_SECONDS,
@@ -493,7 +494,7 @@ def run_dbaas_task(
     c = None
     try:
         d = docker.from_env(timeout=1800)
-        image = d.images.pull(task.image)
+        image = docker_util.pull_image(d, task.image)
         image_ref = next(iter(image.attrs.get("RepoDigests") or []), task.image)
         env["TRACKER_CONTAINER_IMAGE"] = image_ref
         docker_opts["environment"] = env
@@ -505,12 +506,15 @@ def run_dbaas_task(
             if c.status == "exited":
                 break
         else:
-            c.stop()
+            try:
+                docker_util.stop_container(c)
+            except Exception:
+                logging.exception("Failed to stop timed-out dbaas client container")
             meta.error_msg = f"Execution timed out after {task.timeout.total_seconds()}s"
             meta.end = datetime.now()
             meta.exit_code = 1
             return None, b"", meta.error_msg.encode()
-        res = c.wait(timeout=60)
+        res = docker_util.wait_container(c)
         meta.end = datetime.now()
         meta.exit_code = res["StatusCode"]
         stdout = c.logs(stdout=True, stderr=False)

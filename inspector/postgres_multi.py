@@ -15,6 +15,7 @@ from typing import Any
 
 import docker
 
+import docker_util
 from benchmark_tiers import (
     CONCURRENCY_LADDER_MAX,
     DB_RUN_SECONDS,
@@ -264,7 +265,7 @@ def _start_postgres(
         "listen_addresses=*",
         *gucs,
     ]
-    image = d.images.pull(PG_IMAGE)
+    image = docker_util.pull_image(d, PG_IMAGE)
     image_ref = next(iter(image.attrs.get("RepoDigests") or []), PG_IMAGE)
     tracker_env = {
         "TRACKER_PROJECT_NAME": "inspector",
