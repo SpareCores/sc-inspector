@@ -3460,50 +3460,54 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         for region in plan.regions:
             logger.info(f"Trying {region}")
             reservation = plan.reserve(region)
-            resource_opts["region"] = region
-            user_data, b64_user_data = build_inspector_user_data(
-                vendor, server, srv_data, region, None, timeout_mins, ssh_deploy_key_b64, repo_url_ssh
-            )
-            # before starting, destroy everything to make sure the user-data will run (this is the first boot)
-            runner.destroy(vendor, pulumi_opts, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
+            try:
+                resource_opts["region"] = region
+                user_data, b64_user_data = build_inspector_user_data(
+                    vendor, server, srv_data, region, None, timeout_mins, ssh_deploy_key_b64, repo_url_ssh
+                )
+                # before starting, destroy everything to make sure the user-data will run (this is the first boot)
+                runner.destroy(vendor, pulumi_opts, resource_opts, stack_opts=dict(on_output=pulumi_on_output(instance_logger)))
 
-            error_msgs = []
-            output = []
-            stack_opts = pulumi_stack_opts(error_msgs, output, instance_logger, instance_timing, server)
-            for _ in range(2):
-                # try normal images first, then gen1 if we get Hypervisor Generation '2' error
-                try:
-                    retry_locked(runner.create, vendor, pulumi_opts,
-                                 resource_opts | dict(user_data=b64_user_data, image_sku=image_sku),
-                                 stack_opts=stack_opts, instance_timing=instance_timing,
-                                 error_msgs=error_msgs)
-                    # empty it if create succeeded, just in case
-                    error_msgs = []
-                    done = True
-                    instance_started = True
-                    break
-                except Exception:
-                    gen1_image_sku = azure_gen1_retry_image_sku(image_sku, azure_cvm, output)
-                    if gen1_image_sku:
-                        logger.exception(f"Hypervisor Generation error, image_sku={image_sku}, adding -gen1")
-                        image_sku = gen1_image_sku
-                        # The NIC will be blocked for 180s, so wait until we retry
-                        # Nic(s) in request is reserved for another Virtual Machine for 180 seconds.
-                        logger.info("Sleeping 180s to make the NIC free again")
-                        time.sleep(180)
-                        continue
-                    # Every give-up path (CVM sizes and a failed gen1 retry included) must
-                    # destroy the stack: otherwise the RG/VNet/NIC/public IP of the failed
-                    # region attempt leaks and counts against the regional public IP quota.
-                    logger.exception(f"Couldn't start instance, deleting the stack for {region} in the background")
-                    # on failure, destroy the stack in the background (as we have to wait 180s for the NIC), so we're
-                    # not blocking further tries
-                    executor.submit(delayed_destroy, vendor, server, copy.deepcopy(resource_opts))
-                    break
+                error_msgs = []
+                output = []
+                stack_opts = pulumi_stack_opts(error_msgs, output, instance_logger, instance_timing, server)
+                for _ in range(2):
+                    # try normal images first, then gen1 if we get Hypervisor Generation '2' error
+                    try:
+                        retry_locked(runner.create, vendor, pulumi_opts,
+                                     resource_opts | dict(user_data=b64_user_data, image_sku=image_sku),
+                                     stack_opts=stack_opts, instance_timing=instance_timing,
+                                     error_msgs=error_msgs)
+                        # empty it if create succeeded, just in case
+                        error_msgs = []
+                        done = True
+                        instance_started = True
+                        break
+                    except Exception:
+                        gen1_image_sku = azure_gen1_retry_image_sku(image_sku, azure_cvm, output)
+                        if gen1_image_sku:
+                            logger.exception(f"Hypervisor Generation error, image_sku={image_sku}, adding -gen1")
+                            image_sku = gen1_image_sku
+                            # The NIC will be blocked for 180s, so wait until we retry
+                            # Nic(s) in request is reserved for another Virtual Machine for 180 seconds.
+                            logger.info("Sleeping 180s to make the NIC free again")
+                            time.sleep(180)
+                            continue
+                        # Every give-up path (CVM sizes and a failed gen1 retry included) must
+                        # destroy the stack: otherwise the RG/VNet/NIC/public IP of the failed
+                        # region attempt leaks and counts against the regional public IP quota.
+                        logger.exception(f"Couldn't start instance, deleting the stack for {region} in the background")
+                        # on failure, destroy the stack in the background (as we have to wait 180s for the NIC), so we're
+                        # not blocking further tries
+                        executor.submit(delayed_destroy, vendor, server, copy.deepcopy(resource_opts))
+                        break
+            finally:
+                # failed here (including an exception from user-data/destroy): hand the
+                # reserved quota/IP back to the other start threads
+                if not done:
+                    azure_vm_regions.release(reservation)
             if done:
                 break
-            # failed here: hand the reserved quota/IP back to the other start threads
-            azure_vm_regions.release(reservation)
 
     if vendor == "gcp":
         resource_opts = dict(instance=server, disk_size=VOLUME_SIZE)
