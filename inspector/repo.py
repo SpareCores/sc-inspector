@@ -3,8 +3,12 @@ import logging
 import os
 import psutil
 import random
+import shutil
+import signal
 import subprocess
+import threading
 import time
+from contextlib import contextmanager
 from urllib.parse import urlparse, urlunparse
 from wrapt import synchronized
 
@@ -15,13 +19,6 @@ REPO_PATH = os.environ.get("REPO_PATH")
 
 # Sparse checkout prefix(es) for this inspector run (e.g. data/vultr/vhf-6c-24gb).
 _sparse_paths: tuple[str, ...] | None = None
-
-# subprocess.run(timeout=): on expiry, CPython kills the child then re-raises
-# TimeoutExpired (Lib/subprocess.py). Network git ops get a longer budget.
-GIT_CMD_TIMEOUT_SEC = 2 * 60
-GIT_NETWORK_TIMEOUT_SEC = 10 * 60
-GIT_CONFIG_TIMEOUT_SEC = 30
-_GIT_NETWORK_SUBCMDS = frozenset({"clone", "fetch", "push", "pull", "ls-remote"})
 
 _LOW_MEMORY_GIT_CONFIG = [
     ["git", "config", "--global", "core.bigFileThreshold", "1"],
@@ -40,16 +37,249 @@ _LOW_MEMORY_GIT_CONFIG = [
 
 _git_low_memory_configured = False
 
+# Hard timeouts for git subprocesses. Without them a stalled network operation
+# (seen on 2026-11-04: inspectors stuck after "Starting <task>" while ~25 VMs
+# pushed concurrently) blocked forever while holding the push_paths lock, so no
+# later result was ever pushed and cleanup eventually destroyed the VM.
+GIT_NETWORK_COMMANDS = frozenset({"clone", "fetch", "pull", "push", "ls-remote"})
+# Defaults as introduced on main (c583123); overridable via the environment.
+GIT_CMD_TIMEOUT_SEC = float(os.environ.get("GIT_CMD_TIMEOUT_SEC", 2 * 60))  # local commands
+GIT_NETWORK_TIMEOUT_SEC = float(os.environ.get("GIT_NETWORK_TIMEOUT_SEC", 10 * 60))
+GIT_CONFIG_TIMEOUT_SEC = float(os.environ.get("GIT_CONFIG_TIMEOUT_SEC", 30))
+GIT_CLONE_TIMEOUT_SEC = float(os.environ.get("GIT_CLONE_TIMEOUT_SEC", 15 * 60))
+# Checkout right after a clone writes the whole working tree (non-sparse clones
+# on slow machines can take long); it is local disk work, not a network hang.
+GIT_CHECKOUT_TIMEOUT_SEC = float(os.environ.get("GIT_CHECKOUT_TIMEOUT_SEC", 3600))
+
+# push_paths retry loop (unchanged values, module-level so tests can shrink them)
+PUSH_DEADLINE_SEC = 10 * 60
+PUSH_INITIAL_BACKOFF_SEC = 5
+PUSH_MAX_BACKOFF_SEC = 2 * 60
+
+
+# git global options that take their value as the next argument
+_GIT_OPTIONS_WITH_VALUE = frozenset({"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"})
+
+
+def git_subcommand(args: list[str]) -> str:
+    """The git subcommand in ``args``, skipping global options and their values."""
+    skip_next = False
+    for arg in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in _GIT_OPTIONS_WITH_VALUE:
+            skip_next = True
+            continue
+        if arg.startswith("-"):
+            continue
+        return arg
+    return ""
+
+
+def git_timeout(args: list[str]) -> float:
+    """Timeout (seconds) for ``git <args>``: shorter for network commands."""
+    subcommand = git_subcommand(args)
+    if subcommand == "clone":
+        return GIT_CLONE_TIMEOUT_SEC
+    if subcommand in GIT_NETWORK_COMMANDS:
+        return GIT_NETWORK_TIMEOUT_SEC
+    if subcommand == "config":
+        return GIT_CONFIG_TIMEOUT_SEC
+    return GIT_CMD_TIMEOUT_SEC
+
+
+# Transport-level timeouts: detect a dead/stalled connection within ~1 minute
+# instead of waiting for the hard subprocess timeout.
+GIT_SSH_TIMEOUT_OPTIONS = "-o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+GIT_HTTP_LOW_SPEED = {"GIT_HTTP_LOW_SPEED_LIMIT": "1000", "GIT_HTTP_LOW_SPEED_TIME": "60"}
+
+
+def _git_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment for git subprocesses with SSH keepalives and an HTTP stall limit.
+
+    - SSH (inspector VMs push via the deploy key): connect timeout and
+      ServerAlive probes, so a silently dropped connection fails in ~60s.
+      A custom GIT_SSH is left alone; an existing GIT_SSH_COMMAND gets the
+      options appended unless it already sets ServerAliveInterval.
+    - HTTPS (GitHub Actions with GITHUB_TOKEN): abort transfers slower than
+      1 KB/s for 60s, unless GIT_HTTP_LOW_SPEED_* are already set.
+    """
+    env = dict(os.environ if base is None else base)
+    ssh_command = env.get("GIT_SSH_COMMAND")
+    if ssh_command:
+        if "ServerAliveInterval" not in ssh_command:
+            env["GIT_SSH_COMMAND"] = f"{ssh_command} {GIT_SSH_TIMEOUT_OPTIONS}"
+    elif not env.get("GIT_SSH"):
+        env["GIT_SSH_COMMAND"] = f"ssh {GIT_SSH_TIMEOUT_OPTIONS}"
+    for key, value in GIT_HTTP_LOW_SPEED.items():
+        env.setdefault(key, value)
+    return env
+
+
+# After a timeout git gets SIGTERM first: it then removes its own lock files
+# (index.lock, ref locks, shallow.lock) and a half-written clone directory.
+# Only processes still alive after the grace period are SIGKILLed.
+GIT_TERM_GRACE_SEC = 5
+
+
+def _stop_process_group(proc: subprocess.Popen):
+    """Stop git's whole process group (git + ssh/pack-objects children); return its remaining output.
+
+    SIGTERM first, so git can remove its lock files; while waiting the pipes are
+    drained (communicate, not wait), so git can't block on a full pipe. Anything
+    still alive after the grace period is SIGKILLed; a lock file left by that is
+    removed later by _remove_stale_git_locks.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        return proc.communicate(timeout=GIT_TERM_GRACE_SEC)
+    except subprocess.TimeoutExpired:
+        logging.warning(
+            "git (pid %s) ignored SIGTERM for %ss, killing its process group", proc.pid, GIT_TERM_GRACE_SEC
+        )
+    finally:
+        # also reaps children (e.g. ssh) that outlived git itself
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        return proc.communicate(timeout=GIT_TERM_GRACE_SEC)
+    except subprocess.TimeoutExpired:
+        return None, None
+
+
+_TOP_LEVEL_GIT_LOCKS = ("index.lock", "shallow.lock", "packed-refs.lock", "HEAD.lock", "config.lock")
+
+
+def stale_git_lock_age_sec() -> float:
+    """Every git this process starts ends within its timeout + 2 grace periods; older locks are orphans."""
+    longest = max(GIT_NETWORK_TIMEOUT_SEC, GIT_CMD_TIMEOUT_SEC, GIT_CLONE_TIMEOUT_SEC, GIT_CHECKOUT_TIMEOUT_SEC)
+    return longest + 2 * GIT_TERM_GRACE_SEC + 60
+
+
+def _remove_stale_git_locks(repo_root: str) -> None:
+    """Remove git lock files older than any git this process could still be running.
+
+    After a SIGKILL (git ignored SIGTERM), git leaves index.lock & co. behind and
+    every later command fails with "Unable to create '...lock': File exists".
+    Only locks older than ``stale_git_lock_age_sec()`` are removed: no git
+    started by this process can still own them, while a younger lock may belong
+    to a live git of another thread and is left alone.
+    """
+    git_dir = os.path.join(repo_root, ".git")
+    if not os.path.isdir(git_dir):
+        return
+    candidates = [os.path.join(git_dir, name) for name in _TOP_LEVEL_GIT_LOCKS]
+    for root, _dirs, files in os.walk(os.path.join(git_dir, "refs")):
+        candidates.extend(os.path.join(root, f) for f in files if f.endswith(".lock"))
+    cutoff = time.time() - stale_git_lock_age_sec()
+    for lock in candidates:
+        try:
+            if os.path.getmtime(lock) < cutoff:
+                os.remove(lock)
+                logging.warning("Removed stale git lock left by a killed git: %s", lock)
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            logging.warning("Could not remove stale git lock %s: %s", lock, e)
+
+
+def _as_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+_git_deadline_state = threading.local()
+
+
+@contextmanager
+def git_deadline(deadline: float):
+    """Cap every git command run by this thread inside the block at ``deadline`` (monotonic).
+
+    push_paths' retry deadline used to be checked only between attempts, so one
+    attempt (fetch + ls-remote + fetch + push, each with its own timeout) could
+    overrun it by ~20 minutes. Nested deadlines keep the earliest.
+    """
+    previous = getattr(_git_deadline_state, "deadline", None)
+    _git_deadline_state.deadline = deadline if previous is None else min(previous, deadline)
+    try:
+        yield
+    finally:
+        _git_deadline_state.deadline = previous
+
+
+def _run_git(
+    args: list[str],
+    *,
+    cwd,
+    timeout: float | None = None,
+    check: bool = False,
+    capture_output: bool = False,
+    text: bool = False,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess:
+    """Run ``git <args>`` like subprocess.run, with a hard timeout.
+
+    - ``timeout`` defaults to ``git_timeout(args)``.
+    - git runs in its own session, so on timeout the whole process group (git
+      and children such as ssh or pack-objects) is terminated, not just git.
+    - A timeout raises CalledProcessError (not TimeoutExpired), so the existing
+      ``except CalledProcessError`` retry paths treat a hang like a failed
+      command. git's partial output is kept in the exception.
+    """
+    timeout = git_timeout(args) if timeout is None else timeout
+    deadline = getattr(_git_deadline_state, "deadline", None)
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.CalledProcessError(
+                returncode=-1,
+                cmd=["git", *args],
+                stderr="git not started: push deadline already passed",
+            )
+        timeout = min(timeout, remaining)
+    pipe = subprocess.PIPE if capture_output else None
+    proc = subprocess.Popen(
+        ["git", *args],
+        cwd=cwd,
+        stdout=pipe,
+        stderr=pipe,
+        text=text,
+        env=_git_env() if env is None else env,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        stdout, stderr = _stop_process_group(proc)
+        note = f"git timed out after {timeout:.0f}s and was terminated"
+        raise subprocess.CalledProcessError(
+            returncode=proc.returncode if proc.returncode is not None else -signal.SIGKILL,
+            cmd=proc.args,
+            output=stdout,
+            stderr=f"{_as_text(stderr).rstrip()}\n{note}".lstrip(),
+        ) from None
+    except BaseException:
+        # e.g. KeyboardInterrupt: git runs in its own session and didn't get the
+        # SIGINT, so stop it here rather than leave it racing later git commands
+        _stop_process_group(proc)
+        raise
+    if check and proc.returncode:
+        raise subprocess.CalledProcessError(proc.returncode, proc.args, output=stdout, stderr=stderr)
+    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+
 
 def _small_memory_machine() -> bool:
     # Use total RAM: "available" often stays high on Linux due to cache.
     return psutil.virtual_memory().total < 4 * 1024 ** 3
-
-
-def _git_timeout_for(args: list[str]) -> int:
-    if args and args[0] in _GIT_NETWORK_SUBCMDS:
-        return GIT_NETWORK_TIMEOUT_SEC
-    return GIT_CMD_TIMEOUT_SEC
 
 
 def configure_git_low_memory() -> None:
@@ -58,9 +288,7 @@ def configure_git_low_memory() -> None:
         return
     for command in _LOW_MEMORY_GIT_CONFIG:
         try:
-            subprocess.run(command, check=True, timeout=GIT_CONFIG_TIMEOUT_SEC)
-        except subprocess.TimeoutExpired as e:
-            logging.warning(f"git low-memory config timed out: {command}: {e}")
+            _run_git(command[1:], cwd=None, check=True)
         except subprocess.CalledProcessError as e:
             logging.warning(f"git low-memory config failed: {command}: {e}")
     _git_low_memory_configured = True
@@ -128,20 +356,40 @@ def _clone_repo(repo_url: str, repo_path: str, sparse_paths: tuple[str, ...] | N
     if parent:
         os.makedirs(parent, exist_ok=True)
     logging.info(f"Cloning from {repo_url} to {repo_path} (sparse={sparse_paths})")
-    subprocess.run(
-        [
-            "git", "clone", "--depth", "1", "--single-branch", "--branch", "main",
-            "--no-checkout", repo_url, repo_path,
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=GIT_NETWORK_TIMEOUT_SEC,
-    )
-    if sparse_paths:
-        run_git_command(["sparse-checkout", "init", "--cone"], cwd=repo_path)
-        run_git_command(["sparse-checkout", "set", *sparse_paths], cwd=repo_path)
-    run_git_command(["checkout", "-f", "main"], cwd=repo_path)
+    created = not os.path.exists(repo_path)
+    # e.g. a volume mount: existed, but has nothing of ours to keep
+    was_empty_dir = os.path.isdir(repo_path) and not os.listdir(repo_path)
+    try:
+        _run_git(
+            [
+                "clone", "--depth", "1", "--single-branch", "--branch", "main",
+                "--no-checkout", repo_url, repo_path,
+            ],
+            cwd=None,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        if sparse_paths:
+            run_git_command(["sparse-checkout", "init", "--cone"], cwd=repo_path, timeout=GIT_CHECKOUT_TIMEOUT_SEC)
+            run_git_command(["sparse-checkout", "set", *sparse_paths], cwd=repo_path, timeout=GIT_CHECKOUT_TIMEOUT_SEC)
+        run_git_command(["checkout", "-f", "main"], cwd=repo_path, timeout=GIT_CHECKOUT_TIMEOUT_SEC)
+    except BaseException:
+        # A half-written clone (git SIGKILLed after the timeout grace period, or
+        # a failed sparse/checkout step) would later be opened as a broken repo
+        # or make the next clone fail with "destination path already exists".
+        if created and os.path.exists(repo_path):
+            logging.warning("Removing incomplete clone at %s", repo_path)
+            shutil.rmtree(repo_path, ignore_errors=True)
+        elif was_empty_dir:
+            logging.warning("Emptying %s again after a failed clone", repo_path)
+            for entry in os.listdir(repo_path):
+                path = os.path.join(repo_path, entry)
+                if os.path.isdir(path) and not os.path.islink(path):
+                    shutil.rmtree(path, ignore_errors=True)
+                else:
+                    os.remove(path)
+        raise
     logging.info(f"Successfully cloned repo to {repo_path}")
 
 
@@ -201,6 +449,14 @@ def _assert_path_in_sparse(rel_path: str) -> None:
     )
 
 
+class OriginMainStaleError(RuntimeError):
+    """origin/main moved again between ls-remote and fetch (another inspector pushed).
+
+    Expected during bursts of concurrent pushes; push_paths retries it like a
+    failed git command instead of giving up.
+    """
+
+
 def _fetch_origin_main(repo_root: str) -> None:
     """Update origin/main to the remote tip without altering full-clone history."""
     fetch_args = ["fetch", "origin", "+refs/heads/main:refs/remotes/origin/main"]
@@ -226,7 +482,7 @@ def _fetch_origin_main(repo_root: str) -> None:
     run_git_command(retry_args, cwd=repo_root)
     local_sha = _origin_main_sha(repo_root)
     if remote_sha != local_sha:
-        raise RuntimeError(
+        raise OriginMainStaleError(
             f"Could not sync origin/main to {remote_sha[:8]} (still at {local_sha[:8]})"
         )
 
@@ -250,42 +506,33 @@ def _changed_files_under(repo_root: str, rel_path: str) -> list[str]:
 def _path_in_commit(repo_root: str, commit: str, path: str) -> bool:
     """True if ``path`` exists as a blob in ``commit`` (not a deletion)."""
     return (
-        subprocess.run(
-            ["git", "cat-file", "-e", f"{commit}:{path}"],
+        _run_git(
+            ["cat-file", "-e", f"{commit}:{path}"],
             cwd=repo_root,
             capture_output=True,
-            timeout=GIT_CMD_TIMEOUT_SEC,
         ).returncode
         == 0
     )
 
 
-def _squash_commit_and_push(
+def _stage_onto_origin_main(
     repo_root: str,
     rel_path: str,
-    msg: str,
     changed_files: list[str],
     saved_head: str,
-) -> None:
-    """
-    Publish *only* ``changed_files`` as a single commit on origin/main.
+) -> bool:
+    """Reset to origin/main and stage *only* ``changed_files`` from ``saved_head``.
 
-    The caller captures ``changed_files`` and ``saved_head`` once (before
-    fetching) so retries still restore from the inspector's result commit even
-    after a failed attempt's ``reset --hard origin/main``.  Present files are
-    checked out from ``saved_head``; paths deleted there (stale stdout/stderr)
-    are ``git rm``'d after the reset — ``git checkout saved_head -- deleted``
-    would pathspec-fail and wipe the working tree for good.
+    Present files are checked out from ``saved_head``; paths deleted there
+    (stale stdout/stderr) are ``git rm``'d after the reset — ``git checkout
+    saved_head -- deleted`` would pathspec-fail and wipe the working tree for
+    good. Returns True if anything differs from origin/main.
     """
-    if not changed_files:
-        logging.info("No changed files under %s to push", rel_path)
-        return
-
     origin = "origin/main"
     present = [f for f in changed_files if _path_in_commit(repo_root, saved_head, f)]
     deleted = [f for f in changed_files if f not in present]
     logging.info(
-        "Squashing %d files under %s onto %s from %s (%d present, %d deleted)",
+        "Staging %d files under %s onto %s from %s (%d present, %d deleted)",
         len(changed_files),
         rel_path,
         origin,
@@ -305,14 +552,32 @@ def _squash_commit_and_push(
     if to_remove:
         run_git_command(["rm", "-f", "--"] + to_remove, cwd=repo_root)
 
-    no_staged_changes = subprocess.run(
-        ["git", "diff", "--cached", "--quiet"],
+    return _run_git(
+        ["diff", "--cached", "--quiet"],
         cwd=repo_root,
         capture_output=True,
-        timeout=GIT_CMD_TIMEOUT_SEC,
-    ).returncode == 0
-    if no_staged_changes:
-        logging.info("Already up to date with %s for %s after squash", origin, rel_path)
+    ).returncode != 0
+
+
+def _squash_commit_and_push(
+    repo_root: str,
+    rel_path: str,
+    msg: str,
+    changed_files: list[str],
+    saved_head: str,
+) -> None:
+    """
+    Publish *only* ``changed_files`` as a single commit on origin/main.
+
+    The caller captures ``changed_files`` and ``saved_head`` once (before
+    fetching) so retries still restore from the inspector's result commit even
+    after a failed attempt's ``reset --hard origin/main``.
+    """
+    if not changed_files:
+        logging.info("No changed files under %s to push", rel_path)
+        return
+    if not _stage_onto_origin_main(repo_root, rel_path, changed_files, saved_head):
+        logging.info("Already up to date with origin/main for %s after squash", rel_path)
         return
 
     run_git_command(["commit", "-m", msg], cwd=repo_root)
@@ -355,34 +620,21 @@ def get_repo(repo_url=REPO_URL, repo_path=REPO_PATH, sparse_paths: tuple[str, ..
             raise
 
 
-def run_git_command(args, cwd, *, timeout: int | None = None):
+def run_git_command(args, cwd, *, timeout: float | None = None):
     """Helper function to run git commands using subprocess.
 
-    ``timeout`` defaults by subcommand (network vs local). On expiry the child
-    is killed and ``subprocess.TimeoutExpired`` is raised.
+    Every call has a hard timeout (see ``git_timeout``): a git process that hangs
+    (e.g. a stalled fetch/push to GitHub) is killed and reported as a failed
+    command, so callers' retry logic runs instead of blocking forever.
     """
     command_str = ' '.join(['git'] + args)
-    if timeout is None:
-        timeout = _git_timeout_for(args)
-    logging.info(f"Running git command: {command_str} (cwd: {cwd}, timeout={timeout}s)")
+    logging.info(f"Running git command: {command_str} (cwd: {cwd})")
     try:
-        result = subprocess.run(
-            ['git'] + args,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=timeout,
-        )
+        result = _run_git(args, cwd=cwd, timeout=timeout, capture_output=True, text=True, check=True)
         if result.stdout:
             logging.debug(f"Git command stdout: {result.stdout}")
         logging.info(f"Git command succeeded: {command_str}")
         return result.stdout
-    except subprocess.TimeoutExpired as e:
-        logging.error(
-            "Git command timed out after %ss: %s", timeout, command_str
-        )
-        raise
     except subprocess.CalledProcessError as e:
         error_msg = f"Git command failed: {command_str}\n"
         error_msg += f"Exit code: {e.returncode}\n"
@@ -392,6 +644,66 @@ def run_git_command(args, cwd, *, timeout: int | None = None):
             error_msg += f"Stderr: {e.stderr}\n"
         logging.error(error_msg)
         raise
+
+def _push_with_retries(
+    repo_root: str, rel_label: str, msg: str, changed_files: list[str], saved_head: str
+) -> None:
+    """fetch + squash + push with exponential backoff until PUSH_DEADLINE_SEC."""
+    # Retry push with exponential backoff (many inspectors push concurrently).
+    # Each git command of an attempt is capped at the deadline, so the whole
+    # loop ends within PUSH_DEADLINE_SEC (+ the SIGTERM grace period) even
+    # when git hangs instead of failing.
+    deadline = time.monotonic() + PUSH_DEADLINE_SEC
+    wait_sec = min(PUSH_INITIAL_BACKOFF_SEC, PUSH_MAX_BACKOFF_SEC)
+    attempt = 0
+    while True:
+        try:
+            if attempt > 0:
+                sleep_sec = wait_sec + random.uniform(0, 2)
+                sleep_sec = max(0.0, min(sleep_sec, deadline - time.monotonic()))
+                logging.info(
+                    f"Retry attempt {attempt}: waiting {sleep_sec:.1f}s then fetch/squash/push"
+                )
+                time.sleep(sleep_sec)
+                wait_sec = min(wait_sec * 2, PUSH_MAX_BACKOFF_SEC)
+            logging.info("Fetching origin/main and squashing push...")
+            # every git command of the attempt is capped at the deadline
+            with git_deadline(deadline):
+                _fetch_origin_main(repo_root)
+                _squash_commit_and_push(
+                    repo_root, rel_label, msg, changed_files, saved_head
+                )
+            logging.info(f"Successfully pushed changes to git: {msg}")
+            break
+        except (subprocess.CalledProcessError, OriginMainStaleError) as e:
+            attempt += 1
+            if time.monotonic() >= deadline:
+                logging.error(f"Push failed after retries ({PUSH_DEADLINE_SEC:.0f}s deadline)")
+                raise
+            logging.warning(f"Push failed (attempt {attempt}), will retry with backoff: {e}")
+
+
+def _restore_unpushed_results(
+    repo_root: str, rel_label: str, changed_files: list[str], saved_head: str
+) -> None:
+    """Leave unpushed results as uncommitted changes on top of origin/main.
+
+    When push_paths gives up, HEAD is our local result commit or the squash
+    commit and the working tree is clean, so a retry (e.g. _push_data_dirs)
+    saw "No changes detected", reported success, and the next
+    ``reset --hard origin/main`` silently dropped the results.
+
+    The results are staged onto the *current* origin/main (the squash steps
+    without the commit), not onto the commit push_paths started from: the
+    failed attempt's fetch may have moved origin/main past other writers'
+    changes, and a retry diffing from the old base would revert them.
+    """
+    try:
+        _stage_onto_origin_main(repo_root, rel_label, changed_files, saved_head)
+        logging.warning("Push gave up; unpushed results kept as staged changes for the next push")
+    except Exception as e:
+        logging.error(f"Could not restore unpushed results from {saved_head[:8]}: {e}")
+
 
 @synchronized
 def push_paths(paths: list[str | os.PathLike], msg: str):
@@ -420,6 +732,7 @@ def push_paths(paths: list[str | os.PathLike], msg: str):
     try:
         # Pass repo_path explicitly: get_repo's default is bound at import time.
         get_repo(repo_path=repo_root)
+        _remove_stale_git_locks(repo_root)
         dirty = [p for p in dict.fromkeys(path_list) if path_has_changes(repo_root, p)]
         if not dirty:
             logging.info("No changes detected, skipping git operations")
@@ -444,33 +757,11 @@ def push_paths(paths: list[str | os.PathLike], msg: str):
             return
         saved_head = run_git_command(["rev-parse", "HEAD"], cwd=repo_root).strip()
         rel_label = ",".join(rel_paths)
-        # Retry push with exponential backoff (many inspectors push concurrently)
-        deadline = time.monotonic() + 10 * 60  # 10 minutes total
-        wait_sec = 5  # initial backoff in seconds
-        max_wait_per_round = 2 * 60  # cap 2 minutes per round
-        attempt = 0
-        while True:
-            try:
-                if attempt > 0:
-                    sleep_sec = min(wait_sec, max_wait_per_round) + random.uniform(0, 2)
-                    logging.info(
-                        f"Retry attempt {attempt}: waiting {sleep_sec:.1f}s then fetch/squash/push"
-                    )
-                    time.sleep(sleep_sec)
-                    wait_sec = min(wait_sec * 2, max_wait_per_round)
-                logging.info("Fetching origin/main and squashing push...")
-                _fetch_origin_main(repo_root)
-                _squash_commit_and_push(
-                    repo_root, rel_label, msg, changed_files, saved_head
-                )
-                logging.info(f"Successfully pushed changes to git: {msg}")
-                break
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-                attempt += 1
-                if time.monotonic() >= deadline:
-                    logging.error("Push failed after retries (10 min deadline)")
-                    raise
-                logging.warning(f"Push failed (attempt {attempt}), will retry with backoff: {e}")
+        try:
+            _push_with_retries(repo_root, rel_label, msg, changed_files, saved_head)
+        except BaseException:
+            _restore_unpushed_results(repo_root, rel_label, changed_files, saved_head)
+            raise
     except Exception as e:
         logging.error(f"Failed to push paths {path_list}: {e}", exc_info=True)
         raise
@@ -487,6 +778,7 @@ def pull():
     repo_root = _repo_root()
     try:
         get_repo()
+        _remove_stale_git_locks(repo_root)
         run_git_command(["fetch", "origin"], cwd=repo_root)
         logging.info("Merging origin/main with 'theirs' strategy...")
         run_git_command(["merge", "-X", "theirs", "origin/main"], cwd=repo_root)
