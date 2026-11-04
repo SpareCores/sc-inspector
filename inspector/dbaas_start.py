@@ -153,6 +153,27 @@ def _dbaas_client_location(vendor: str, region: str) -> str:
     return region
 
 
+def _azure_client_ips_exhausted(region: str) -> bool:
+    """True when the region's public IP caps are known to be used up.
+
+    Net of this job's own reservations, so parallel DBaaS stacks don't all try
+    the region that looked free in the cached usage snapshot.
+    """
+    from azure_vm_regions import public_ips_free
+
+    free = public_ips_free(region)
+    return free is not None and free < 1
+
+
+def _reserve_azure_client(vendor: str, region: str, client):
+    """Hold the client VM's vCPUs and public IP in the job-wide ledger (Azure only)."""
+    if vendor != "azure":
+        return None
+    from azure_vm_regions import reserve, vm_family
+
+    return reserve(region, vm_family(client.api_reference, region), int(client.vcpus))
+
+
 def _prefer_azure_regions_with_quota(
     regions: list[str],
     *,
@@ -479,22 +500,39 @@ def try_start_dbaas_inspect(
             continue
 
         for client in clients:
+            client_location = _dbaas_client_location(vendor, region)
+            if vendor == "azure" and _azure_client_ips_exhausted(client_location):
+                msg = (
+                    f"Skipping DBaaS {vendor}/{location}: no free public IP for the client "
+                    "(incl. this job's other stacks)"
+                )
+                logging.info(msg)
+                error_msgs.append(msg)
+                break
             attempted_provision = True
-            success, region_fatal, sku_fatal = _try_provision_dbaas_stack(
-                vendor,
-                target,
-                client,
-                region,
-                zone,
-                provision,
-                slug,
-                timeout_mins,
-                ssh_deploy_key_b64,
-                repo_url_ssh,
-                instance_logger,
-                instance_timing,
-                error_msgs,
-            )
+            reservation = _reserve_azure_client(vendor, client_location, client)
+            success = False
+            try:
+                success, region_fatal, sku_fatal = _try_provision_dbaas_stack(
+                    vendor,
+                    target,
+                    client,
+                    region,
+                    zone,
+                    provision,
+                    slug,
+                    timeout_mins,
+                    ssh_deploy_key_b64,
+                    repo_url_ssh,
+                    instance_logger,
+                    instance_timing,
+                    error_msgs,
+                )
+            finally:
+                if not success and reservation is not None:
+                    from azure_vm_regions import release
+
+                    release(reservation)
             if success:
                 return True, True
             if sku_fatal:
