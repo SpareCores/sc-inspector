@@ -33,6 +33,43 @@ _LOW_MEMORY_GIT_CONFIG = [
 
 _git_low_memory_configured = False
 
+# Hard timeouts for git subprocesses. Without them a stalled network operation
+# (seen on 2026-11-04: inspectors stuck after "Starting <task>" while ~25 VMs
+# pushed concurrently) blocked forever while holding the push_paths lock, so no
+# later result was ever pushed and cleanup eventually destroyed the VM.
+GIT_NETWORK_COMMANDS = frozenset({"clone", "fetch", "pull", "push", "ls-remote"})
+GIT_NETWORK_TIMEOUT_SEC = float(os.environ.get("GIT_NETWORK_TIMEOUT_SEC", 300))
+GIT_LOCAL_TIMEOUT_SEC = float(os.environ.get("GIT_LOCAL_TIMEOUT_SEC", 600))
+GIT_CLONE_TIMEOUT_SEC = float(os.environ.get("GIT_CLONE_TIMEOUT_SEC", 900))
+
+
+def git_timeout(args: list[str]) -> float:
+    """Timeout (seconds) for ``git <args>``: shorter for network commands."""
+    subcommand = next((a for a in args if not a.startswith("-")), "")
+    if subcommand == "clone":
+        return GIT_CLONE_TIMEOUT_SEC
+    if subcommand in GIT_NETWORK_COMMANDS:
+        return GIT_NETWORK_TIMEOUT_SEC
+    return GIT_LOCAL_TIMEOUT_SEC
+
+
+def _run_git(args: list[str], *, cwd, timeout: float, **kwargs) -> subprocess.CompletedProcess:
+    """subprocess.run(["git", *args]) that turns a timeout into CalledProcessError.
+
+    subprocess.run kills the child on timeout; raising CalledProcessError (not
+    TimeoutExpired) lets the existing ``except CalledProcessError`` retry paths
+    handle a hang exactly like a failed command.
+    """
+    try:
+        return subprocess.run(["git", *args], cwd=cwd, timeout=timeout, **kwargs)
+    except subprocess.TimeoutExpired as e:
+        raise subprocess.CalledProcessError(
+            returncode=-9,
+            cmd=e.cmd,
+            output=e.output,
+            stderr=f"git timed out after {timeout:.0f}s and was killed",
+        ) from e
+
 
 def _small_memory_machine() -> bool:
     # Use total RAM: "available" often stays high on Linux due to cache.
@@ -45,7 +82,7 @@ def configure_git_low_memory() -> None:
         return
     for command in _LOW_MEMORY_GIT_CONFIG:
         try:
-            subprocess.run(command, check=True)
+            _run_git(command[1:], cwd=None, timeout=GIT_LOCAL_TIMEOUT_SEC, check=True)
         except subprocess.CalledProcessError as e:
             logging.warning(f"git low-memory config failed: {command}: {e}")
     _git_low_memory_configured = True
@@ -113,11 +150,13 @@ def _clone_repo(repo_url: str, repo_path: str, sparse_paths: tuple[str, ...] | N
     if parent:
         os.makedirs(parent, exist_ok=True)
     logging.info(f"Cloning from {repo_url} to {repo_path} (sparse={sparse_paths})")
-    subprocess.run(
+    _run_git(
         [
-            "git", "clone", "--depth", "1", "--single-branch", "--branch", "main",
+            "clone", "--depth", "1", "--single-branch", "--branch", "main",
             "--no-checkout", repo_url, repo_path,
         ],
+        cwd=None,
+        timeout=GIT_CLONE_TIMEOUT_SEC,
         check=True,
         capture_output=True,
         text=True,
@@ -234,9 +273,10 @@ def _changed_files_under(repo_root: str, rel_path: str) -> list[str]:
 def _path_in_commit(repo_root: str, commit: str, path: str) -> bool:
     """True if ``path`` exists as a blob in ``commit`` (not a deletion)."""
     return (
-        subprocess.run(
-            ["git", "cat-file", "-e", f"{commit}:{path}"],
+        _run_git(
+            ["cat-file", "-e", f"{commit}:{path}"],
             cwd=repo_root,
+            timeout=GIT_LOCAL_TIMEOUT_SEC,
             capture_output=True,
         ).returncode
         == 0
@@ -288,9 +328,10 @@ def _squash_commit_and_push(
     if to_remove:
         run_git_command(["rm", "-f", "--"] + to_remove, cwd=repo_root)
 
-    no_staged_changes = subprocess.run(
-        ["git", "diff", "--cached", "--quiet"],
+    no_staged_changes = _run_git(
+        ["diff", "--cached", "--quiet"],
         cwd=repo_root,
+        timeout=GIT_LOCAL_TIMEOUT_SEC,
         capture_output=True,
     ).returncode == 0
     if no_staged_changes:
@@ -337,18 +378,18 @@ def get_repo(repo_url=REPO_URL, repo_path=REPO_PATH, sparse_paths: tuple[str, ..
             raise
 
 
-def run_git_command(args, cwd):
-    """Helper function to run git commands using subprocess."""
+def run_git_command(args, cwd, timeout: float | None = None):
+    """Helper function to run git commands using subprocess.
+
+    Every call has a hard timeout (see ``git_timeout``): a git process that hangs
+    (e.g. a stalled fetch/push to GitHub) is killed and reported as a failed
+    command, so callers' retry logic runs instead of blocking forever.
+    """
     command_str = ' '.join(['git'] + args)
+    timeout = git_timeout(args) if timeout is None else timeout
     logging.info(f"Running git command: {command_str} (cwd: {cwd})")
     try:
-        result = subprocess.run(
-            ['git'] + args,
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            check=True
-        )
+        result = _run_git(args, cwd=cwd, timeout=timeout, capture_output=True, text=True, check=True)
         if result.stdout:
             logging.debug(f"Git command stdout: {result.stdout}")
         logging.info(f"Git command succeeded: {command_str}")
