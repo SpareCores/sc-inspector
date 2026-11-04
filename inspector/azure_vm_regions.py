@@ -233,18 +233,71 @@ def check_region(
     return RegionCheck(region, True, fits=max(fits, 1), family=family)
 
 
-def public_ips_free(region: str, subscription_id: str | None = None) -> int | None:
-    """Fewest free public IPs across the caps a VM consumes; None if unknown."""
+# ---------------------------------------------------------------------------
+# helpers for other start paths (DBaaS client VMs); all ledger-aware and
+# returning None for "unknown" (check disabled, no subscription, lookup failed)
+# ---------------------------------------------------------------------------
+
+
+def _cached_region_data(region: str, subscription_id: str | None = None) -> RegionData | None:
     if _disabled():
         return None
     sub = subscription_id or _subscription_id()
     if not sub:
         return None
-    quotas = _network_quotas_or_empty(sub, region)
+    try:
+        return region_data(sub, region)
+    except Exception as exc:
+        logger.warning("Azure quota lookup failed for %s: %s", region, exc)
+        return None
+
+
+def public_ips_free(region: str, subscription_id: str | None = None) -> int | None:
+    """Fewest free public IPs across the caps a VM consumes; None if unknown."""
+    data = _cached_region_data(region, subscription_id)
+    if data is None:
+        return None
     with _ledger_lock:
-        frees = [_free(quotas, region, key) for key in PUBLIC_IP_QUOTAS]
+        frees = [_free(data.network_quotas, region, key) for key in PUBLIC_IP_QUOTAS]
     frees = [free for free in frees if free is not None]
     return min(frees) if frees else None
+
+
+def regional_cores_free(region: str, subscription_id: str | None = None) -> int | None:
+    """Free Total Regional vCPUs minus this job's reservations; None if unknown."""
+    data = _cached_region_data(region, subscription_id)
+    if data is None:
+        return None
+    with _ledger_lock:
+        return _free(data.vm_quotas, region, REGIONAL_CORES)
+
+
+def vm_family(sku: str, region: str, subscription_id: str | None = None) -> str | None:
+    """Quota family of a VM size: sc-data catalog first, else the region's SKU index."""
+    try:
+        family = sku_family_quota_name(sku)
+    except Exception:
+        family = None
+    if family:
+        return family
+    data = _cached_region_data(region, subscription_id)
+    info = data.sku_index.get(sku) if data is not None else None
+    return info.family if info is not None else None
+
+
+def reserve(region: str, family: str | None, vcpus: int) -> Reservation:
+    """Hold vCPUs (family + regional) and a public IP in ``region`` for this job."""
+    with _ledger_lock:
+        return _hold(region, family, vcpus)
+
+
+def prefetch(regions: list[str], subscription_id: str | None = None) -> None:
+    """Warm the per-region cache for ``regions`` in parallel (no-op if disabled)."""
+    if _disabled():
+        return
+    sub = subscription_id or _subscription_id()
+    if sub:
+        prefetch_region_data(sub, regions)
 
 
 # Cap on a region's weight: a huge regional cap (e.g. 22k vCPUs) should not make

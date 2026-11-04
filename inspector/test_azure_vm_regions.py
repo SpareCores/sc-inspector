@@ -318,3 +318,35 @@ def test_family_quota_not_oversubscribed_without_catalog_family(fake_azure, monk
         placed[plan.held.region if plan.held else None] += 1
     # family quota limits: centralus 192/16 = 12, swedencentral 64/16 = 4
     assert placed == {"centralus": 12, "swedencentral": 4, None: 4}
+
+
+def test_dbaas_helpers_are_ledger_aware_and_none_when_unknown(fake_azure, monkeypatch):
+    assert avr.regional_cores_free("centralus") == 22239
+    assert avr.public_ips_free("centralus") == 20
+    res = avr.reserve("centralus", "StandardDalsv7Family", 2)
+    assert avr.regional_cores_free("centralus") == 22237
+    assert avr.public_ips_free("centralus") == 19
+    assert avr.reserved("centralus", "StandardDalsv7Family") == 2
+    avr.release(res)
+    assert avr.public_ips_free("centralus") == 20
+
+    def failing(sub, region):
+        raise RuntimeError("timeout")
+
+    avr.reset_region_cache()
+    monkeypatch.setattr(avr, "_vm_quotas", failing)
+    assert avr.regional_cores_free("centralus") is None
+    assert avr.public_ips_free("centralus") is None
+
+
+def test_dbaas_helpers_disabled(fake_azure, monkeypatch):
+    monkeypatch.setenv("AZURE_SKIP_VM_QUOTA_CHECK", "1")
+    assert avr.regional_cores_free("centralus") is None
+    assert avr.public_ips_free("centralus") is None
+
+
+def test_vm_family_falls_back_to_region_sku_index(fake_azure, monkeypatch):
+    assert avr.vm_family(SKU, "centralus") == FAMILY  # catalog
+    monkeypatch.setattr(avr, "sku_family_quota_name", lambda sku: None)
+    assert avr.vm_family(SKU, "centralus") == FAMILY  # SKU index
+    assert avr.vm_family(SKU, "uksouth") is None  # not offered there

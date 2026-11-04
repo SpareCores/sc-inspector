@@ -153,10 +153,6 @@ def _dbaas_client_location(vendor: str, region: str) -> str:
     return region
 
 
-# DBaaS client VMs are fixed 2-vCPU sizes (benchmark_tiers.dbaas_client_req).
-DBAAS_CLIENT_VCPUS = 2
-
-
 def _prefer_azure_regions_with_quota(
     regions: list[str],
     *,
@@ -168,11 +164,16 @@ def _prefer_azure_regions_with_quota(
     """Reorder Azure regions: ready regions in weighted random order, then the rest by price.
 
     A region is ready when Flexible Server offers the SKU with quota headroom AND it
-    can host the client VM (2 free regional vCPUs and a free public IP, if known).
-    Ready regions are shuffled with weights by client capacity (capped, see
-    azure_vm_regions.weighted_shuffle) so parallel stacks spread out instead of all
-    landing in the region with the most VM cores. Regions with PG quota but no
-    client headroom come next, then regions without PG quota, each by price.
+    can host the client VM: free regional vCPUs for the largest client size
+    (DBAAS_CLIENT_MAX_VCPUS) and a free public IP. Both counts are net of this
+    job's own reservations. Ready regions are shuffled with weights by client
+    capacity (capped, see azure_vm_regions.weighted_shuffle) so parallel stacks
+    spread out instead of all landing in the region with the most VM cores.
+
+    Then, each by price: regions with PG quota whose client capacity is unknown
+    (lookup failed or checks disabled — a transient error must not push the only
+    region with PG quota down), regions with PG quota but no client headroom,
+    and regions without PG quota.
 
     Recent start-dbaas runs (e.g. 41428276071) succeeded in quota-bearing regions such as
     eastus2 / uaenorth, while pure price order spent hours on offer-restricted or
@@ -182,13 +183,19 @@ def _prefer_azure_regions_with_quota(
     """
     import random
 
-    from azure_dbaas_quota import vm_regional_cores_available
-    from azure_vm_regions import RegionCheck, public_ips_free, weighted_shuffle
+    import azure_vm_regions
+    from azure_dbaas_quota import _skip_quota_check
+    from azure_vm_regions import RegionCheck, weighted_shuffle
+    from benchmark_tiers import DBAAS_CLIENT_MAX_VCPUS
 
     def price_key(region: str) -> tuple:
         return (prices.get(region, float("inf")), region)
 
+    skip = _skip_quota_check()
+    if not skip:
+        azure_vm_regions.prefetch(regions)
     ready: list[RegionCheck] = []
+    unknown: list[str] = []
     no_client: list[str] = []
     no_pg: list[str] = []
     for region in regions:
@@ -196,18 +203,21 @@ def _prefer_azure_regions_with_quota(
         if not ok:
             no_pg.append(region)
             continue
-        cores = vm_regional_cores_available(region)
-        ips = public_ips_free(region)
-        if cores < DBAAS_CLIENT_VCPUS or (ips is not None and ips < 1):
+        cores = None if skip else azure_vm_regions.regional_cores_free(region)
+        ips = None if skip else azure_vm_regions.public_ips_free(region)
+        if (cores is not None and cores < DBAAS_CLIENT_MAX_VCPUS) or (ips is not None and ips < 1):
             no_client.append(region)
             continue
-        fits = cores // DBAAS_CLIENT_VCPUS
+        if cores is None:
+            unknown.append(region)
+            continue
+        fits = cores // DBAAS_CLIENT_MAX_VCPUS
         if ips is not None:
             fits = min(fits, ips)
         ready.append(RegionCheck(region, True, fits=fits))
-    ready.sort(key=lambda check: price_key(check.region))
     return (
         weighted_shuffle(ready, rng or random)
+        + sorted(unknown, key=price_key)
         + sorted(no_client, key=price_key)
         + sorted(no_pg, key=price_key)
     )
