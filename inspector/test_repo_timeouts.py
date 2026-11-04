@@ -129,3 +129,48 @@ def test_env_reaches_git_subprocess(tmp_path, monkeypatch):
     monkeypatch.delenv("GIT_HTTP_LOW_SPEED_LIMIT", raising=False)
     out = repo.run_git_command(["fetch", "origin"], cwd=tmp_path).strip()
     assert out == f"ssh {repo.GIT_SSH_TIMEOUT_OPTIONS}|1000"
+
+
+def test_push_paths_gives_up_on_hanging_push_and_next_push_works(tmp_path, monkeypatch):
+    """The 2026-11-04 failure mode: a stalled push must not wedge the inspector."""
+    import shutil
+
+    from test_repo_squash import _init_bare_and_clone
+
+    real_git = shutil.which("git")
+    bare, work = _init_bare_and_clone(tmp_path)
+
+    marker = tmp_path / "hang-push"
+    marker.write_text("")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        'for a in "$@"; do case "$a" in -*) ;; *) sub="$a"; break;; esac; done\n'
+        f'if [ "$sub" = "push" ] && [ -e "{marker}" ]; then sleep 30; fi\n'
+        f'exec "{real_git}" "$@"\n'
+    )
+    wrapper.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(repo, "REPO_PATH", str(work))
+    monkeypatch.setattr(repo, "should_push", lambda: True)
+    monkeypatch.setattr(repo, "GIT_NETWORK_TIMEOUT_SEC", 0.5)
+    monkeypatch.setattr(repo, "PUSH_DEADLINE_SEC", 2)
+    monkeypatch.setattr(repo, "PUSH_INITIAL_BACKOFF_SEC", 0.1)
+
+    meta = work / "data" / "vendor" / "inst" / "0" / "task" / "meta.json"
+    meta.write_text('{"start":"first"}\n')
+    started = time.monotonic()
+    with pytest.raises(subprocess.CalledProcessError):
+        repo.push_paths([work / "data" / "vendor" / "inst" / "0"], "first result")
+    assert time.monotonic() - started < 20  # bounded, instead of hanging forever
+
+    # GitHub recovers: the lock is free and the repo is not wedged by stale locks
+    marker.unlink()
+    meta.write_text('{"start":"second"}\n')
+    repo.push_paths([work / "data" / "vendor" / "inst" / "0"], "second result")
+
+    tip = tmp_path / "verify"
+    subprocess.run([real_git, "clone", "-q", str(bare), str(tip)], check=True)
+    assert (tip / "data/vendor/inst/0/task/meta.json").read_text() == '{"start":"second"}\n'

@@ -42,6 +42,11 @@ GIT_NETWORK_TIMEOUT_SEC = float(os.environ.get("GIT_NETWORK_TIMEOUT_SEC", 300))
 GIT_LOCAL_TIMEOUT_SEC = float(os.environ.get("GIT_LOCAL_TIMEOUT_SEC", 600))
 GIT_CLONE_TIMEOUT_SEC = float(os.environ.get("GIT_CLONE_TIMEOUT_SEC", 900))
 
+# push_paths retry loop (unchanged values, module-level so tests can shrink them)
+PUSH_DEADLINE_SEC = 10 * 60
+PUSH_INITIAL_BACKOFF_SEC = 5
+PUSH_MAX_BACKOFF_SEC = 2 * 60
+
 
 def git_timeout(args: list[str]) -> float:
     """Timeout (seconds) for ``git <args>``: shorter for network commands."""
@@ -527,10 +532,12 @@ def push_paths(paths: list[str | os.PathLike], msg: str):
             return
         saved_head = run_git_command(["rev-parse", "HEAD"], cwd=repo_root).strip()
         rel_label = ",".join(rel_paths)
-        # Retry push with exponential backoff (many inspectors push concurrently)
-        deadline = time.monotonic() + 10 * 60  # 10 minutes total
-        wait_sec = 5  # initial backoff in seconds
-        max_wait_per_round = 2 * 60  # cap 2 minutes per round
+        # Retry push with exponential backoff (many inspectors push concurrently).
+        # With git timeouts every attempt is bounded, so the deadline is reached
+        # even when git hangs instead of failing.
+        deadline = time.monotonic() + PUSH_DEADLINE_SEC
+        wait_sec = PUSH_INITIAL_BACKOFF_SEC
+        max_wait_per_round = PUSH_MAX_BACKOFF_SEC
         attempt = 0
         while True:
             try:
@@ -551,7 +558,7 @@ def push_paths(paths: list[str | os.PathLike], msg: str):
             except subprocess.CalledProcessError as e:
                 attempt += 1
                 if time.monotonic() >= deadline:
-                    logging.error("Push failed after retries (10 min deadline)")
+                    logging.error(f"Push failed after retries ({PUSH_DEADLINE_SEC:.0f}s deadline)")
                     raise
                 logging.warning(f"Push failed (attempt {attempt}), will retry with backoff: {e}")
     except Exception as e:
