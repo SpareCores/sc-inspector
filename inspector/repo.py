@@ -49,9 +49,29 @@ PUSH_INITIAL_BACKOFF_SEC = 5
 PUSH_MAX_BACKOFF_SEC = 2 * 60
 
 
+# git global options that take their value as the next argument
+_GIT_OPTIONS_WITH_VALUE = frozenset({"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"})
+
+
+def git_subcommand(args: list[str]) -> str:
+    """The git subcommand in ``args``, skipping global options and their values."""
+    skip_next = False
+    for arg in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in _GIT_OPTIONS_WITH_VALUE:
+            skip_next = True
+            continue
+        if arg.startswith("-"):
+            continue
+        return arg
+    return ""
+
+
 def git_timeout(args: list[str]) -> float:
     """Timeout (seconds) for ``git <args>``: shorter for network commands."""
-    subcommand = next((a for a in args if not a.startswith("-")), "")
+    subcommand = git_subcommand(args)
     if subcommand == "clone":
         return GIT_CLONE_TIMEOUT_SEC
     if subcommand in GIT_NETWORK_COMMANDS:

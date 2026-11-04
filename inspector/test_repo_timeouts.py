@@ -197,3 +197,14 @@ def test_push_paths_gives_up_on_hanging_push_and_next_push_works(tmp_path, monke
     tip = tmp_path / "verify"
     subprocess.run([real_git, "clone", "-q", str(bare), str(tip)], check=True)
     assert (tip / "data/vendor/inst/0/task/meta.json").read_text() == '{"start":"second"}\n'
+
+
+def test_subcommand_skips_global_options_and_their_values():
+    assert repo.git_subcommand(["-c", "http.lowSpeedTime=10", "push", "origin"]) == "push"
+    assert repo.git_subcommand(["-C", "/repo", "fetch", "origin"]) == "fetch"
+    assert repo.git_subcommand(["--git-dir", "/repo/.git", "ls-remote", "origin"]) == "ls-remote"
+    assert repo.git_subcommand(["--no-pager", "-c", "a=b", "-C", "x", "status"]) == "status"
+    assert repo.git_subcommand(["--git-dir=/repo/.git", "push"]) == "push"
+    assert repo.git_subcommand([]) == ""
+    assert repo.git_timeout(["-c", "core.sshCommand=ssh", "push", "origin"]) == repo.GIT_NETWORK_TIMEOUT_SEC
+    assert repo.git_timeout(["-C", "/repo", "clone", "url", "dir"]) == repo.GIT_CLONE_TIMEOUT_SEC
