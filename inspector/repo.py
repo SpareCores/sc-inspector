@@ -3,6 +3,7 @@ import logging
 import os
 import psutil
 import random
+import shutil
 import signal
 import subprocess
 import time
@@ -266,20 +267,30 @@ def _clone_repo(repo_url: str, repo_path: str, sparse_paths: tuple[str, ...] | N
     if parent:
         os.makedirs(parent, exist_ok=True)
     logging.info(f"Cloning from {repo_url} to {repo_path} (sparse={sparse_paths})")
-    _run_git(
-        [
-            "clone", "--depth", "1", "--single-branch", "--branch", "main",
-            "--no-checkout", repo_url, repo_path,
-        ],
-        cwd=None,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    if sparse_paths:
-        run_git_command(["sparse-checkout", "init", "--cone"], cwd=repo_path)
-        run_git_command(["sparse-checkout", "set", *sparse_paths], cwd=repo_path)
-    run_git_command(["checkout", "-f", "main"], cwd=repo_path)
+    created = not os.path.exists(repo_path)
+    try:
+        _run_git(
+            [
+                "clone", "--depth", "1", "--single-branch", "--branch", "main",
+                "--no-checkout", repo_url, repo_path,
+            ],
+            cwd=None,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        if sparse_paths:
+            run_git_command(["sparse-checkout", "init", "--cone"], cwd=repo_path)
+            run_git_command(["sparse-checkout", "set", *sparse_paths], cwd=repo_path)
+        run_git_command(["checkout", "-f", "main"], cwd=repo_path)
+    except Exception:
+        # A half-written clone (git SIGKILLed after the timeout grace period, or
+        # a failed sparse/checkout step) would later be opened as a broken repo
+        # or make the next clone fail with "destination path already exists".
+        if created and os.path.exists(repo_path):
+            logging.warning("Removing incomplete clone at %s", repo_path)
+            shutil.rmtree(repo_path, ignore_errors=True)
+        raise
     logging.info(f"Successfully cloned repo to {repo_path}")
 
 

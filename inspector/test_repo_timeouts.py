@@ -208,3 +208,30 @@ def test_subcommand_skips_global_options_and_their_values():
     assert repo.git_subcommand([]) == ""
     assert repo.git_timeout(["-c", "core.sshCommand=ssh", "push", "origin"]) == repo.GIT_NETWORK_TIMEOUT_SEC
     assert repo.git_timeout(["-C", "/repo", "clone", "url", "dir"]) == repo.GIT_CLONE_TIMEOUT_SEC
+
+
+def test_failed_clone_removes_the_incomplete_directory(tmp_path, monkeypatch):
+    target = tmp_path / "clone"
+    # like a clone SIGKILLed half-way: leaves a partial .git behind
+    _fake_git(tmp_path, monkeypatch,
+              'for last in "$@"; do :; done\n'
+              'mkdir -p "$last/.git/objects"\n'
+              "trap '' TERM\n"
+              "sleep 30\n")
+    monkeypatch.setattr(repo, "GIT_CLONE_TIMEOUT_SEC", 0.5)
+    monkeypatch.setattr(repo, "GIT_TERM_GRACE_SEC", 0.5)
+    monkeypatch.setattr(repo, "_git_low_memory_configured", True)
+    with pytest.raises(subprocess.CalledProcessError):
+        repo._clone_repo("https://example.invalid/repo.git", str(target), None)
+    assert not target.exists()
+
+
+def test_failed_clone_keeps_a_directory_that_existed_before(tmp_path, monkeypatch):
+    target = tmp_path / "existing"
+    target.mkdir()
+    (target / "keep.txt").write_text("not ours")
+    _fake_git(tmp_path, monkeypatch, "exit 128\n")
+    monkeypatch.setattr(repo, "_git_low_memory_configured", True)
+    with pytest.raises(subprocess.CalledProcessError):
+        repo._clone_repo("https://example.invalid/repo.git", str(target), None)
+    assert (target / "keep.txt").exists()
