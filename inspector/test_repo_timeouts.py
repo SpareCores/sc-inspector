@@ -155,31 +155,20 @@ def test_env_reaches_git_subprocess(tmp_path, monkeypatch):
 
 
 def test_push_paths_gives_up_on_hanging_push_and_next_push_works(tmp_path, monkeypatch):
-    """The 2026-11-04 failure mode: a stalled push must not wedge the inspector."""
-    import shutil
+    """The 2026-11-04 failure mode: a stalled push must not wedge the inspector.
 
+    Only the push deadline is shrunk: the real local fetch/push/ls-remote calls
+    keep their normal timeouts, so a slow CI runner can't make them time out.
+    """
     from test_repo_squash import _init_bare_and_clone
 
-    real_git = shutil.which("git")
     bare, work = _init_bare_and_clone(tmp_path)
-
     marker = tmp_path / "hang-push"
     marker.write_text("")
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    wrapper = bin_dir / "git"
-    wrapper.write_text(
-        "#!/bin/sh\n"
-        'for a in "$@"; do case "$a" in -*) ;; *) sub="$a"; break;; esac; done\n'
-        f'if [ "$sub" = "push" ] && [ -e "{marker}" ]; then sleep 30; fi\n'
-        f'exec "{real_git}" "$@"\n'
-    )
-    wrapper.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    real_git = _hang_push_wrapper(tmp_path, monkeypatch, marker)
     monkeypatch.setattr(repo, "REPO_PATH", str(work))
     monkeypatch.setattr(repo, "should_push", lambda: True)
-    monkeypatch.setattr(repo, "GIT_NETWORK_TIMEOUT_SEC", 0.5)
-    monkeypatch.setattr(repo, "PUSH_DEADLINE_SEC", 2)
+    monkeypatch.setattr(repo, "PUSH_DEADLINE_SEC", 3)
     monkeypatch.setattr(repo, "PUSH_INITIAL_BACKOFF_SEC", 0.1)
 
     meta = work / "data" / "vendor" / "inst" / "0" / "task" / "meta.json"
@@ -187,9 +176,10 @@ def test_push_paths_gives_up_on_hanging_push_and_next_push_works(tmp_path, monke
     started = time.monotonic()
     with pytest.raises(subprocess.CalledProcessError):
         repo.push_paths([work / "data" / "vendor" / "inst" / "0"], "first result")
-    assert time.monotonic() - started < 20  # bounded, instead of hanging forever
+    # bounded by the push deadline + SIGTERM grace, instead of hanging forever
+    assert time.monotonic() - started < 3 + repo.GIT_TERM_GRACE_SEC + 10
 
-    # GitHub recovers: the lock is free and the repo is not wedged by stale locks
+    # GitHub recovers: the push_paths lock is free and the repo is not wedged
     marker.unlink()
     meta.write_text('{"start":"second"}\n')
     repo.push_paths([work / "data" / "vendor" / "inst" / "0"], "second result")
