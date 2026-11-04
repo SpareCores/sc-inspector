@@ -3129,6 +3129,24 @@ def _try_start_multi_vm_inspect(
     return False
 
 
+AZURE_GEN2_BOOT_ERROR = "cannot boot Hypervisor Generation '2'"
+
+
+def azure_gen1_retry_image_sku(image_sku: str, azure_cvm: bool, output: list[str]) -> str | None:
+    """Return the ``-gen1`` image SKU to retry an Azure create with, or None to give up.
+
+    Azure rejects some (older) sizes on Gen2 images with "The selected VM size ...
+    cannot boot Hypervisor Generation '2'"; those get exactly one retry on the
+    gen1 image. Confidential VM sizes must stay on their Gen2 CVM image, and a
+    failure that already used gen1 (or any other error) is final for the region.
+    """
+    if azure_cvm or image_sku.endswith("-gen1"):
+        return None
+    if any(AZURE_GEN2_BOOT_ERROR in line for line in output):
+        return image_sku + "-gen1"
+    return None
+
+
 def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, regions, zones, zone_to_region=None):
     import sc_runner.resources
     from sc_runner import runner
@@ -3439,22 +3457,18 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                     instance_started = True
                     break
                 except Exception:
-                    if image_sku.endswith("-gen1") or azure_cvm:
-                        # gen1 already tried, or CVM sizes must stay on Gen2 CVM images
-                        break
-                    # The selected VM size 'Standard_A0' cannot boot Hypervisor Generation '2'. If this was a
-                    # Create operation please check that the Hypervisor Generation of the Image matches the
-                    # Hypervisor Generation of the selected VM Size. If this was an Update operation please select
-                    # a Hypervisor Generation '2' VM Size. For more information, see https://aka.ms/azuregen2vm
-                    if any(["cannot boot Hypervisor Generation '2'" in s for s in output]):
+                    gen1_image_sku = azure_gen1_retry_image_sku(image_sku, azure_cvm, output)
+                    if gen1_image_sku:
                         logger.exception(f"Hypervisor Generation error, image_sku={image_sku}, adding -gen1")
-                        if "gen1" not in image_sku:
-                            image_sku += "-gen1"
+                        image_sku = gen1_image_sku
                         # The NIC will be blocked for 180s, so wait until we retry
                         # Nic(s) in request is reserved for another Virtual Machine for 180 seconds.
                         logger.info("Sleeping 180s to make the NIC free again")
                         time.sleep(180)
                         continue
+                    # Every give-up path (CVM sizes and a failed gen1 retry included) must
+                    # destroy the stack: otherwise the RG/VNet/NIC/public IP of the failed
+                    # region attempt leaks and counts against the regional public IP quota.
                     logger.exception(f"Couldn't start instance, deleting the stack for {region} in the background")
                     # on failure, destroy the stack in the background (as we have to wait 180s for the NIC), so we're
                     # not blocking further tries
