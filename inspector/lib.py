@@ -184,6 +184,9 @@ class Meta(BaseModel):
     # AWS only: True when the instance was requested as Spot; used to self-heal
     # unexpected Spot terminations by retrying on-demand after cleanup timeouts.
     spot: bool | None = None
+    # Vendor region api_reference where this run executed. Set from the GHA start
+    # job via user_data.sh (REGION / SC_PROVISION_REGION), not instance metadata.
+    region: str | None = None
 
 
 class Task(BaseModel):
@@ -591,11 +594,26 @@ def _is_stale_no_output(meta: Meta) -> bool:
     )
 
 
+def provisioned_region() -> str | None:
+    """Region id injected by the start job into the inspect container env.
+
+    Prefer ``REGION`` (user_data.sh from the GHA start path). Fall back to
+    ``SC_PROVISION_REGION`` for DBaaS clients that already export that name.
+    """
+    for key in ("REGION", "SC_PROVISION_REGION"):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return None
+
+
 def boot_meta_for_task(task: Task, data_dir: str | os.PathLike, **fields) -> Meta:
     """Boot-time meta for a task, preserving start_retries from any prior meta."""
     prior = load_task_meta(task, data_dir)
     data = dict(start=datetime.now(), task_hash=task_hash(task), start_retries=prior.start_retries)
     data.update(fields)
+    if data.get("region") is None:
+        data["region"] = provisioned_region()
     return Meta(**data)
 
 
@@ -1336,7 +1354,11 @@ def write_variant_task_meta(
         if placeholder is not None:
             if meta.spot is None:
                 meta.spot = placeholder.spot
+            if meta.region is None:
+                meta.region = placeholder.region
             meta.start_retries = max(meta.start_retries, placeholder.start_retries)
+    if meta.region is None:
+        meta.region = provisioned_region()
     write_meta(meta, task_meta_path(variant_root_dir, task))
     if instance_root is not None:
         refresh_schedule_meta(instance_root, task, active_root=variant_root_dir)

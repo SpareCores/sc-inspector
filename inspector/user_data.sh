@@ -468,6 +468,7 @@ if [ "{INSPECTOR_ROLE}" = "client" ]; then
     docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/docker.sock \
         -v "$BENCHMARK_OUTPUT_DIR:/benchmark-output" \
         -e VENDOR={VENDOR} -e INSTANCE={INSTANCE} \
+        -e REGION={REGION} -e ZONE={ZONE} \
         -e MP_AUTHKEY_B64={MP_AUTHKEY_B64} -e MP_PORT={MP_PORT} \
         -e HOST_BENCHMARK_OUTPUT_DIR="$BENCHMARK_OUTPUT_DIR" \
         -e BENCHMARK_OUTPUT_MOUNT=/benchmark-output \
@@ -495,6 +496,7 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e SC_CDN_DATASET_POST_B64={SC_CDN_DATASET_POST_B64} \
     -e GPU_VRAM_MIB="$GPU_VRAM_MIB" \
     -e GPU_COMPUTE_CAP="$GPU_COMPUTE_CAP" \
+    -e REGION={REGION} -e ZONE={ZONE} \
     -e MEM_GIB={SC_PROVISION_MEMORY_GIB} \
     -e SC_DB_HOST={SC_DB_HOST} -e SC_DB_PORT={SC_DB_PORT} \
     -e SC_DB_USER={SC_DB_USER} -e SC_DB_PASSWORD={SC_DB_PASSWORD} -e SC_DB_NAME={SC_DB_NAME} \
@@ -537,6 +539,7 @@ docker run --rm --network=host --privileged -v /var/run/docker.sock:/var/run/doc
     -e SC_CDN_DATASET_POST_B64={SC_CDN_DATASET_POST_B64} \
     -e GPU_VRAM_MIB="$GPU_VRAM_MIB" \
     -e GPU_COMPUTE_CAP="$GPU_COMPUTE_CAP" \
+    -e REGION={REGION} -e ZONE={ZONE} \
     -e MP_AUTHKEY_B64={MP_AUTHKEY_B64} -e MP_PORT={MP_PORT} \
     -e CLIENT_PRIVATE_IP={CLIENT_PRIVATE_IP} \
     -e MULTI_VM_CLIENT_INSTANCE={MULTI_VM_CLIENT_INSTANCE} \
