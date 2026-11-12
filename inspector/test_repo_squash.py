@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -154,3 +156,98 @@ def test_push_data_dirs_pushes_all_roots_at_once(monkeypatch):
     lib._push_data_dirs(["/d/inst/0", "/d/inst/schedule", "/d/inst/0"], "Starting task")
 
     assert calls == [["/d/inst/0", "/d/inst/schedule"]]
+
+
+def test_unlocked_start_lease_wiped_by_reset_yields_no_changes(
+    tmp_path: Path, monkeypatch
+):
+    """Vultr multi-start race: reset --hard between write_meta and push → no lease."""
+    bare, work = _init_bare_and_clone(tmp_path)
+    monkeypatch.setattr(repo, "REPO_PATH", str(work))
+    monkeypatch.setattr(repo, "should_push", lambda: True)
+
+    sched = work / "data" / "vendor" / "inst" / "schedule"
+    sched_meta = sched / "task" / "meta.json"
+    lease = '{"start":"leased","end":null,"exit_code":null}\n'
+    sched_meta.write_text(lease)
+    assert repo.path_has_changes(str(work), str(sched))
+
+    # Concurrent push_paths squash does reset --hard and drops uncommitted lease.
+    _git(work, "reset", "--hard", "origin/main")
+    assert '"start":"old"' in sched_meta.read_text()
+    assert repo.push_paths([sched], "Starting server") is False
+
+    tip = tmp_path / "verify-wiped"
+    _git(tmp_path, "clone", str(bare), str(tip))
+    assert '"start":"old"' in (
+        tip / "data/vendor/inst/schedule/task/meta.json"
+    ).read_text()
+
+
+def test_mutate_and_push_publishes_start_lease(tmp_path: Path, monkeypatch):
+    bare, work = _init_bare_and_clone(tmp_path)
+    monkeypatch.setattr(repo, "REPO_PATH", str(work))
+    monkeypatch.setattr(repo, "should_push", lambda: True)
+
+    sched = work / "data" / "vendor" / "inst" / "schedule"
+    sched_meta = sched / "task" / "meta.json"
+    lease = '{"start":"leased","end":null,"exit_code":null}\n'
+
+    published = repo.mutate_and_push(
+        [sched],
+        "Starting server",
+        lambda: sched_meta.write_text(lease),
+    )
+    assert published is True
+
+    tip = tmp_path / "verify-lease"
+    _git(tmp_path, "clone", str(bare), str(tip))
+    assert (tip / "data/vendor/inst/schedule/task/meta.json").read_text() == lease
+
+
+def test_concurrent_mutate_and_push_calls_serialize(tmp_path: Path, monkeypatch):
+    """Two mutate_and_push threads on sibling roots must both land on origin."""
+    bare, work = _init_bare_and_clone(tmp_path)
+    monkeypatch.setattr(repo, "REPO_PATH", str(work))
+    monkeypatch.setattr(repo, "should_push", lambda: True)
+
+    sched = work / "data" / "vendor" / "inst" / "schedule"
+    sched_meta = sched / "task" / "meta.json"
+    keep = work / "data" / "vendor" / "inst" / "0" / "task" / "keep.txt"
+    zero = work / "data" / "vendor" / "inst" / "0"
+    lease = '{"start":"leased","end":null,"exit_code":null}\n'
+    results: dict[str, bool] = {}
+
+    def starter() -> None:
+        def write_lease() -> None:
+            # Hold the git lock while "dirty" so a concurrent push cannot reset.
+            time.sleep(0.2)
+            sched_meta.write_text(lease)
+
+        results["lease"] = repo.mutate_and_push(
+            [sched], "Starting server", write_lease
+        )
+
+    def other() -> None:
+        time.sleep(0.05)
+
+        def write_keep() -> None:
+            keep.write_text("concurrent-sibling\n")
+
+        # Sibling must also write under the git lock; unlocked dirty files are
+        # exactly what reset --hard drops (see unlocked test above).
+        results["other"] = repo.mutate_and_push([zero], "Sibling push", write_keep)
+
+    t1 = threading.Thread(target=starter)
+    t2 = threading.Thread(target=other)
+    t1.start()
+    t2.start()
+    t1.join(timeout=60)
+    t2.join(timeout=60)
+    assert results.get("lease") is True
+    assert results.get("other") is True
+
+    tip = tmp_path / "verify-race"
+    _git(tmp_path, "clone", str(bare), str(tip))
+    assert (tip / "data/vendor/inst/schedule/task/meta.json").read_text() == lease
+    assert (tip / "data/vendor/inst/0/task/keep.txt").read_text() == "concurrent-sibling\n"

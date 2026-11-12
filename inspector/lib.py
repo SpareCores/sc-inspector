@@ -617,6 +617,25 @@ def boot_meta_for_task(task: Task, data_dir: str | os.PathLike, **fields) -> Met
     return Meta(**data)
 
 
+def pull_update_push(
+    data_dir: str | os.PathLike,
+    msg: str,
+    update: Callable[[], None],
+) -> bool:
+    """Pull, write, and push ``data_dir`` under the git lock.
+
+    The start orchestrator shares one checkout between threads: writes made
+    outside the git lock can be wiped by another thread's squash
+    ``reset --hard`` before they are pushed.
+    """
+
+    def _pull_and_update() -> None:
+        repo.pull()
+        update()
+
+    return repo.mutate_and_push([data_dir], msg, _pull_and_update)
+
+
 def reconcile_stale_start_retries(
     vendor: str,
     data_dir: str | os.PathLike,
@@ -633,41 +652,43 @@ def reconcile_stale_start_retries(
     ]
     if not candidates:
         return False
-    repo.pull()
     changed = False
     now = datetime.now()
-    for task in candidates:
-        meta = load_task_meta(task, data_dir)
-        if not _is_stale_no_output(meta):
-            continue
-        meta_path = os.path.join(data_dir, task.name, META_NAME)
-        if meta.start_retries >= MAX_START_RETRIES:
-            if meta.exit_code is not None:
+
+    def _apply_stale_retries() -> None:
+        nonlocal changed
+        for task in candidates:
+            meta = load_task_meta(task, data_dir)
+            if not _is_stale_no_output(meta):
                 continue
-            meta.end = now
-            meta.exit_code = EXIT_CODE_STALE_RETRIES_EXHAUSTED
-            meta.error_msg = (
-                f"No output after {FAIL_IF_NO_OUTPUT.days} days; "
-                f"exceeded {MAX_START_RETRIES} stale start retries"
-            )
-            logger.info(
-                f"Task {task.name} exhausted stale start retries ({meta.start_retries}), "
-                "will not trigger instance starts"
-            )
-        else:
-            meta.start_retries += 1
-            meta.start = None
-            meta.end = None
-            meta.exit_code = None
-            meta.error_msg = None
-            logger.info(
-                f"Task {task.name} stale with no output; "
-                f"retry {meta.start_retries}/{MAX_START_RETRIES}"
-            )
-        write_meta(meta, meta_path)
-        changed = True
-    if changed:
-        repo.push_path(data_dir, f"Stale start retry from {repo.gha_url()}")
+            meta_path = os.path.join(data_dir, task.name, META_NAME)
+            if meta.start_retries >= MAX_START_RETRIES:
+                if meta.exit_code is not None:
+                    continue
+                meta.end = now
+                meta.exit_code = EXIT_CODE_STALE_RETRIES_EXHAUSTED
+                meta.error_msg = (
+                    f"No output after {FAIL_IF_NO_OUTPUT.days} days; "
+                    f"exceeded {MAX_START_RETRIES} stale start retries"
+                )
+                logger.info(
+                    f"Task {task.name} exhausted stale start retries ({meta.start_retries}), "
+                    "will not trigger instance starts"
+                )
+            else:
+                meta.start_retries += 1
+                meta.start = None
+                meta.end = None
+                meta.exit_code = None
+                meta.error_msg = None
+                logger.info(
+                    f"Task {task.name} stale with no output; "
+                    f"retry {meta.start_retries}/{MAX_START_RETRIES}"
+                )
+            write_meta(meta, meta_path)
+            changed = True
+
+    pull_update_push(data_dir, f"Stale start retry from {repo.gha_url()}", _apply_stale_retries)
     return changed
 
 
@@ -2872,8 +2893,8 @@ def record_instance_start_failure(lock, data_dir, tasks, error_msgs, fallback_ms
     else:
         error_msg = "Failed to start instance"
     logger.info(f"Failed to start instance, uploading error messages: {error_msg}")
-    with lock:
-        repo.pull()
+
+    def _write_failure() -> None:
         for task in tasks:
             meta = load_task_meta(task, data_dir=data_dir)
             if not meta.start:
@@ -2883,7 +2904,9 @@ def record_instance_start_failure(lock, data_dir, tasks, error_msgs, fallback_ms
             meta.error_msg = error_msg
             meta.task_hash = task_hash(task)
             write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
-        repo.push_path(data_dir, f"Failed to start instance from {repo.gha_url()}")
+
+    with lock:
+        pull_update_push(data_dir, f"Failed to start instance from {repo.gha_url()}", _write_failure)
 
 
 def delayed_destroy(vendor, server, resource_opts):
@@ -3047,9 +3070,11 @@ def _try_start_multi_vm_inspect(
                 f"{vendor}/{server}: multi-VM Spot exhausted all regions; falling back to on-demand"
             )
             with lock:
-                repo.pull()
-                update_task_metas_spot(data_dir, tasks, spot=False)
-                repo.push_path(data_dir, f"Falling back to on-demand from {repo.gha_url()}")
+                pull_update_push(
+                    data_dir,
+                    f"Falling back to on-demand from {repo.gha_url()}",
+                    lambda: update_task_metas_spot(data_dir, tasks, spot=False),
+                )
             error_msgs.clear()
         if vendor == "aws":
             logger.info(
@@ -3190,15 +3215,26 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         bool(aws_market_modes[0]) if vendor == "aws" and aws_market_modes else None
     )
     with lock:
-        repo.pull()
-        for task in tasks:
-            fields = {}
-            if vendor == "aws":
-                fields["spot"] = initial_spot
-            meta = boot_meta_for_task(task, data_dir, **fields)
-            write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
-            sum_timeout += task.timeout
-        repo.push_path(data_dir, f"Starting server from {repo.gha_url()}")
+        def _write_start_lease() -> None:
+            nonlocal sum_timeout
+            sum_timeout = timedelta()
+            for task in tasks:
+                fields = {}
+                if vendor == "aws":
+                    fields["spot"] = initial_spot
+                meta = boot_meta_for_task(task, data_dir, **fields)
+                write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
+                sum_timeout += task.timeout
+
+        published = pull_update_push(
+            data_dir, f"Starting server from {repo.gha_url()}", _write_start_lease
+        )
+    # should_start only sees the start lease once it is on git; creating
+    # without it lets the next run boot the same SKU again. Nothing durable
+    # happened, so the next scheduled run retries.
+    if not published and repo.should_push():
+        logger.error(f"{vendor}/{server}: start lease was not published; skipping create")
+        return
     timeout_mins = int(sum_timeout.total_seconds()/60)
     shutdown_mins = shutdown_mins_for_inspect(vendor, server, timeout_mins)
     logger.info(
@@ -3235,9 +3271,11 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
         )
         if instance_started and instance_timing.complete() and any(task.always_run for task in tasks):
             with lock:
-                repo.pull()
-                record_timing_api(data_dir, instance_timing.start, instance_timing.end)
-                repo.push_path(data_dir, f"Instance creation timing from {repo.gha_url()}")
+                pull_update_push(
+                    data_dir,
+                    f"Instance creation timing from {repo.gha_url()}",
+                    lambda: record_timing_api(data_dir, instance_timing.start, instance_timing.end),
+                )
         if not instance_started:
             record_instance_start_failure(lock, data_dir, tasks, error_msgs)
         return
@@ -3327,9 +3365,11 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
                     f"{vendor}/{server}: Spot exhausted all regions; falling back to on-demand"
                 )
                 with lock:
-                    repo.pull()
-                    update_task_metas_spot(data_dir, tasks, spot=False)
-                    repo.push_path(data_dir, f"Falling back to on-demand from {repo.gha_url()}")
+                    pull_update_push(
+                        data_dir,
+                        f"Falling back to on-demand from {repo.gha_url()}",
+                        lambda: update_task_metas_spot(data_dir, tasks, spot=False),
+                    )
                 error_msgs.clear()
             logger.info(
                 f"{vendor}/{server}: trying market={'spot' if use_spot else 'on-demand'}"
@@ -3611,9 +3651,11 @@ def start_inspect(executor, lock, data_dir, vendor, server, tasks, srv_data, reg
 
     if instance_started and instance_timing.complete() and any(task.always_run for task in tasks):
         with lock:
-            repo.pull()
-            record_timing_api(data_dir, instance_timing.start, instance_timing.end)
-            repo.push_path(data_dir, f"Instance creation timing from {repo.gha_url()}")
+            pull_update_push(
+                data_dir,
+                f"Instance creation timing from {repo.gha_url()}",
+                lambda: record_timing_api(data_dir, instance_timing.start, instance_timing.end),
+            )
     elif instance_started and any(task.always_run for task in tasks):
         logger.warning(
             f"Instance started but creation timing not captured for {vendor}/{server} "

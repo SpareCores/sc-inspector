@@ -21,6 +21,7 @@ from lib import (
     inspector_user_data_replacements,
     is_region_fatal_error,
     is_sku_fatal_error,
+    pull_update_push,
     pulumi_stack_opts,
     record_instance_start_failure,
     record_timing_api,
@@ -504,12 +505,22 @@ def start_dbaas_inspect(
     sum_timeout = timedelta()
     for task in dbaas_tasks:
         sum_timeout += task.timeout
-    with lock:
-        repo.pull()
+    def _write_start_lease() -> None:
         for task in dbaas_tasks:
             meta = boot_meta_for_task(task, data_dir)
             write_meta(meta, os.path.join(data_dir, task.name, META_NAME))
-        repo.push_path(data_dir, f"Starting DBaaS from {repo.gha_url()}")
+
+    with lock:
+        published = pull_update_push(
+            data_dir, f"Starting DBaaS from {repo.gha_url()}", _write_start_lease
+        )
+    if not published and repo.should_push():
+        logging.error(
+            "%s/%s: DBaaS start lease was not published; skipping create",
+            vendor,
+            target.instance_key,
+        )
+        return
 
     timeout_mins = int(sum_timeout.total_seconds() / 60)
     github_repo = os.environ.get("GITHUB_REPOSITORY", "SpareCores/sc-inspector-data")
@@ -538,9 +549,11 @@ def start_dbaas_inspect(
     )
     if started and instance_timing.complete():
         with lock:
-            repo.pull()
-            record_timing_api(data_dir, instance_timing.start, instance_timing.end)
-            repo.push_path(data_dir, f"DBaaS creation timing from {repo.gha_url()}")
+            pull_update_push(
+                data_dir,
+                f"DBaaS creation timing from {repo.gha_url()}",
+                lambda: record_timing_api(data_dir, instance_timing.start, instance_timing.end),
+            )
     if not started:
         record_instance_start_failure(lock, data_dir, dbaas_tasks, error_msgs)
         # Pre-flight only (SKU not offered / quota / no client in any region):

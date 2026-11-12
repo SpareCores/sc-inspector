@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
+import pytest
+
 import lib
 from variant_id import (
     build_variant_json,
@@ -280,16 +282,58 @@ def test_finalize_marks_placeholder_when_no_variant_has_task(tmp_path: Path):
     assert _sched(tmp_path, task).exit_code == -4
 
 
+def _run_mutator(paths, msg, mutator):
+    mutator()
+    return True
+
+
+@pytest.mark.parametrize(("should_push", "creates"), [(True, False), (False, True)])
+def test_start_inspect_skips_create_without_published_lease(tmp_path: Path, should_push, creates):
+    import threading
+
+    task = _task()
+    sc_runner = mock.MagicMock()
+    with (
+        # sc_runner.resources imports sc_data, which downloads the catalog.
+        mock.patch.dict(
+            "sys.modules",
+            {
+                "sc_runner": sc_runner,
+                "sc_runner.resources": sc_runner.resources,
+                "sc_runner.runner": sc_runner.runner,
+            },
+        ),
+        mock.patch.object(lib, "pull_update_push", return_value=False),
+        mock.patch.object(lib.repo, "should_push", return_value=should_push),
+        mock.patch.object(lib, "record_instance_start_failure") as failure,
+        mock.patch.object(lib, "shutdown_mins_for_inspect", side_effect=RuntimeError("create path")),
+    ):
+        if creates:
+            with pytest.raises(RuntimeError, match="create path"):
+                lib.start_inspect(
+                    None, threading.Lock(), lib.schedule_root(tmp_path), "vultr", "vc2-1c-1gb",
+                    [task], None, ["ewr"], [], {},
+                )
+        else:
+            lib.start_inspect(
+                None, threading.Lock(), lib.schedule_root(tmp_path), "vultr", "vc2-1c-1gb",
+                [task], None, ["ewr"], [], {},
+            )
+    failure.assert_not_called()
+
+
 def test_start_failure_writes_schedule_only(tmp_path: Path):
     import threading
 
     task = _task()
-    with mock.patch.object(lib, "repo"):
+    with mock.patch.object(lib, "repo") as repo_mock:
+        repo_mock.mutate_and_push.side_effect = _run_mutator
         lib.record_instance_start_failure(
             threading.Lock(), lib.schedule_root(tmp_path), [task], [], fallback_msg="boom"
         )
     assert _sched(tmp_path, task).exit_code == -1
     assert lib.variant_roots(tmp_path) == []
+    repo_mock.mutate_and_push.assert_called_once()
 
 
 def test_stale_retry_writes_schedule_only(tmp_path: Path):
@@ -299,12 +343,14 @@ def test_stale_retry_writes_schedule_only(tmp_path: Path):
     with (
         mock.patch.object(lib, "get_tasks", return_value=[task]),
         mock.patch.object(lib, "_task_matches_server_for_start", return_value=True),
-        mock.patch.object(lib, "repo"),
+        mock.patch.object(lib, "repo") as repo_mock,
     ):
+        repo_mock.mutate_and_push.side_effect = _run_mutator
         assert lib.reconcile_stale_start_retries("aws", lib.schedule_root(tmp_path), srv=None)
     sched = _sched(tmp_path, task)
     assert sched.start is None and sched.start_retries == 1
     assert lib.variant_roots(tmp_path) == []
+    repo_mock.mutate_and_push.assert_called_once()
 
 
 def test_cleanup_keeps_pushed_active_nonparallel_task(tmp_path: Path):

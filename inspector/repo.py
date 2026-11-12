@@ -4,7 +4,9 @@ import os
 import psutil
 import random
 import subprocess
+import threading
 import time
+from collections.abc import Callable
 from urllib.parse import urlparse, urlunparse
 from wrapt import synchronized
 
@@ -15,6 +17,12 @@ REPO_PATH = os.environ.get("REPO_PATH")
 
 # Sparse checkout prefix(es) for this inspector run (e.g. data/vultr/vhf-6c-24gb).
 _sparse_paths: tuple[str, ...] | None = None
+
+# One lock for all git working-tree mutations. wrapt @synchronized on each
+# function alone is per-callable, so pull/push could interleave; a shared RLock
+# also covers mutate_and_push so write_meta cannot sit dirty across a concurrent
+# reset --hard.
+_git_lock = threading.RLock()
 
 # subprocess.run(timeout=): on expiry, CPython kills the child then re-raises
 # TimeoutExpired (Lib/subprocess.py). Network git ops get a longer budget.
@@ -266,7 +274,7 @@ def _squash_commit_and_push(
     msg: str,
     changed_files: list[str],
     saved_head: str,
-) -> None:
+) -> bool:
     """
     Publish *only* ``changed_files`` as a single commit on origin/main.
 
@@ -276,10 +284,12 @@ def _squash_commit_and_push(
     checked out from ``saved_head``; paths deleted there (stale stdout/stderr)
     are ``git rm``'d after the reset — ``git checkout saved_head -- deleted``
     would pathspec-fail and wipe the working tree for good.
+
+    Returns True when origin has the intended tree (pushed or already present).
     """
     if not changed_files:
         logging.info("No changed files under %s to push", rel_path)
-        return
+        return False
 
     origin = "origin/main"
     present = [f for f in changed_files if _path_in_commit(repo_root, saved_head, f)]
@@ -313,17 +323,18 @@ def _squash_commit_and_push(
     ).returncode == 0
     if no_staged_changes:
         logging.info("Already up to date with %s for %s after squash", origin, rel_path)
-        return
+        return True
 
     run_git_command(["commit", "-m", msg], cwd=repo_root)
     _push_origin_main(repo_root)
+    return True
 
 
 def _push_origin_main(repo_root: str) -> None:
     run_git_command(["push", "origin", "HEAD:main"], cwd=repo_root)
 
 
-@synchronized
+@synchronized(_git_lock)
 def get_repo(repo_url=REPO_URL, repo_path=REPO_PATH, sparse_paths: tuple[str, ...] | None = None):
     """
     Return git.Repo.
@@ -393,19 +404,27 @@ def run_git_command(args, cwd, *, timeout: int | None = None):
         logging.error(error_msg)
         raise
 
-@synchronized
-def push_paths(paths: list[str | os.PathLike], msg: str):
+@synchronized(_git_lock)
+def push_paths(paths: list[str | os.PathLike], msg: str) -> bool:
     """Commit and squash-push every dirty path in one round.
 
     Callers that update both a variant root and ``schedule/`` must use this (or
     a single ``push_path`` covering both) rather than sequential ``push_path``
     calls: each squash does ``reset --hard origin/main``, which would wipe
     sibling dirty trees that were not part of the first commit.
+
+    Returns True if a commit was published (or origin already had the same
+    tree after squash); False if there was nothing dirty / nothing to auth-push.
     """
+    return _push_paths_locked(paths, msg)
+
+
+def _push_paths_locked(paths: list[str | os.PathLike], msg: str) -> bool:
+    """Push implementation; caller must hold ``_git_lock``."""
     path_list = [os.path.abspath(str(p)) for p in paths]
     logging.info(f"push_paths called for paths: {path_list}, message: {msg}")
     if not path_list:
-        return
+        return False
     if not should_push():
         has_token = bool(os.environ.get("GITHUB_TOKEN"))
         repo_url = os.environ.get("REPO_URL", REPO_URL)
@@ -414,7 +433,7 @@ def push_paths(paths: list[str | os.PathLike], msg: str):
             f"Skipping push: no authentication available "
             f"(GITHUB_TOKEN={has_token}, SSH_URL={is_ssh}, REPO_URL={repo_url})"
         )
-        return
+        return False
     repo_root = _repo_root(path_list[0])
     logging.info(f"Using repo root: {repo_root}")
     try:
@@ -423,7 +442,7 @@ def push_paths(paths: list[str | os.PathLike], msg: str):
         dirty = [p for p in dict.fromkeys(path_list) if path_has_changes(repo_root, p)]
         if not dirty:
             logging.info("No changes detected, skipping git operations")
-            return
+            return False
         rel_paths = [os.path.relpath(p, repo_root) for p in dirty]
         for rel_path in rel_paths:
             _assert_path_in_sparse(rel_path)
@@ -441,7 +460,7 @@ def push_paths(paths: list[str | os.PathLike], msg: str):
         changed_files = list(dict.fromkeys(changed_files))
         if not changed_files:
             logging.info("Commit created but no file-level diff vs origin/main")
-            return
+            return False
         saved_head = run_git_command(["rev-parse", "HEAD"], cwd=repo_root).strip()
         rel_label = ",".join(rel_paths)
         # Retry push with exponential backoff (many inspectors push concurrently)
@@ -460,11 +479,11 @@ def push_paths(paths: list[str | os.PathLike], msg: str):
                     wait_sec = min(wait_sec * 2, max_wait_per_round)
                 logging.info("Fetching origin/main and squashing push...")
                 _fetch_origin_main(repo_root)
-                _squash_commit_and_push(
+                published = _squash_commit_and_push(
                     repo_root, rel_label, msg, changed_files, saved_head
                 )
                 logging.info(f"Successfully pushed changes to git: {msg}")
-                break
+                return published
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
                 attempt += 1
                 if time.monotonic() >= deadline:
@@ -476,12 +495,27 @@ def push_paths(paths: list[str | os.PathLike], msg: str):
         raise
 
 
-def push_path(path: str | os.PathLike, msg: str):
+def push_path(path: str | os.PathLike, msg: str) -> bool:
     """Push a single path; see ``push_paths`` for multi-root updates."""
-    push_paths([path], msg)
+    return push_paths([path], msg)
 
 
-@synchronized
+@synchronized(_git_lock)
+def mutate_and_push(
+    paths: list[str | os.PathLike],
+    msg: str,
+    mutator: Callable[[], None],
+) -> bool:
+    """Run ``mutator`` then push under one git lock.
+
+    Use this whenever local writes must not sit dirty across another thread's
+    ``reset --hard`` (e.g. start-lease ``write_meta`` before create).
+    """
+    mutator()
+    return _push_paths_locked(paths, msg)
+
+
+@synchronized(_git_lock)
 def pull():
     logging.info("Pulling latest changes from remote...")
     repo_root = _repo_root()
