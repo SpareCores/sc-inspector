@@ -32,6 +32,26 @@ def test_regional_cores_exhausted_is_region_fatal():
     )
 
 
+def test_azure_basic_public_ip_limit_is_region_fatal():
+    assert is_region_fatal_error(
+        RuntimeError("update failed"),
+        [
+            'Status=400 Code="IPv4BasicSkuPublicIpCountLimitReached" Message="Cannot create '
+            'more than 20 IPv4 Basic SKU public IP addresses for this subscription in this region."'
+        ],
+    )
+
+
+def test_azure_public_ip_limit_is_region_fatal():
+    assert is_region_fatal_error(
+        RuntimeError("update failed"),
+        [
+            'Status=400 Code="PublicIPCountLimitReached" Message="Cannot create more than '
+            '20 public IP addresses for this subscription in this region."'
+        ],
+    )
+
+
 def test_instance_capacity_is_not_region_fatal():
     assert not is_region_fatal_error(
         RuntimeError("update failed"),

@@ -314,6 +314,42 @@ def _tukey_price_fence(prices: list[float]) -> float | None:
     return q3 + 1.5 * (q3 - q1)
 
 
+def _is_azure_confidential_vm(api_reference: str) -> bool:
+    """True for Azure Confidential VM sizes (DCas/DCes/ECas/ECes and ads/eds variants)."""
+    try:
+        from sc_runner.resources.azure import _azure_confidential_kind
+    except ImportError:
+        return False
+    return _azure_confidential_kind(api_reference) is not None
+
+
+def _drop_unusable_dbaas_clients(
+    vendor: str, location: str, candidates: list[tuple[Any, float]]
+) -> list[tuple[Any, float]]:
+    """Remove client sizes that cannot (or should not) drive a DBaaS benchmark.
+
+    Azure Confidential VM sizes are excluded: sc-runner's DBaaS stack creates the
+    client without the ConfidentialVM security profile / CVM image, so Azure
+    rejects the create; their memory encryption would also make the client a
+    non-neutral load generator, and their scarce quota is needed for the CVM
+    server benchmarks themselves.
+    """
+    if vendor != "azure":
+        return candidates
+    kept = []
+    for server, price in candidates:
+        if _is_azure_confidential_vm(server.api_reference):
+            logging.info(
+                "Skipping DBaaS client %s in %s/%s: confidential VM size",
+                server.api_reference,
+                vendor,
+                location,
+            )
+            continue
+        kept.append((server, price))
+    return kept
+
+
 def rank_dbaas_client_instances(
     vendor: str, location: str, req: DbaasClientRequirements
 ) -> list[Any]:
@@ -324,13 +360,19 @@ def rank_dbaas_client_instances(
     Prefers dedicated CPUs; falls back to SHARED when none are in-band
     (UpCloud catalogues all cloud VMs as SHARED).
     """
-    candidates = _eligible_dbaas_clients_with_prices(vendor, location, req)
+    candidates = _drop_unusable_dbaas_clients(
+        vendor, location, _eligible_dbaas_clients_with_prices(vendor, location, req)
+    )
     if not candidates:
-        candidates = _eligible_dbaas_clients_with_prices(
+        candidates = _drop_unusable_dbaas_clients(
             vendor,
             location,
-            req,
-            cpu_allocations=_DBAAS_CPU_ALLOCATIONS_FALLBACK,
+            _eligible_dbaas_clients_with_prices(
+                vendor,
+                location,
+                req,
+                cpu_allocations=_DBAAS_CPU_ALLOCATIONS_FALLBACK,
+            ),
         )
         if candidates:
             logging.info(
