@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass
-from functools import cache, lru_cache
+from functools import lru_cache
 from typing import Any
 
 import requests
@@ -40,36 +40,6 @@ def _skip_quota_check() -> bool:
 
 def _subscription_id() -> str | None:
     return os.environ.get("ARM_SUBSCRIPTION_ID") or os.environ.get("AZURE_SUBSCRIPTION_ID")
-
-
-@cache
-def _catalog_engine():
-    from sqlmodel import create_engine
-
-    import sc_data
-
-    return create_engine(f"sqlite:///{sc_data.db.path}")
-
-
-@lru_cache(maxsize=512)
-def _catalog_server_family(vendor: str, api_reference: str) -> str | None:
-    """Server.family from sc-data (derived from Azure Resource SKUs at crawl time)."""
-    from sc_crawler.tables import Server
-    from sqlmodel import Session, select
-
-    with Session(_catalog_engine()) as session:
-        return session.exec(
-            select(Server.family)
-            .where(Server.vendor_id == vendor)
-            .where(Server.api_reference == api_reference)
-        ).first()
-
-
-def _quota_family_from_catalog_family(catalog_family: str) -> str:
-    """Reverse sc-crawler family normalization back to Azure quota usage keys."""
-    if catalog_family.startswith("Standard"):
-        return f"{catalog_family}Family"
-    return f"standard{catalog_family}Family"
 
 
 def _use_oidc() -> bool:
@@ -178,12 +148,12 @@ def sku_family_quota_name(
     *,
     subscription_id: str | None = None,
     region: str | None = None,
-    vendor: str = "azure",
 ) -> str | None:
-    """Map an Azure VM or Flexible Server SKU name to a quota family key."""
-    catalog_family = _catalog_server_family(vendor, sku)
-    if catalog_family:
-        return _quota_family_from_catalog_family(catalog_family)
+    """Azure quota family key (e.g. standardDADSv6Family) of a VM or Flexible Server SKU.
+
+    Taken from the ARM Resource SKUs API: the sc-data ``family`` column is a workload
+    class (e.g. General Purpose) and ``series`` is normalized, neither is a quota key.
+    """
     if subscription_id and region:
         return _compute_sku_info(subscription_id, region, sku).family
     return None
@@ -209,7 +179,8 @@ def _quota_headroom(
         return True, ""
     family_entry = _quota_lookup(quotas, family)
     if family_entry is None:
-        logging.warning("%s: quota family %s not returned by Azure", label, family)
+        # e.g. Flexible Server usages only list some (v3-v5) families, none for v6 SKUs
+        logging.info("%s: no %s quota listed by Azure, only regional cores checked", label, family)
         return True, ""
     if family_entry.available < vcpus:
         return False, (
@@ -368,11 +339,7 @@ def _evaluate_client_vm_quota(
             return False, f"client vm SKU {vm_sku} not offered in {region}"
     elif sku_info is None:
         sku_info = _compute_sku_info(subscription_id, region, vm_sku)
-    vm_family = sku_family_quota_name(
-        vm_sku,
-        subscription_id=subscription_id,
-        region=region,
-    ) or sku_info.family
+    vm_family = sku_info.family
     quotas = vm_quotas if vm_quotas is not None else _vm_quotas(subscription_id, region)
     ok, reason = _quota_headroom(
         quotas,
